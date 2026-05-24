@@ -1,0 +1,204 @@
+# Stripe — baked source connector. Resource-as-stream over the standard REST
+# API at https://api.stripe.com/v1: one stream per Stripe object type, paginated
+# with cursor-based `starting_after` + `has_more`, incremental on the Unix
+# `created` timestamp (`cursor_type: int`) via `created[gte]=<ts>` filtering.
+# Auth: HTTP `Authorization: Bearer <restricted_key>`.
+#
+# The v1 design decision (resource-as-stream, NOT Sigma query-as-stream) is
+# documented in docs/connectors/stripe-research.md. Sigma's POST /v2/data/
+# reporting/query_runs is a preview, paid, polled, CSV-download surface; it is
+# deferred to v2 as an opt-in second stream type.
+#
+# NOTE: every stream that declares an explicit `schema` must include
+# `{name: created, type: INTEGER, mode: REQUIRED}` — `StreamDef.__post_init__`
+# enforces "incremental.cursor_field must appear in the declared schema", and
+# `cursor_type: int` means the cursor column is a Unix-timestamp integer, not
+# a TIMESTAMP. The research note's TIMESTAMP example was for `cursor_type:
+# timestamp`; this v1 pins `int` so the engine exercises that cursor type.
+#
+# NOTE: the Sigma query-as-stream model — each stream = a user SQL query, GAQL
+# analogue — is deliberately NOT shipped in v1. See
+# docs/connectors/stripe-research.md §"Recommended connector design for
+# simpl.E" for why (preview API, paid subscription, ~3h data lag) and the
+# sketch of how a future opt-in `sigma_query` stream type would map onto the
+# contract.
+name: stripe
+kind: source
+version: "1.0.0"
+summary: Stripe payments data via the standard REST API (resource-as-stream).
+tags: [saas, payments, stripe, rest]
+
+requires:
+  - "requests>=2.31"
+
+params:
+  base_url:
+    type: string
+    default: "https://api.stripe.com/v1"
+    description: Stripe REST API base URL — overridable for stubbed tests.
+
+  # The Stripe API version header pin. Per the research note this was the
+  # latest GA at the time of authoring. Re-verify against
+  # https://docs.stripe.com/api/versioning before bumping; see
+  # docs/connectors/stripe-research.md for the source of this pin.
+  api_version:
+    type: string
+    default: "2024-12-18.acacia"
+    description: Value of the `Stripe-Version` header. Pinned to a GA version.
+
+  page_size:
+    type: int
+    default: 100
+    description: Records per API page (Stripe's max is 100).
+
+  max_retries:
+    type: int
+    default: 5
+    description: Retries for 429 / 5xx responses before giving up.
+
+  retry_backoff_seconds:
+    type: float
+    default: 1.0
+    description: Base seconds for exponential backoff on retry (1.0, 2.0, 4.0, ...).
+
+  # Stripe's live-mode default rate limit is ~100 requests/sec; test mode is
+  # lower. 25/sec is a conservative default that stays well below either.
+  requests_per_second:
+    type: float
+    default: 25.0
+    description: Client-side token-bucket rate limit (requests per second).
+
+  timeout_seconds:
+    type: float
+    default: 30.0
+    description: Per-request HTTP timeout in seconds.
+
+secrets:
+  # Restricted, read-scoped Stripe API key — used as `Authorization: Bearer`.
+  # See the README for which restricted-key scopes the v1 streams need.
+  - name: api_key
+    ref: ${env.STRIPE_API_KEY}
+
+streams:
+  - name: charges
+    table: stripe_charges
+    primary_key: id
+    write_disposition: merge
+    partition_by: created
+    incremental:
+      cursor_field: created
+      cursor_type: int
+      lookback: 6h
+      initial_value: "1704067200"   # 2024-01-01T00:00:00Z Unix timestamp
+    params:
+      endpoint:
+        type: string
+        default: "/charges"
+      extra_query_params_json:
+        type: string
+        default: ""
+        description: Optional JSON-encoded dict merged into the query string.
+    schema:
+      - {name: id,        type: STRING,  mode: REQUIRED}
+      - {name: object,    type: STRING}
+      - {name: created,   type: INTEGER, mode: REQUIRED}
+      - {name: livemode,  type: BOOLEAN}
+      - {name: amount,    type: INTEGER}
+      - {name: currency,  type: STRING}
+      - {name: status,    type: STRING}
+      - {name: customer,  type: STRING}
+      - {name: description,         type: STRING}
+      - {name: payment_method_details, type: JSON}
+      - {name: metadata,  type: JSON}
+
+  - name: invoices
+    table: stripe_invoices
+    primary_key: id
+    write_disposition: merge
+    partition_by: created
+    incremental:
+      cursor_field: created
+      cursor_type: int
+      lookback: 6h
+      initial_value: "1704067200"
+    params:
+      endpoint:
+        type: string
+        default: "/invoices"
+      extra_query_params_json:
+        type: string
+        default: ""
+    schema:
+      - {name: id,            type: STRING,  mode: REQUIRED}
+      - {name: object,        type: STRING}
+      - {name: created,       type: INTEGER, mode: REQUIRED}
+      - {name: livemode,      type: BOOLEAN}
+      - {name: customer,      type: STRING}
+      - {name: status,        type: STRING}
+      - {name: amount_due,    type: INTEGER}
+      - {name: amount_paid,   type: INTEGER}
+      - {name: currency,      type: STRING}
+      - {name: number,        type: STRING}
+      - {name: lines,         type: JSON}
+      - {name: metadata,      type: JSON}
+
+  - name: customers
+    table: stripe_customers
+    primary_key: id
+    write_disposition: merge
+    partition_by: created
+    incremental:
+      cursor_field: created
+      cursor_type: int
+      lookback: 6h
+      initial_value: "1704067200"
+    params:
+      endpoint:
+        type: string
+        default: "/customers"
+      extra_query_params_json:
+        type: string
+        default: ""
+    schema:
+      - {name: id,            type: STRING,  mode: REQUIRED}
+      - {name: object,        type: STRING}
+      - {name: created,       type: INTEGER, mode: REQUIRED}
+      - {name: livemode,      type: BOOLEAN}
+      - {name: email,         type: STRING}
+      - {name: name,          type: STRING}
+      - {name: description,   type: STRING}
+      - {name: currency,      type: STRING}
+      - {name: delinquent,    type: BOOLEAN}
+      - {name: metadata,      type: JSON}
+
+  - name: subscriptions
+    table: stripe_subscriptions
+    primary_key: id
+    write_disposition: merge
+    partition_by: created
+    incremental:
+      cursor_field: created
+      cursor_type: int
+      lookback: 6h
+      initial_value: "1704067200"
+    params:
+      endpoint:
+        type: string
+        default: "/subscriptions"
+      extra_query_params_json:
+        type: string
+        default: ""
+    schema:
+      - {name: id,             type: STRING,  mode: REQUIRED}
+      - {name: object,         type: STRING}
+      - {name: created,        type: INTEGER, mode: REQUIRED}
+      - {name: livemode,       type: BOOLEAN}
+      - {name: customer,       type: STRING}
+      - {name: status,         type: STRING}
+      - {name: currency,       type: STRING}
+      - {name: items,          type: JSON}
+      - {name: metadata,       type: JSON}
+
+# `destination:` omitted — defers to the project default (docs/03 §2.3).
+
+schedule: "0 */6 * * *"

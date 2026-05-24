@@ -382,15 +382,41 @@ def _batch_columns(batch: list[dict[str, Any]]) -> tuple[str, ...]:
 def _encode_value(value: Any) -> Any:
     """Coerce a record value into something DuckDB's parameter binding accepts.
 
-    ``dict`` / ``list`` values target a ``JSON`` column; DuckDB's JSON type
-    ingests a JSON-*text* string, so they are ``json.dumps``-serialized here.
-    Every other value (scalars, ``datetime``, ``None``) is bound as-is — DuckDB
-    handles those natively. This is the single place nested data is encoded, so
-    every disposition's insert path goes through it.
+    Used by the *data* insert paths (``append`` / ``merge`` / ``replace``),
+    where each bind targets a *typed* column (``VARCHAR`` / ``BIGINT`` /
+    ``TIMESTAMP`` / …). ``dict`` / ``list`` values target a ``JSON`` column
+    and are ``json.dumps``-serialized; every other value (scalars,
+    ``datetime``, ``None``) is bound as-is — DuckDB handles those natively.
+
+    Do *not* use this for binds that target a ``JSON`` column directly (e.g.
+    ``_simple_e_state.cursor_value`` / ``state_blob``) — a bare scalar string
+    is not valid JSON text and DuckDB rejects it. Use
+    :func:`_encode_json_column` instead.
     """
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     return value
+
+
+def _encode_json_column(value: Any) -> Any:
+    """Serialize *any* value for binding into a DuckDB ``JSON`` column.
+
+    DuckDB's ``JSON`` type ingests a JSON-*text* string, so every non-``None``
+    value — including bare scalars — must be ``json.dumps``-serialized first.
+    Otherwise a string cursor like ``"2026-05-20T00:00:00"`` raises a
+    ``ConversionException`` on commit (malformed JSON). ``None`` stays
+    ``NULL``; ``datetime`` / ``date`` are serialized via ``default=str`` so
+    they round-trip cleanly through :func:`_decode_json`.
+
+    Used at every bind into ``_simple_e_state.cursor_value`` and
+    ``_simple_e_state.state_blob``. The split from :func:`_encode_value` (the
+    data-insert path) is deliberate — data binds go to typed columns; state
+    binds go to JSON columns. Conflating them was a real bug surfaced by the
+    stage-7 connector builds: a string-cursor source could not commit state.
+    """
+    if value is None:
+        return None
+    return json.dumps(value, default=str)
 
 
 def _row_tuple(record: dict[str, Any], columns: tuple[str, ...]) -> list[Any]:
@@ -626,9 +652,9 @@ def commit_state(conn: DuckConn, run_id: str, records: list[StateRecord]) -> Non
             [
                 row["connector"],
                 row["stream"],
-                _encode_value(row["cursor_value"]),
+                _encode_json_column(row["cursor_value"]),
                 row["cursor_type"],
-                _encode_value(row["state_blob"]),
+                _encode_json_column(row["state_blob"]),
                 row["last_run_id"],
                 row["rows_total"],
                 row["updated_at"],

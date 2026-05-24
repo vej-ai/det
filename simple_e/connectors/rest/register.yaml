@@ -1,0 +1,104 @@
+# Generic REST source — pre-baked connector for any paginated REST/JSON API.
+#
+# kind: source. The YAML carries only the connector-wide *strategy knobs* the
+# contract supports (docs/03 §2.4); the per-stream API config (endpoint,
+# record_path, next_cursor_path, extra_query_params) lives in Python in
+# source.py — the contract's `ParamSpec` is restricted to string/int/float/bool
+# scalars, so list/dict per-stream config cannot live in `streams[].params`
+# without modifying types.py (off-limits for this connector). The README
+# documents the authoring pattern: each declared stream gets a tiny @stream
+# function that calls the shared `extract_stream(...)` helper with its
+# endpoint + record_path + pagination params.
+name: rest
+kind: source
+version: "1.0.0"
+summary: A generic source for any paginated REST/HTTP JSON API.
+tags: [rest, http, api, generic]
+
+# Connector-wide strategy knobs (docs/03 §2.4). Defaults work for a typical
+# bearer-authenticated, cursor-paginated JSON API.
+params:
+  base_url:
+    type: string
+    required: true
+    description: API base URL, e.g. https://api.example.com/v3.
+  auth_type:
+    type: string
+    default: "none"
+    description: One of none, bearer, basic, api_key_header, api_key_query.
+  auth_header_name:
+    type: string
+    default: "Authorization"
+    description: Header name to send the token under (api_key_header mode).
+  auth_query_param:
+    type: string
+    default: "api_key"
+    description: Query parameter name to send the token as (api_key_query mode).
+  pagination_strategy:
+    type: string
+    default: "cursor"
+    description: One of cursor, offset, page, link_header, none.
+  page_size:
+    type: int
+    default: 100
+    description: Records per page (limit / per_page / page-size header).
+  max_retries:
+    type: int
+    default: 5
+    description: Retries on 429/500/502/503/504; Retry-After is honored.
+  retry_backoff_seconds:
+    type: float
+    default: 1.0
+    description: urllib3 Retry backoff factor between retries.
+  requests_per_second:
+    type: float
+    default: 0
+    description: Rate limit cap (0 = unlimited).
+  timeout_seconds:
+    type: float
+    default: 30.0
+    description: Per-request timeout in seconds.
+
+# The auth credential — referenced from the environment via the connector
+# contract's secrets resolution (docs/03 §2.5). The connector body reads it as
+# config.secrets["api_token"]; the engine resolves it lazily and never logs it.
+secrets:
+  - name: api_token
+    ref: ${env.REST_API_TOKEN}
+
+# Two example streams — copy the pattern (a stream declaration here, a
+# matching @stream function in source.py) to add your own. Each stream's
+# endpoint / record_path / pagination details are configured in Python.
+streams:
+  # A cursor-paginated stream against /items, incremental on a numeric
+  # `updated_at` (unix-epoch ms). A *timestamp* cursor would also work in the
+  # connector, but storing timestamp cursor values requires the DuckDB
+  # destination to JSON-encode bare strings — currently DuckDB writes them
+  # as raw text into its JSON column and rejects them on commit. See the
+  # README's "Known limitations" note and report.
+  - name: items
+    table: rest_items
+    primary_key: id
+    write_disposition: merge
+    incremental:
+      cursor_field: updated_at
+      cursor_type: int
+      initial_value: "0"
+    schema:
+      - {name: id,         type: STRING,    mode: REQUIRED}
+      - {name: name,       type: STRING}
+      - {name: updated_at, type: INTEGER}
+
+  # A simpler append-only stream against /events with no incremental cursor.
+  - name: events
+    table: rest_events
+    write_disposition: append
+    schema:
+      - {name: id,         type: STRING,    mode: REQUIRED}
+      - {name: kind,       type: STRING}
+      - {name: created_at, type: TIMESTAMP}
+
+# Bind to the pre-baked DuckDB destination (docs/03 §2.3). Override via the
+# project / target if you want a different warehouse.
+destination:
+  connector: duckdb

@@ -28,6 +28,8 @@ dependencies = [
     "pyyaml",
     "click",
     "duckdb",
+    "requests>=2.31",
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -37,7 +39,11 @@ dev = [
     "ruff",
     "mypy",
     "types-PyYAML",
+    "types-requests",
 ]
+parquet = ["pyarrow>=15"]
+gcs = ["google-cloud-storage>=2.10"]
+s3 = ["boto3>=1.28"]
 
 [project.scripts]
 simple-e = "simple_e.cli:main"
@@ -81,3 +87,6 @@ no_implicit_optional = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: tests that need a live external service (gated by env var, e.g. POSTGRES_TEST_URL)",
+]

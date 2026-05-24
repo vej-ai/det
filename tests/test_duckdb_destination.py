@@ -498,6 +498,42 @@ def test_commit_state_then_read_state_round_trip(
     assert rec.updated_at == datetime(2026, 5, 22, 12, 0, 0)
 
 
+def test_commit_state_round_trip_string_cursor_value(
+    duckdb_destination: LoadedConnector, duckdb_path: str
+) -> None:
+    """A *string* cursor_value commits and reads back intact.
+
+    Regression: stage-7 connector builds (REST, Filesystem, ShipHero, Stripe
+    where applicable) all hit the same bug — ``cursor_value`` lands in a
+    DuckDB ``JSON`` column, and a bare scalar string like
+    ``"2026-05-20T00:00:00"`` is not valid JSON text, so commit raised
+    ``ConversionException``. The fix routes state binds through
+    ``_encode_json_column`` (which serializes scalars too), distinct from the
+    typed-column data-insert path. This test pins the fix in.
+    """
+    hooks = _hooks(duckdb_destination)
+    conn = _open(duckdb_destination, duckdb_path)
+
+    rec = StateRecord(
+        connector="src",
+        stream="rows",
+        cursor_value="2026-05-20T00:00:00",
+        cursor_type=CursorType.STRING,
+        rows_total=7,
+    )
+    hooks["commit_state"](conn, "run-str", [rec])
+    hooks["close"](conn)
+
+    conn = _open(duckdb_destination, duckdb_path)
+    loaded = hooks["read_state"](conn, "src")
+    hooks["close"](conn)
+
+    assert len(loaded) == 1
+    assert loaded[0].cursor_value == "2026-05-20T00:00:00"
+    assert loaded[0].cursor_type is CursorType.STRING
+    assert loaded[0].rows_total == 7
+
+
 def test_commit_state_upserts_on_connector_stream_key(
     duckdb_destination: LoadedConnector,
     duckdb_path: str,
