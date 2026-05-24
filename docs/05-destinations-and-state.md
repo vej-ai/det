@@ -1,9 +1,9 @@
 # 05 — Destinations and State
 
-> Part of the simpl.E design handbook. See [README.md](./README.md) for the full table of contents.
+> Part of the det design handbook. See [README.md](./README.md) for the full table of contents.
 > Prerequisites: [03 — The Connector Contract](./03-connector-contract.md), [04 — The Connector Body](./04-connector-body.md).
 
-This section specifies how simpl.E **loads** data and how it remembers **where it left off**. It is the architectural keystone of the tool: state is what makes incremental extraction correct, and the destination is where state lives.
+This section specifies how det **loads** data and how it remembers **where it left off**. It is the architectural keystone of the tool: state is what makes incremental extraction correct, and the destination is where state lives.
 
 ---
 
@@ -22,11 +22,11 @@ What makes a connector a *destination* rather than a *source* is the **direction
 
 ### 1.1 The `Destination` interface
 
-A destination connector implements a small set of decorated functions. simpl.E discovers them by decorator, the same way it discovers `@stream` functions in a source.
+A destination connector implements a small set of decorated functions. det discovers them by decorator, the same way it discovers `@stream` functions in a source.
 
 ```python
 # bigquery/destination.py
-from simple_e import destination, Capability, Config, Batch, StreamMeta, StateRecord
+from det import destination, Capability, Config, Batch, StreamMeta, StateRecord
 
 @destination.capabilities
 def capabilities() -> set[Capability]:
@@ -73,7 +73,7 @@ def close(conn) -> None:
 
 Only `open`, `write_batch`, `ensure_schema`, and `close` are mandatory. `commit_state` / `read_state` are mandatory **only** if the destination declares `Capability.STATE`; otherwise the engine routes state to a companion state backend (see §6). `transaction` is mandatory **only** if the destination declares `Capability.TRANSACTIONAL_LOAD`.
 
-`@destination.transaction` is a **context-manager hook** — a destination that declares `Capability.TRANSACTIONAL_LOAD` provides it, and the engine enters it once per stream, wrapping that stream's `[write_batch… → commit_state]` block (but **not** `ensure_schema`, whose DDL may implicitly commit). On a clean exit the data and the advanced cursor flip atomically; on any exception the partial load rolls back. This is what makes an `append` stream crash-safe — without it, every mid-stream crash would leave half-written rows that the re-run duplicates. Per-stream scope matches simpl.E's per-stream commit model (§5.3).
+`@destination.transaction` is a **context-manager hook** — a destination that declares `Capability.TRANSACTIONAL_LOAD` provides it, and the engine enters it once per stream, wrapping that stream's `[write_batch… → commit_state]` block (but **not** `ensure_schema`, whose DDL may implicitly commit). On a clean exit the data and the advanced cursor flip atomically; on any exception the partial load rolls back. This is what makes an `append` stream crash-safe — without it, every mid-stream crash would leave half-written rows that the re-run duplicates. Per-stream scope matches det's per-stream commit model (§5.3).
 
 ```python
 @destination.transaction
@@ -100,7 +100,7 @@ open → read_state → [ ensure_schema → ⟨transaction: write_batch ... → 
 
 ## 2. Pre-baked destination catalog
 
-simpl.E ships destinations **inside the `simple_e` package**. They are referenced by short name in `profiles.yml` (`type: bigquery`) — no folder needed in the user's project. Users can also author **custom destinations** as project-local connector folders (§7).
+det ships destinations **inside the `det` package**. They are referenced by short name in `profiles.yml` (`type: bigquery`) — no folder needed in the user's project. Users can also author **custom destinations** as project-local connector folders (§7).
 
 | Destination | How it loads | Tier | v1? |
 |---|---|---|---|
@@ -116,7 +116,7 @@ simpl.E ships destinations **inside the `simple_e` package**. They are reference
 
 ### Tier definitions
 
-- **Tier A — state-capable.** The destination can store rows in itself, so it owns the `_simple_e_state` table. State and data live in the same system; a load and its state commit can be made consistent.
+- **Tier A — state-capable.** The destination can store rows in itself, so it owns the `_det_state` table. State and data live in the same system; a load and its state commit can be made consistent.
 - **Tier B — stateless storage.** Object stores (GCS/S3) have no tables. They cannot answer "what was the last cursor value?" cheaply or transactionally. They require a **companion state backend** (§6).
 
 This single distinction — driven by the `Capability.STATE` flag — is the only place destination heterogeneity leaks into the engine.
@@ -127,11 +127,11 @@ This single distinction — driven by the `Capability.STATE` flag — is the onl
 
 ### 3.1 From declared schema to DDL
 
-A source stream declares its schema (see [03 — The Connector Contract](./03-connector-contract.md)). simpl.E carries this as a `Schema` object: an ordered list of `(name, type, nullable)` fields, plus optional `primary_key`. The destination's `ensure_schema` translates `Schema` into native DDL.
+A source stream declares its schema (see [03 — The Connector Contract](./03-connector-contract.md)). det carries this as a `Schema` object: an ordered list of `(name, type, nullable)` fields, plus optional `primary_key`. The destination's `ensure_schema` translates `Schema` into native DDL.
 
-simpl.E uses a small, **portable type system**. Connectors never emit native warehouse types directly:
+det uses a small, **portable type system**. Connectors never emit native warehouse types directly:
 
-| simpl.E type | BigQuery | DuckDB | Postgres | Snowflake |
+| det type | BigQuery | DuckDB | Postgres | Snowflake |
 |---|---|---|---|---|
 | `string` | `STRING` | `VARCHAR` | `text` | `VARCHAR` |
 | `int` | `INT64` | `BIGINT` | `bigint` | `NUMBER(38,0)` |
@@ -142,15 +142,15 @@ simpl.E uses a small, **portable type system**. Connectors never emit native war
 | `json` | `JSON` | `JSON` | `jsonb` | `VARIANT` |
 | `bytes` | `BYTES` | `BLOB` | `bytea` | `BINARY` |
 
-If a stream does not declare a schema, simpl.E **infers** one from the first batch and treats every field as nullable. Inference is convenient for prototyping but a declared schema is recommended for production — it makes schema drift a *decision*, not an accident.
+If a stream does not declare a schema, det **infers** one from the first batch and treats every field as nullable. Inference is convenient for prototyping but a declared schema is recommended for production — it makes schema drift a *decision*, not an accident.
 
 ### 3.2 Schema evolution policy
 
-simpl.E keeps schema evolution deliberately minimal. The default policy:
+det keeps schema evolution deliberately minimal. The default policy:
 
 - **Additive columns — automatic.** A new field appearing in the source is added with `ALTER TABLE ADD COLUMN`, nullable. Existing rows get `NULL`.
 - **Widening type changes — automatic where the destination allows it** (`int` → `float`, `string` length). Done via the destination's native type-relaxation; skipped if unsupported.
-- **Dropped columns — ignored.** A field that disappears from the source is left in the destination table (now always `NULL` for new rows). simpl.E never drops columns.
+- **Dropped columns — ignored.** A field that disappears from the source is left in the destination table (now always `NULL` for new rows). det never drops columns.
 - **Incompatible type changes — hard error.** `string` → `int` on an existing column fails the run with a clear message. The fix is an explicit `--full-refresh` (recreates the table) or a manual migration.
 
 This is governed by `Capability.SCHEMA_EVOLUTION`. A destination without it (rare) fails any run whose schema differs from the existing table.
@@ -182,11 +182,11 @@ If a stream requests a disposition the destination cannot satisfy, the run **fai
 
 ## 5. State design
 
-State is what makes incremental loads correct. simpl.E stores it **in the destination** (Tier A) so that data and the record of "what we loaded" live in one system and advance together.
+State is what makes incremental loads correct. det stores it **in the destination** (Tier A) so that data and the record of "what we loaded" live in one system and advance together.
 
-### 5.1 The `_simple_e_state` table
+### 5.1 The `_det_state` table
 
-One row per `(connector, stream)`. The cursor value is stored as JSON so it can hold a timestamp, an integer ID, an opaque pagination token, or a composite. This is the canonical schema — eight columns; `simple_e/types.py` is the source of truth and this table follows it.
+One row per `(connector, stream)`. The cursor value is stored as JSON so it can hold a timestamp, an integer ID, an opaque pagination token, or a composite. This is the canonical schema — eight columns; `det/types.py` is the source of truth and this table follows it.
 
 | Column | Type | Description |
 |---|---|---|
@@ -195,17 +195,17 @@ One row per `(connector, stream)`. The cursor value is stored as JSON so it can 
 | `cursor_value` | `json` | Last successfully loaded cursor value. The resume point. `NULL` for full-refresh streams. |
 | `cursor_type` | `string` | `timestamp` / `date` / `int` / `string` — how to deserialize `cursor_value`. `NULL` when no cursor. |
 | `state_blob` | `json` | The per-stream `State` scratch space (free-form key/value), persisted between runs. |
-| `last_run_id` | `string` | `run_id` of the run that last advanced this row. Joins to `_simple_e_runs` for the full audit chain. |
+| `last_run_id` | `string` | `run_id` of the run that last advanced this row. Joins to `_det_runs` for the full audit chain. |
 | `rows_total` | `int` | Cumulative rows ever loaded for this stream (informational). |
 | `updated_at` | `timestamp` | When this row was last committed. |
 
-`cursor_field` is **not** a column — it is recoverable from the stream's manifest. `last_run_at` is **not** a column — it is recoverable by joining `_simple_e_runs` on `last_run_id`.
+`cursor_field` is **not** a column — it is recoverable from the stream's manifest. `last_run_at` is **not** a column — it is recoverable by joining `_det_runs` on `last_run_id`.
 
-Primary key: `(connector, stream)`. The table is created lazily by `ensure_schema` on first run, in the same dataset/schema as the loaded tables, prefixed `_simple_e_` so it sorts away from user tables.
+Primary key: `(connector, stream)`. The table is created lazily by `ensure_schema` on first run, in the same dataset/schema as the loaded tables, prefixed `_det_` so it sorts away from user tables.
 
 ### 5.2 The `StateRecord`
 
-In the library, state is a typed object passed between the engine and the destination — one `StateRecord` per `_simple_e_state` row. It is **mutable**: the engine advances `rows_total` / `updated_at` in place across a run, then `to_row()` / `from_row()` form the persistence boundary.
+In the library, state is a typed object passed between the engine and the destination — one `StateRecord` per `_det_state` row. It is **mutable**: the engine advances `rows_total` / `updated_at` in place across a run, then `to_row()` / `from_row()` form the persistence boundary.
 
 ```python
 @dataclass
@@ -227,7 +227,7 @@ The non-negotiable rule: **state is committed only after the data load fully suc
 ```
 1. open + read_state          → engine learns each stream's resume cursor
 2. extract + write_batch...    → all batches for all streams persisted
-3. commit_state                → _simple_e_state updated, one transaction if possible
+3. commit_state                → _det_state updated, one transaction if possible
 4. close
 ```
 
@@ -239,7 +239,7 @@ Crash semantics: if step 3 fails after step 2 succeeded, the run is reported `fa
 
 ### 5.4 The capability-tier model and `state_backend()`
 
-Tier B destinations (object storage) cannot host `_simple_e_state`. The engine resolves this through a **state backend** — a small interface, separate from the destination, that owns only state I/O:
+Tier B destinations (object storage) cannot host `_det_state`. The engine resolves this through a **state backend** — a small interface, separate from the destination, that owns only state I/O:
 
 ```python
 class StateBackend(Protocol):
@@ -261,14 +261,14 @@ Resolution at run start:
 1. If the destination declares `Capability.STATE` → it **is** its own state backend; the engine calls `read_state` / `commit_state` directly on it.
 2. Otherwise the engine calls `state_backend(conn, config)` to obtain one.
 
-The **default** Tier-B backend is the **sidecar JSON file** — `_simple_e_state.json` written next to the data in the same bucket/prefix:
+The **default** Tier-B backend is the **sidecar JSON file** — `_det_state.json` written next to the data in the same bucket/prefix:
 
 ```
 gs://my-bucket/exports/stripe/charges/part-0001.parquet
-gs://my-bucket/exports/_simple_e_state.json     ← sidecar state
+gs://my-bucket/exports/_det_state.json     ← sidecar state
 ```
 
-The sidecar is read at run start and rewritten (whole file, last-write-wins) at `commit_state`. It is simple, needs no extra infrastructure, and is co-located with the data. Its limit is **concurrency**: two runs writing the same bucket can clobber each other's state. simpl.E mitigates with a best-effort lock object (`_simple_e_state.lock`) and documents that concurrent runs to one Tier-B prefix are unsupported.
+The sidecar is read at run start and rewritten (whole file, last-write-wins) at `commit_state`. It is simple, needs no extra infrastructure, and is co-located with the data. Its limit is **concurrency**: two runs writing the same bucket can clobber each other's state. det mitigates with a best-effort lock object (`_det_state.lock`) and documents that concurrent runs to one Tier-B prefix are unsupported.
 
 For users who need stronger guarantees, `StateBackend` is **pluggable** — `profiles.yml` may point a Tier-B destination at an explicit backend:
 
@@ -313,7 +313,7 @@ config:
 # destinations/webhook_sink/destination.py
 import json
 import urllib.request
-from simple_e import destination, Capability
+from det import destination, Capability
 
 @destination.capabilities
 def capabilities():
@@ -349,7 +349,7 @@ def close(conn):
 Because `capabilities()` returns an empty set, the engine knows this destination is Tier B with no merge support. It will:
 
 - reject any stream that requests `merge` or `replace` at planning time, with a clear message;
-- require a state backend for incremental streams — since none is configured, it falls back to the **sidecar** backend, which a pure-HTTP destination has no place to write. So this destination is only valid for **full-refresh** streams. simpl.E surfaces exactly that constraint at planning time rather than failing mysteriously mid-run.
+- require a state backend for incremental streams — since none is configured, it falls back to the **sidecar** backend, which a pure-HTTP destination has no place to write. So this destination is only valid for **full-refresh** streams. det surfaces exactly that constraint at planning time rather than failing mysteriously mid-run.
 
 This is the whole point of the capability model: a destination author declares what they can do in one function, and the engine does the rest.
 
@@ -358,4 +358,4 @@ This is the whole point of the capability model: a destination author declares w
 - Connector folder layout & `register.yaml` schema → [03 — The Connector Contract](./03-connector-contract.md)
 - Targets, `profiles.yml`, config precedence → [07 — CLI and Library API](./07-cli-and-library-api.md)
 - Credentials for destinations → [08 — Security](./08-security.md)
-- Run records (`_simple_e_runs`) → [09 — Logging and Observability](./09-logging-and-observability.md)
+- Run records (`_det_runs`) → [09 — Logging and Observability](./09-logging-and-observability.md)

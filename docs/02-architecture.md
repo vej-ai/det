@@ -1,20 +1,20 @@
 # 02 — Architecture
 
-> Part of the **simpl.E** design handbook. This file describes the core engine.
+> Part of the **det** design handbook. This file describes the core engine.
 > The **connector contract**, the **destination capability tiers**, and the
 > **CLI surface** are referenced here but fully specified by other handbook
 > files — this document defines how the engine *uses* them, not their details.
 
 ## The triad: engine / library / project
 
-simpl.E borrows dbt's separation between *the tool* and *the work*. There are
+det borrows dbt's separation between *the tool* and *the work*. There are
 three things, and keeping them distinct keeps the system simple.
 
 ```
-                          simple_e  (the pip-installed Python package)
+                          det  (the pip-installed Python package)
    ┌──────────────────────────────────────────────────────────────────┐
    │  ENGINE          the run loop: discover, resolve, run, commit     │
-   │  LIBRARY (API)   simple_e.run(...) — equal first-class to the CLI │
+   │  LIBRARY (API)   det.run(...) — equal first-class to the CLI │
    │  BAKED CONNECTORS  meta_ads/, stripe/, bigquery/, ...  (folders)  │
    └──────────────────────────────────────────────────────────────────┘
                                   ▲
@@ -22,7 +22,7 @@ three things, and keeping them distinct keeps the system simple.
                        executes   │
                                   ▼
    my_data_project/   (the user-owned PROJECT folder — in their repo)
-   ├── simple_e_project.yml      project config: name, defaults, tags
+   ├── det_project.yml      project config: name, defaults, tags
    ├── profiles.yml              environment config + secrets refs
    └── connectors/
        ├── custom/               a custom SOURCE connector folder
@@ -36,17 +36,17 @@ three things, and keeping them distinct keeps the system simple.
 | Component | dbt analogue | Responsibility |
 |---|---|---|
 | **Engine** | `dbt-core` internals | Discovery, config resolution, the run lifecycle, state, the run record. |
-| **Library** | importable `dbt` | `from simple_e import run` — programmatic entry, equal to the CLI. |
-| **CLI** | the `dbt` binary | `simple-e run -c <name>` / `--tag <tag>`. A thin shell over the library. |
-| **Baked connectors** | dbt's built-in macros | Connector folders shipped *inside* `simple_e`. |
-| **Project** | a dbt project | User-owned folder: `simple_e_project.yml`, `profiles.yml`, `connectors/`. |
+| **Library** | importable `dbt` | `from det import run` — programmatic entry, equal to the CLI. |
+| **CLI** | the `dbt` binary | `det run -c <name>` / `--tag <tag>`. A thin shell over the library. |
+| **Baked connectors** | dbt's built-in macros | Connector folders shipped *inside* `det`. |
+| **Project** | a dbt project | User-owned folder: `det_project.yml`, `profiles.yml`, `connectors/`. |
 
-The CLI and the library are **the same engine** with two front doors. `simple-e
+The CLI and the library are **the same engine** with two front doors. `det
 run` parses argv and calls the same `run()` the library exposes. Nothing the CLI
 can do is unavailable to the library, and vice versa.
 
-> [Open question: project config filename. `simple_e_project.yml` is proposed
-> for symmetry with dbt's `dbt_project.yml`; a shorter `simple_e.yml` is the
+> [Open question: project config filename. `det_project.yml` is proposed
+> for symmetry with dbt's `dbt_project.yml`; a shorter `det.yml` is the
 > alternative. Pick one before v1 and never alias.]
 
 ## Connector resolution: baked vs custom
@@ -54,7 +54,7 @@ can do is unavailable to the library, and vice versa.
 A connector is named, not pathed. The engine resolves a name by precedence:
 
 1. **Project-local** — `connectors/<name>/` in the user's project. (`"custom"`.)
-2. **Baked** — `<name>/` inside the `simple_e` package. (`"meta_ads"`.)
+2. **Baked** — `<name>/` inside the `det` package. (`"meta_ads"`.)
 
 Project-local wins on a name clash, so a user can shadow a baked connector with
 their own fork. Resolution produces a **ConnectorHandle**: the folder path, the
@@ -63,20 +63,20 @@ destinations resolve through the *same* path — they are the same kind of objec
 
 ## Run lifecycle
 
-A `simple-e run` (or `simple_e.run()`) is one synchronous pass through a fixed
+A `det run` (or `det.run()`) is one synchronous pass through a fixed
 sequence. It either reaches `commit` and exits `0`, or it fails and exits non-zero.
 
 ```
-  simple-e run -c custom
+  det run -c custom
         │
         ▼
   ┌─────────────────────────────────────────────────────────────────┐
   │ 1. DISCOVER    locate project; resolve connector(s) by name/tag  │
-  │ 2. RESOLVE     merge simple_e_project.yml + profiles.yml + env +  │
+  │ 2. RESOLVE     merge det_project.yml + profiles.yml + env +  │
   │                CLI flags  →  one frozen RunConfig                │
   │ 3. INIT DEST   open destination connector; ensure it is ready;   │
   │                determine its capability tier                    │
-  │ 4. LOAD STATE  read _simple_e_state from the destination         │
+  │ 4. LOAD STATE  read _det_state from the destination         │
   │                (or its companion state backend — see tiers)     │
   │ 5. RUN STREAMS for each selected stream  (sequential in v1):     │
   │      a. EXTRACT    drive the @stream generator → batches         │
@@ -90,21 +90,21 @@ sequence. It either reaches `commit` and exits `0`, or it fails and exits non-ze
 
 Stages 1–4 are setup; stage 5 is the real work; stage 6 is the audit trail.
 
-- **Discover** — find the project root (walk up for `simple_e_project.yml`),
+- **Discover** — find the project root (walk up for `det_project.yml`),
   then resolve every connector implied by `-c` or `--tag`.
 - **Resolve** — config precedence, lowest to highest: connector `register.yaml`
-  defaults → `simple_e_project.yml` defaults → `profiles.yml` (active profile) →
+  defaults → `det_project.yml` defaults → `profiles.yml` (active profile) →
   environment variables → CLI flags. The result is a **frozen `RunConfig`** —
   nothing reads ambient config after this point. (The `defaults` + override idea
   is borrowed from Sling's replication YAML.)
 - **Init destination** — open the destination connector and confirm it can
   receive writes. This also fixes its **capability tier** (next section), which
   decides where state lives.
-- **Load state** — read prior cursors from `_simple_e_state` so incremental
+- **Load state** — read prior cursors from `_det_state` so incremental
   streams know where they left off. A cold destination simply yields empty state.
 - **Run streams** — the loop below.
 - **Run record** — a machine-readable record (and a human summary) of what
-  happened. This is simpl.E's audit surface; it is *not* a metadata catalog.
+  happened. This is det's audit surface; it is *not* a metadata catalog.
 
 ### Commit granularity
 
@@ -170,10 +170,10 @@ handbook.)
 
 ## Tag-based selection
 
-simpl.E selects work the way dbt does — by **name** or by **tag**.
+det selects work the way dbt does — by **name** or by **tag**.
 
-- `simple-e run -c orders` — run one connector by name.
-- `simple-e run --tag hourly` — run every connector whose `register.yaml`
+- `det run -c orders` — run one connector by name.
+- `det run --tag hourly` — run every connector whose `register.yaml`
   declares the `hourly` tag.
 - Wildcards (`-c "shopify.*"`) select families of streams, the pattern borrowed
   from Sling's wildcard replication.
@@ -181,7 +181,7 @@ simpl.E selects work the way dbt does — by **name** or by **tag**.
 Tags are declared in each connector's `register.yaml` and resolved at the
 **discover** stage into a concrete connector set before anything runs. Selection
 is purely a *filter over discovered connectors* — it adds no runtime concept,
-which is why it passes the simpl.E test.
+which is why it passes the det test.
 
 ## Destination capability tiers
 
@@ -190,20 +190,20 @@ table. Destinations therefore have **capability tiers**, fixed at *init* time:
 
 | Tier | Examples | State storage | Notes |
 |---|---|---|---|
-| **Tier A — Stateful warehouse** | BigQuery, Snowflake, Postgres | `_simple_e_state` table *inside the destination* | The simple, default case. One destination, one place for everything. |
+| **Tier A — Stateful warehouse** | BigQuery, Snowflake, Postgres | `_det_state` table *inside the destination* | The simple, default case. One destination, one place for everything. |
 | **Tier B — Stateless storage** | S3, GCS, local files | A **companion state backend** alongside the data | Object storage cannot host a queryable state table; a sidecar is required. |
 
 A Tier B destination resolves a companion state backend (declared via the
 `@destination.state_backend` hook); the engine routes **load state** / **commit
 state** there instead of to the data target. The stream-running logic is
 identical across tiers — only the state I/O path differs. The v1 default Tier B
-backend is a **sidecar JSON file** (`_simple_e_state.json`) co-located with the
+backend is a **sidecar JSON file** (`_det_state.json`) co-located with the
 data; the backend interface is pluggable so a transactional store can be added
 later without an engine change. (Full detail: *05 — Destinations & State*.)
 
 ## Concurrency model
 
-simpl.E's concurrency stance is deliberately minimal — concurrency is the most
+det's concurrency stance is deliberately minimal — concurrency is the most
 reliable place for an EL tool to acquire bugs, so v1 spends its complexity budget
 elsewhere.
 
@@ -236,7 +236,7 @@ By design, the architecture references three things specified elsewhere:
   `@resource` signatures, and the class escape hatch.
 - **Destinations** — the per-destination write semantics and the Tier B
   companion-backend implementation.
-- **CLI** — the full `simple-e` command/flag surface.
+- **CLI** — the full `det` command/flag surface.
 
 The engine's promise to all three is constant: discover them, resolve their
 config into a frozen `RunConfig`, drive their generators through extract →

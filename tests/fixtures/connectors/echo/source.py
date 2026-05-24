@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from simple_e import Batch, Cursor, stream
+from det import Batch, Cursor, stream
 
 # --------------------------------------------------------------------------
 # Fixed fixture data — deterministic, so tests assert on exact values.

@@ -1,6 +1,6 @@
 # Stripe Connector — Research & Design Note
 
-**Status:** Research complete · **Date:** 2026-05-22 · **Audience:** simpl.E connector authors
+**Status:** Research complete · **Date:** 2026-05-22 · **Audience:** det connector authors
 
 This note answers one question the owner raised: *does Stripe Sigma now accept
 SQL-style queries via an API, so a connector could expose "custom queries as
@@ -87,7 +87,7 @@ product; the Sigma API exposes the same query engine over HTTP.
    `v2.data.reporting.query_run.succeeded` and
    `v2.data.reporting.query_run.failed` events. Webhooks need a public HTTP
    endpoint, which a CLI-invoked EL tool does not have — **polling is the
-   realistic path for simpl.E.**
+   realistic path for det.**
 
 **The `QueryRun` object:**
 
@@ -150,7 +150,7 @@ Stripe does not publish a public per-query price for the API. **Open question.**
 
 There is also a **Scheduled Queries** concept in Sigma (queries that run on a
 Stripe-side schedule and deliver results). This is largely superseded for our
-purposes by the Query Run API + simpl.E's own `schedule:` hint, and is not part
+purposes by the Query Run API + det's own `schedule:` hint, and is not part
 of the recommended design.
 
 ### B. The standard REST API — resource extraction (GA)
@@ -184,17 +184,17 @@ This is the long-standing, stable path and the basis for the v1 connector.
 
 ---
 
-## Recommended connector design for simpl.E
+## Recommended connector design for det
 
 ### Verdict: resource-as-stream for v1; query-as-stream as an opt-in extension
 
 | Model | Buildable in v1? | Why |
 |---|---|---|
-| **Resource-as-stream** (one stream per object type, incremental on `created`) | **Yes — ship this.** | REST API is GA, free, JSON-native, near-real-time, well-documented. Maps cleanly onto the simpl.E contract: each object type = one `streams[]` entry with an `incremental` block; one `@stream` generator paginates it. No subscription gate — works for every simpl.E user. |
+| **Resource-as-stream** (one stream per object type, incremental on `created`) | **Yes — ship this.** | REST API is GA, free, JSON-native, near-real-time, well-documented. Maps cleanly onto the det contract: each object type = one `streams[]` entry with an `incremental` block; one `@stream` generator paginates it. No subscription gate — works for every det user. |
 | **Query-as-stream** (each stream = a user SQL query, GAQL-style) | **Buildable, but not v1.** | The Sigma API genuinely enables this. But it is **preview** (API may change), requires a **paid Sigma subscription** (most users lack it), and has **3h data lag**. Shipping it as the default would make the baked connector fail for the majority of users out of the box. |
 
 **The connector can support BOTH** — they are not mutually exclusive. The
-simpl.E contract already allows a connector to declare a heterogeneous set of
+det contract already allows a connector to declare a heterogeneous set of
 streams, and stream-scoped `params` let one stream carry a SQL string while
 others carry nothing. Plan:
 
@@ -223,7 +223,7 @@ others carry nothing. Plan:
   `created.gte=<cursor>` and forward `starting_after` paging, the connector
   walks **newest → oldest within the new-records window**. `cursor.observe()`
   takes the **max**, so the final cursor is correct regardless of arrival
-  order. The simpl.E engine only commits the cursor *after* all batches durably
+  order. The det engine only commits the cursor *after* all batches durably
   land (per chapter 03 §3.2), so a crash mid-stream safely re-runs the whole
   window — no lost or skipped rows. The connector may yield batches as it pages
   (low memory) and rely on this all-or-nothing cursor commit.

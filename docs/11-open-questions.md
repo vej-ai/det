@@ -23,10 +23,10 @@ coherent design; this page is where your judgement is explicitly invited.
 ### Q1 — Project config filename
 *Source: [02 — Architecture](./02-architecture.md), §The triad*
 
-`simple_e_project.yml` (symmetry with dbt's `dbt_project.yml`) vs. a shorter
-`simple_e.yml`.
+`det_project.yml` (symmetry with dbt's `dbt_project.yml`) vs. a shorter
+`det.yml`.
 
-- **Lean:** `simple_e_project.yml` — the dbt mirror aids the "if you know dbt,
+- **Lean:** `det_project.yml` — the dbt mirror aids the "if you know dbt,
   you know this" pitch.
 - **Stakes:** Cosmetic, but it is the first file every user sees and renaming it
   later is a breaking change for every project.
@@ -36,7 +36,7 @@ coherent design; this page is where your judgement is explicitly invited.
 *Source: [06 — Project Anatomy](./06-project-anatomy.md), §profiles.yml*
 
 Project root (visible, version-controlled-by-default, easy to find) vs. a
-user-home location like `~/.simple_e/profiles.yml` (dbt's model — credentials
+user-home location like `~/.det/profiles.yml` (dbt's model — credentials
 physically separated from the repo).
 
 - **Lean:** project root, with a hard `.gitignore` entry — keeps everything for a
@@ -144,10 +144,10 @@ for users who want to handle loading themselves, in addition to whole-run
   promise — a wider surface is a wider maintenance commitment.
 - **Decide by:** post-v1.
 
-### Q10 — `simple-e logs` and log retention
+### Q10 — `det logs` and log retention
 *Source: [09 — Logging & Observability](./09-logging-and-observability.md), §70*
 
-A `simple-e logs <run_id>` command to pretty-print a past run's `run.jsonl`, and
+A `det logs <run_id>` command to pretty-print a past run's `run.jsonl`, and
 a `--keep-logs <n>` retention flag.
 
 - **Lean:** both v2 — quality-of-life, neither v1-critical.
@@ -202,11 +202,11 @@ Which ~3 sources ship in v1. Handbook's placeholder set: a database source
 ### Q14 — UI hosting model
 *Source: [10 — Roadmap & Scope](./10-roadmap-and-scope.md), §56*
 
-A local `simple-e ui` serving from `.simple_e/` and the destination, vs. a
+A local `det ui` serving from `.det/` and the destination, vs. a
 deployable service, vs. both.
 
 - **Lean:** local-first — it keeps the self-hosted, no-backend promise intact.
-- **Stakes:** Whether simpl.E stays a pure CLI/library tool or grows a service to
+- **Stakes:** Whether det stays a pure CLI/library tool or grows a service to
   operate. Deferred entirely past v1.
 - **Decide by:** v3 / when UI work starts.
 

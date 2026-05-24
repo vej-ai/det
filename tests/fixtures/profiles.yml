@@ -1,4 +1,4 @@
-# simpl.E profiles for the engine test suite (docs/06).
+# det profiles for the engine test suite (docs/06).
 #
 # Normally NOT committed — here it is a test fixture, so it carries no real
 # secrets. Each target is a named environment selected by run(target=...).
@@ -10,7 +10,7 @@ targets:
     # local file; engine tests override it per-test via run(destination_params=).
     destinations:
       duckdb:
-        path: ".simple_e/warehouse.duckdb"
+        path: ".det/warehouse.duckdb"
 
     # Named credential blocks resolved by ${profile.<block>.<key>} secret refs
     # in any register.yaml (docs/03 §2.5). The `echo` fixture declares no
@@ -23,7 +23,7 @@ targets:
   prod:
     destinations:
       duckdb:
-        path: ".simple_e/warehouse-prod.duckdb"
+        path: ".det/warehouse-prod.duckdb"
     profiles:
       echo:
         sample_token: "prod-profile-token"

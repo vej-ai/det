@@ -15,7 +15,7 @@ connector *contains*; one is something the connector *targets*.
 | **Source** | The logic that reads records from the outside world. The body of a `kind: source` connector. | `source.py` (`@stream` functions) |
 | **Stream** | One output table. A source produces one or more streams. Each maps to a `streams[]` entry in `register.yaml`. | One `@stream` function per stream |
 | **Destination** | The logic that writes records to a warehouse/file/db. The body of a `kind: destination` connector. | `destination.py` (`@destination` hooks) |
-| **State** | Per-stream persisted memory — incremental cursors plus free-form scratch space — that survives between runs. | The `_simple_e_state` table in the destination |
+| **State** | Per-stream persisted memory — incremental cursors plus free-form scratch space — that survives between runs. | The `_det_state` table in the destination |
 
 The relationship in one sentence:
 
@@ -34,7 +34,7 @@ sources — the dbt-style decoupling.
 
 The engine imposes only one rule: a `register.yaml` plus at least one `.py` that
 defines the decorated functions. Everything below is **convention** — the layout
-`simple_e new` scaffolds and the layout the handbook recommends.
+`det new` scaffolds and the layout the handbook recommends.
 
 ### A source connector
 
@@ -156,14 +156,14 @@ returned, with no framework wrapper in the way.
 
 The engine's only contributions to a record are:
 
-- It appends `_simple_e_synced_at` (`TIMESTAMP`) to every record at load time.
+- It appends `_det_synced_at` (`TIMESTAMP`) to every record at load time.
 - It validates each record against the stream's declared `schema` (when one is
   declared) before handing the batch to the destination.
 
 ### Nested data
 
 The ShipHero v2 proof case stores `shipping_labels` and `line_items` as `JSON`
-columns rather than flattening them into child tables. simpl.E supports both:
+columns rather than flattening them into child tables. det supports both:
 declare the column as `type: JSON` to keep nested structure, or shape it flat in
 `schema.py` to spread it across columns. The handbook default is **JSON column
 for nested objects** — it is simplest, matches the proof case, and keeps one
@@ -188,7 +188,7 @@ body:
   outlives a run, a high-water id the API exposes instead of a timestamp). The
   connector reads and writes it freely; the engine persists it as `state_blob`.
 
-Both are scoped **per stream**, keyed `(connector, stream)` in `_simple_e_state`.
+Both are scoped **per stream**, keyed `(connector, stream)` in `_det_state`.
 Two streams in one connector have independent state and can be at different
 cursor positions — exactly what the ShipHero per-table `sync_checkpoints` rows
 expressed.
@@ -196,7 +196,7 @@ expressed.
 ## A complete annotated example connector
 
 A full source connector folder, end to end. This is the ShipHero proof case
-re-expressed in the simpl.E body conventions — the same logic as the proof
+re-expressed in the det body conventions — the same logic as the proof
 `main.py`, reorganized into the recommended layout.
 
 ### `shiphero/register.yaml`
@@ -271,7 +271,7 @@ def page_info(response: dict) -> dict:
 ```python
 """ShipHero source: the @stream functions the engine discovers and runs."""
 from datetime import timedelta
-from simple_e import stream
+from det import stream
 
 from .client import refresh_access_token, execute_graphql
 from .schema import SHIPMENTS_QUERY, extract_nodes, page_info
@@ -325,16 +325,16 @@ def shipments(config, state, cursor, log):
         yield batch        # final partial batch
 ```
 
-### What maps to what (proof case → simpl.E)
+### What maps to what (proof case → det)
 
-| ShipHero proof `main.py` | simpl.E location |
+| ShipHero proof `main.py` | det location |
 |---|---|
 | `config.json` `tables.*` block | `register.yaml` `streams[]` |
 | `config.json` `page_size`, `step_days`, … | `register.yaml` `params` (defaults) |
 | `refresh_access_token`, `execute_graphql` | `client.py` (plain module) |
 | `extract_records`, `field_path` walk | `schema.py` (plain module) |
 | `sync_table` loop | `source.py` `@stream` function |
-| `get_checkpoint` / `save_checkpoint` | the engine, via `cursor` + `_simple_e_state` |
+| `get_checkpoint` / `save_checkpoint` | the engine, via `cursor` + `_det_state` |
 | `ensure_tables_exist`, `merge_records` | the **bigquery destination** connector |
 | `upsert_records` MERGE-on-`primary_key` | engine resolves `write_disposition: merge` |
 

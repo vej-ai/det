@@ -1,1 +1,1 @@
-"""Tests for the baked connectors under ``simple_e/connectors/``."""
+"""Tests for the baked connectors under ``det/connectors/``."""

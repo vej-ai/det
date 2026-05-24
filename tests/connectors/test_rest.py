@@ -27,21 +27,21 @@ from typing import Any
 
 import pytest
 
-import simple_e
-from simple_e import Config, Cursor
-from simple_e.connectors.rest.client import AuthSpec, build_client
-from simple_e.connectors.rest.extractors import ExtractionError, extract_records
-from simple_e.connectors.rest.pagination import (
+import det
+from det import Config, Cursor
+from det.connectors.rest.client import AuthSpec, build_client
+from det.connectors.rest.extractors import ExtractionError, extract_records
+from det.connectors.rest.pagination import (
     CursorPagination,
     LinkHeaderPagination,
     OffsetPagination,
     PagePagination,
     build_strategy,
 )
-from simple_e.connectors.rest.source import extract_stream
-from simple_e.engine.logger import build_logger
+from det.connectors.rest.source import extract_stream
+from det.engine.logger import build_logger
 
-# Reuse the fixtures project — it has simple_e_project.yml + profiles.yml and
+# Reuse the fixtures project — it has det_project.yml + profiles.yml and
 # the duckdb destination is the project's default. The smoke test does the same.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROJECT_DIR = _REPO_ROOT / "tests" / "fixtures"
@@ -347,7 +347,7 @@ def test_incremental_cursor_first_run_has_no_cursor_param() -> None:
         # cursor value at all (the bug to guard: sending an empty string).
         cursor = Cursor(
             cursor_field="id",
-            cursor_type=simple_e.CursorType.INT,
+            cursor_type=det.CursorType.INT,
             start_value=None,
         )
         list(
@@ -386,7 +386,7 @@ def test_incremental_cursor_second_run_sends_param() -> None:
         config = Config(params={"base_url": base_url}, secrets={})
         cursor = Cursor(
             cursor_field="id",
-            cursor_type=simple_e.CursorType.INT,
+            cursor_type=det.CursorType.INT,
             start_value=42,
         )
         list(
@@ -609,7 +609,7 @@ def test_malformed_json_raises_clear_error() -> None:
 
 
 # ==========================================================================
-# End-to-end via simple_e.run — lands rows in a tmp DuckDB
+# End-to-end via det.run — lands rows in a tmp DuckDB
 # ==========================================================================
 
 
@@ -618,7 +618,7 @@ def test_end_to_end_run_lands_rows(
     monkeypatch: pytest.MonkeyPatch,
     query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
 ) -> None:
-    """``simple_e.run('rest')`` against a stub API lands rows in a temp DuckDB.
+    """``det.run('rest')`` against a stub API lands rows in a temp DuckDB.
 
     Covers the full discovery → resolve → run → load path with the rest
     connector: the engine discovers it as a baked connector, resolves
@@ -680,7 +680,7 @@ def test_end_to_end_run_lands_rows(
     db_path = str(tmp_path / "warehouse.duckdb")
     with stub_server(routes) as (base_url, requests_seen):
         monkeypatch.setenv("REST_API_TOKEN", "secret-from-env")
-        result = simple_e.run(
+        result = det.run(
             connector="rest",
             target="dev",
             project_dir=str(PROJECT_DIR),
@@ -713,7 +713,7 @@ def test_secret_resolves_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     A run with the env var set must observe the same token on every request;
     a run without the env var set fails at config resolution (the engine
-    raises :class:`~simple_e.engine.config.ConfigError`, surfaced as a
+    raises :class:`~det.engine.config.ConfigError`, surfaced as a
     ``FAILED`` ``RunResult``).
     """
     # Path 1 — env set: the token reaches the wire as the bearer credential.
@@ -722,7 +722,7 @@ def test_secret_resolves_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with stub_server({"/items": handler, "/events": handler}) as (base_url, requests_seen):
         monkeypatch.setenv("REST_API_TOKEN", "env-secret-token-abcdef")
-        result = simple_e.run(
+        result = det.run(
             connector="rest",
             target="dev",
             project_dir=str(PROJECT_DIR),
@@ -735,7 +735,7 @@ def test_secret_resolves_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Path 2 — env missing: the run fails cleanly with a non-leaking message.
     monkeypatch.delenv("REST_API_TOKEN", raising=False)
-    result = simple_e.run(
+    result = det.run(
         connector="rest",
         target="dev",
         project_dir=str(PROJECT_DIR),
@@ -882,4 +882,4 @@ def test_extract_stream_imports_clean() -> None:
     # The module is already imported at the top of this file; this assertion
     # exists so a future refactor that adds import-time side effects fails here.
     assert callable(extract_stream)
-    assert isinstance(logging.getLogger("simple_e"), logging.Logger)
+    assert isinstance(logging.getLogger("det"), logging.Logger)

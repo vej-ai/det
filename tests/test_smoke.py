@@ -1,10 +1,10 @@
-"""THE simpl.E smoke test — the executable specification of the engine's job.
+"""THE det smoke test — the executable specification of the engine's job.
 
 This file defines, in runnable code, *exactly* what the engine must do. Build
 stages 1-4 had no engine, so every smoke run was wired by hand inside
 ``_drive_one_run`` — the "STAGE 5 SEAM". Stage 5 built the engine
-(:mod:`simple_e.engine`), and that hand-wiring has now **collapsed**: the seam
-is a single :func:`simple_e.run` call.
+(:mod:`det.engine`), and that hand-wiring has now **collapsed**: the seam
+is a single :func:`det.run` call.
 
 What the run does, end to end (docs/02 §Run lifecycle, docs/05 §1):
 
@@ -15,8 +15,8 @@ It drives the ``echo`` fixture source (an ``append`` stream ``events`` and a
 destination, and the assertions pin down the contract the engine must satisfy:
 
 * rows land in DuckDB, in the right tables, with the right values;
-* ``_simple_e_synced_at`` is populated on every row;
-* ``_simple_e_state`` carries the incremental stream's advanced cursor;
+* ``_det_synced_at`` is populated on every row;
+* ``_det_state`` carries the incremental stream's advanced cursor;
 * a second run *resumes from committed state* — the incremental stream yields
   only new rows, the append stream re-runs in full.
 
@@ -26,13 +26,13 @@ destination, and the assertions pin down the contract the engine must satisfy:
 ║  Pre-stage-5, ``_drive_one_run`` hand-wired the whole lifecycle. It is   ║
 ║  now :func:`_drive_one_run`, a one-expression wrapper over the engine:   ║
 ║                                                                          ║
-║      return simple_e.run(connector="echo", target="dev",                 ║
+║      return det.run(connector="echo", target="dev",                 ║
 ║                          project_dir=PROJECT_DIR,                         ║
 ║                          destination_params={"path": db_path})           ║
 ║                                                                          ║
 ║  It returns a real ``RunResult``; the tests read                        ║
 ║  ``result.stream("items").rows_loaded`` off it. The assertions DID NOT   ║
-║  move — they are the spec and pass unchanged against ``simple_e.run``.   ║
+║  move — they are the spec and pass unchanged against ``det.run``.   ║
 ║  Only test #3 keeps direct hook wiring: it deliberately SKIPS            ║
 ║  ``commit_state``, which the engine can never be asked to do.            ║
 ╚══════════════════════════════════════════════════════════════════════════╝
@@ -44,17 +44,17 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-import simple_e
-from simple_e import Config, Cursor, RunResult, StreamMeta
-from simple_e.types import StreamDef
+import det
+from det import Config, Cursor, RunResult, StreamMeta
+from det.types import StreamDef
 from tests.conftest import (
     ECHO_CONNECTOR_DIR,
     LoadedConnector,
     load_connector,
 )
 
-# The simpl.E project the engine discovers `echo` (and the `duckdb` destination
-# binding) from — tests/fixtures/ is a real project with simple_e_project.yml.
+# The det project the engine discovers `echo` (and the `duckdb` destination
+# binding) from — tests/fixtures/ is a real project with det_project.yml.
 PROJECT_DIR = ECHO_CONNECTOR_DIR.parent.parent
 
 
@@ -69,14 +69,14 @@ def _drive_one_run(db_path: str) -> RunResult:
     Pre-stage-5 this function hand-wired the whole
     ``open → read_state → [ensure_schema → write_batch ...]* → commit_state →
     close`` lifecycle. Stage 5's engine subsumes every one of those steps, so
-    the body is now one call: :func:`simple_e.run` discovers ``echo`` and its
+    the body is now one call: :func:`det.run` discovers ``echo`` and its
     DuckDB destination, resolves config, and drives the run.
 
     ``destination_params`` routes this test's temp ``db_path`` into the DuckDB
     destination's ``path`` param — the highest-precedence config layer
     (docs/03 §6), so each test gets its own warehouse file.
     """
-    return simple_e.run(
+    return det.run(
         connector="echo",
         target="dev",
         project_dir=str(PROJECT_DIR),
@@ -98,9 +98,9 @@ def test_smoke_first_run_lands_rows_state_and_synced_at(
     duckdb_path: str,
     query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
 ) -> None:
-    """One run lands data, fills _simple_e_synced_at, and advances the cursor.
+    """One run lands data, fills _det_synced_at, and advances the cursor.
 
-    This is the core spec: after ``simple_e.run()``, the DuckDB file must hold
+    This is the core spec: after ``det.run()``, the DuckDB file must hold
     the source's data and the state table must show the incremental stream's
     cursor advanced to its max.
     """
@@ -125,14 +125,14 @@ def test_smoke_first_run_lands_rows_state_and_synced_at(
         (5, "item-five", 5),
     ]
 
-    # --- _simple_e_synced_at populated on every row ------------------------
+    # --- _det_synced_at populated on every row ------------------------
     null_synced = query_duckdb(
         duckdb_path,
-        "SELECT count(*) FROM echo_events WHERE _simple_e_synced_at IS NULL",
+        "SELECT count(*) FROM echo_events WHERE _det_synced_at IS NULL",
     )[0][0]
     assert null_synced == 0
     synced_sample = query_duckdb(
-        duckdb_path, "SELECT _simple_e_synced_at FROM echo_items LIMIT 1"
+        duckdb_path, "SELECT _det_synced_at FROM echo_items LIMIT 1"
     )[0][0]
     assert isinstance(synced_sample, datetime)
 
@@ -142,10 +142,10 @@ def test_smoke_first_run_lands_rows_state_and_synced_at(
     )[0][0]
     assert score == "10"
 
-    # --- _simple_e_state: incremental cursor advanced ----------------------
+    # --- _det_state: incremental cursor advanced ----------------------
     state = query_duckdb(
         duckdb_path,
-        "SELECT cursor_value, cursor_type, rows_total FROM _simple_e_state "
+        "SELECT cursor_value, cursor_type, rows_total FROM _det_state "
         "WHERE connector = 'echo' AND stream = 'items'",
     )
     assert len(state) == 1
@@ -156,7 +156,7 @@ def test_smoke_first_run_lands_rows_state_and_synced_at(
     # The append stream also got a state row (no cursor — cursor_value NULL).
     events_state = query_duckdb(
         duckdb_path,
-        "SELECT cursor_value FROM _simple_e_state "
+        "SELECT cursor_value FROM _det_state "
         "WHERE connector = 'echo' AND stream = 'events'",
     )
     assert len(events_state) == 1
@@ -198,7 +198,7 @@ def test_smoke_second_run_resumes_from_committed_state(
     # The committed cursor did not regress and rows_total did not double-count.
     state = query_duckdb(
         duckdb_path,
-        "SELECT cursor_value, rows_total FROM _simple_e_state "
+        "SELECT cursor_value, rows_total FROM _det_state "
         "WHERE connector = 'echo' AND stream = 'items'",
     )
     assert int(str(state[0][0])) == 5

@@ -8,7 +8,7 @@ Unit tests (always run, no Postgres needed):
       stub connection injected via ``monkeypatch``.
 
 Integration tests (gated by ``POSTGRES_TEST_URL``):
-    * end-to-end ``simple_e.run`` into a tmp DuckDB, asserting all rows landed
+    * end-to-end ``det.run`` into a tmp DuckDB, asserting all rows landed
       on run 1 and 0 new rows on run 2 (cursor resume). Skipped when the
       env var is unset so the suite stays green on a fresh checkout.
 """
@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 
-from simple_e import (
+from det import (
     Config,
     Cursor,
     CursorType,
@@ -34,11 +34,11 @@ from simple_e import (
     FieldMode,
     FieldType,
 )
-from simple_e.connectors.postgres import client, source, type_mapping
+from det.connectors.postgres import client, source, type_mapping
 
 # Path the engine's discovery uses to find the postgres connector folder.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-POSTGRES_CONNECTOR_DIR = REPO_ROOT / "simple_e" / "connectors" / "postgres"
+POSTGRES_CONNECTOR_DIR = REPO_ROOT / "det" / "connectors" / "postgres"
 
 
 # ===========================================================================
@@ -250,7 +250,7 @@ def test_query_select_sql_wraps_user_query_as_subquery() -> None:
     sql_text = _normalise_sql(composed.as_string(None))
     assert sql_text.startswith(
         'SELECT * FROM (SELECT id, occurred_at FROM events WHERE kind = \'click\') '
-        'AS _simple_e_sub WHERE "occurred_at" > %s ORDER BY "occurred_at" LIMIT %s'
+        'AS _det_sub WHERE "occurred_at" > %s ORDER BY "occurred_at" LIMIT %s'
     )
 
 
@@ -262,28 +262,28 @@ def test_full_scan_select_sql_is_unconditional_select() -> None:
 
 def test_declare_cursor_sql_quotes_cursor_name() -> None:
     body = client.full_scan_select_sql("public", "products")
-    composed = client.declare_cursor_sql("simple_e_x", body)
+    composed = client.declare_cursor_sql("det_x", body)
     sql_text = _normalise_sql(composed.as_string(None))
-    assert sql_text.startswith('DECLARE "simple_e_x" CURSOR FOR ')
+    assert sql_text.startswith('DECLARE "det_x" CURSOR FOR ')
 
 
 def test_fetch_forward_sql_uses_literal_batch_size_and_quoted_name() -> None:
-    composed = client.fetch_forward_sql("simple_e_x", 1000)
+    composed = client.fetch_forward_sql("det_x", 1000)
     sql_text = _normalise_sql(composed.as_string(None))
-    assert sql_text == 'FETCH FORWARD 1000 FROM "simple_e_x"'
+    assert sql_text == 'FETCH FORWARD 1000 FROM "det_x"'
 
 
 def test_fetch_forward_sql_rejects_non_positive_batch_size() -> None:
     with pytest.raises(ValueError, match="positive int"):
-        client.fetch_forward_sql("simple_e_x", 0)
+        client.fetch_forward_sql("det_x", 0)
     with pytest.raises(ValueError, match="positive int"):
-        client.fetch_forward_sql("simple_e_x", -1)
+        client.fetch_forward_sql("det_x", -1)
 
 
 def test_close_cursor_sql_quotes_name() -> None:
-    composed = client.close_cursor_sql("simple_e_x")
+    composed = client.close_cursor_sql("det_x")
     sql_text = _normalise_sql(composed.as_string(None))
-    assert sql_text == 'CLOSE "simple_e_x"'
+    assert sql_text == 'CLOSE "det_x"'
 
 
 # ===========================================================================
@@ -370,7 +370,7 @@ def test_extract_table_keyset_batches_and_observes_cursor(
     config = Config(
         params={
             "host": "localhost", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "simple_e",
+            "sslmode": "prefer", "application_name": "det",
             "connect_timeout_seconds": 30, "batch_size": 2,
         },
         secrets={"password": "redacted"},
@@ -426,7 +426,7 @@ def test_extract_table_keyset_stops_on_stagnant_cursor(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "simple_e",
+            "sslmode": "prefer", "application_name": "det",
             "connect_timeout_seconds": 30, "batch_size": 2,
         },
         secrets={"password": "."},
@@ -460,7 +460,7 @@ def test_extract_query_mode_wraps_user_query(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "simple_e",
+            "sslmode": "prefer", "application_name": "det",
             "connect_timeout_seconds": 30, "batch_size": 100,
         },
         secrets={"password": "."},
@@ -485,7 +485,7 @@ def test_extract_query_mode_wraps_user_query(
         ]
     ]
     sql_text = _normalise_sql(fake_cursor.executes[0][0].as_string(None))
-    assert "AS _simple_e_sub" in sql_text
+    assert "AS _det_sub" in sql_text
     assert '"occurred_at"' in sql_text
     assert cursor.observed_max == 7
 
@@ -555,7 +555,7 @@ def test_extract_full_scan_runs_declare_fetch_close(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "simple_e",
+            "sslmode": "prefer", "application_name": "det",
             "connect_timeout_seconds": 30, "batch_size": 2,
         },
         secrets={"password": "."},
@@ -601,7 +601,7 @@ def test_connection_closes_on_exception(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "simple_e",
+            "sslmode": "prefer", "application_name": "det",
             "connect_timeout_seconds": 30, "batch_size": 1,
         },
         secrets={"password": "."},
@@ -640,7 +640,7 @@ def test_password_does_not_appear_in_rendered_sql(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "simple_e",
+            "sslmode": "prefer", "application_name": "det",
             "connect_timeout_seconds": 30, "batch_size": 100,
         },
         secrets={"password": secret},
@@ -671,11 +671,11 @@ def test_postgres_connector_discovers_and_validates(tmp_path: Path) -> None:
     """The full discovery flow finds the connector folder and validates it.
 
     Uses a throwaway project tucked under ``tmp_path`` so the test does not
-    depend on the repo's own ``simple_e_project.yml`` location.
+    depend on the repo's own ``det_project.yml`` location.
     """
-    from simple_e.engine.discovery import resolve_connector
+    from det.engine.discovery import resolve_connector
 
-    (tmp_path / "simple_e_project.yml").write_text(
+    (tmp_path / "det_project.yml").write_text(
         "name: test_project\nversion: '1.0.0'\nconnector_paths: [connectors]\n"
     )
     (tmp_path / "connectors").mkdir()  # empty — forces fallback to baked
@@ -721,12 +721,12 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
 ) -> None:
     """End-to-end: 100 rows land on run 1, 0 new rows on run 2 (cursor resume).
 
-    Stands up a temp schema with a tiny ``users`` table, runs ``simple_e.run``
+    Stands up a temp schema with a tiny ``users`` table, runs ``det.run``
     into a tmp DuckDB twice, and asserts the spec's resume property.
     """
-    import simple_e
+    import det
 
-    schema = f"simple_e_pg_it_{os.getpid()}"
+    schema = f"det_pg_it_{os.getpid()}"
     with live_pg_conn.cursor() as cur:
         cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         cur.execute(f'CREATE SCHEMA "{schema}"')
@@ -749,7 +749,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
     # the @stream body inside a project-local fork of the connector.
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
-    (project_dir / "simple_e_project.yml").write_text(
+    (project_dir / "det_project.yml").write_text(
         "name: it\nversion: '1.0.0'\nconnector_paths: [connectors]\n"
         "default_destination: duckdb\ndefault_target: dev\n"
     )
@@ -767,7 +767,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
         "  database: {type: string, required: true}\n"
         "  user: {type: string, required: true}\n"
         "  sslmode: {type: string, default: prefer}\n"
-        "  application_name: {type: string, default: simple_e}\n"
+        "  application_name: {type: string, default: det}\n"
         "  connect_timeout_seconds: {type: int, default: 30}\n"
         "  batch_size: {type: int, default: 30}\n"
         "secrets:\n  - {name: password, ref: '${env.PGPASSWORD}'}\n"
@@ -782,8 +782,8 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
         "      initial_value: '1970-01-01T00:00:00'\n"
     )
     (fork / "source.py").write_text(
-        "from simple_e import stream\n"
-        "from simple_e.connectors.postgres.source import extract_stream\n\n"
+        "from det import stream\n"
+        "from det.connectors.postgres.source import extract_stream\n\n"
         "@stream(name='users')\n"
         "def users(config, cursor, log):\n"
         "    yield from extract_stream(\n"
@@ -801,7 +801,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
         "user": info.user,
     }
     # Run 1 — every row lands.
-    r1 = simple_e.run(
+    r1 = det.run(
         connector="postgres", target="dev", project_dir=str(project_dir),
         params=overrides,
     )
@@ -809,7 +809,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
     assert (r1.stream("users").rows_loaded if r1.stream("users") else 0) == 100  # type: ignore[union-attr]
 
     # Run 2 — cursor resumes, nothing new to fetch.
-    r2 = simple_e.run(
+    r2 = det.run(
         connector="postgres", target="dev", project_dir=str(project_dir),
         params=overrides,
     )

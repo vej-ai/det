@@ -1,6 +1,6 @@
 # 06 — Project Anatomy
 
-A simpl.E **project** is the directory a user creates to run extract-load
+A det **project** is the directory a user creates to run extract-load
 pipelines. It is modeled directly on a dbt project: a small declarative root
 file, a credentials file kept separate from code, folders of connectors, and a
 disposable working directory. If you know `dbt_project.yml`, `profiles.yml`, and
@@ -8,19 +8,19 @@ disposable working directory. If you know `dbt_project.yml`, `profiles.yml`, and
 
 ## The dbt analogy at a glance
 
-| dbt | simpl.E | Purpose |
+| dbt | det | Purpose |
 |---|---|---|
-| `dbt_project.yml` | `simple_e_project.yml` | Project config: name, paths, defaults, vars. Committed. |
+| `dbt_project.yml` | `det_project.yml` | Project config: name, paths, defaults, vars. Committed. |
 | `~/.dbt/profiles.yml` | `profiles.yml` | Credentials per environment/target. **Not committed.** |
 | `models/` | `connectors/` + `destinations/` | The work the project does. Committed. |
-| `target/` | `.simple_e/` | Disposable build/cache/log output. Git-ignored. |
-| `dbt run --target prod` | `simple_e run --target prod` | Select an environment. |
+| `target/` | `.det/` | Disposable build/cache/log output. Git-ignored. |
+| `dbt run --target prod` | `det run --target prod` | Select an environment. |
 
 ## A complete project tree
 
 ```
 acme_el/
-├── simple_e_project.yml        # project config (the dbt_project.yml analog)
+├── det_project.yml        # project config (the dbt_project.yml analog)
 ├── profiles.yml                # credentials per target (NOT committed)
 ├── .gitignore
 │
@@ -39,7 +39,7 @@ acme_el/
 │       ├── register.yaml
 │       └── destination.py
 │
-└── .simple_e/                  # working dir (git-ignored — the target/ analog)
+└── .det/                  # working dir (git-ignored — the target/ analog)
     ├── manifest.json           # cached, validated catalog of all connectors
     ├── logs/
     │   └── run-2026-05-21T09-30-00.log
@@ -53,13 +53,13 @@ two folders exist purely so a human can find things; the engine would be just as
 happy with everything under one `connectors/`. Splitting them is the recommended
 default for readability, and `connector_paths` (below) lists both.
 
-## `simple_e_project.yml` — the project config
+## `det_project.yml` — the project config
 
 The root file. Committed to version control. Pure declaration — no logic, no
 credentials.
 
 ```yaml
-# simple_e_project.yml
+# det_project.yml
 name: acme_el
 version: "1.0.0"
 
@@ -95,7 +95,7 @@ vars:
 | `default_destination` | string | No | `null` | Connector `name` used when a source's `register.yaml` has no `destination:` block. |
 | `default_target` | string | No | first target in `profiles.yml` | Which `profiles.yml` target to use when `--target` is omitted. |
 | `vars` | map[string → scalar] | No | `{}` | Project-wide param overrides applied to every connector. |
-| `working_dir` | string | No | `.simple_e` | Where the engine writes the manifest cache, logs, and scratch. |
+| `working_dir` | string | No | `.det` | Where the engine writes the manifest cache, logs, and scratch. |
 
 Seven keys. Like `register.yaml`, the project file is kept deliberately small —
 anything per-environment belongs in `profiles.yml`, anything per-connector
@@ -159,7 +159,7 @@ knowledge lives only here, and only here changes between `dev` and `prod`.
 
 > **Why credentials are not in `register.yaml`.** The ShipHero proof
 > `config.json` mixed `project_id` / `dataset_id` (environment) with
-> `cursor_field` / `schema` (contract). simpl.E splits them: contract →
+> `cursor_field` / `schema` (contract). det splits them: contract →
 > `register.yaml` (committed, portable), environment → `profiles.yml`
 > (uncommitted, per-target). A connector folder is then identical across every
 > environment it ever runs in.
@@ -170,15 +170,15 @@ A project draws connectors from two places, resolved by name (chapter 03 §5):
 
 1. **Custom** — folders under the project's `connector_paths` (`connectors/`,
    `destinations/`). Authored and version-controlled by the user.
-2. **Pre-baked** — folders shipped inside the installed `simple_e` package
-   (`simple_e/connectors/…`). Maintained by the simpl.E project.
+2. **Pre-baked** — folders shipped inside the installed `det` package
+   (`det/connectors/…`). Maintained by the det project.
 
 They are invoked identically — the caller names a connector and does not care
 where it came from:
 
 ```bash
-simple_e run meta_ads  --target prod      # pre-baked: ships in the package
-simple_e run shiphero  --target prod      # custom:   ./connectors/shiphero/
+det run meta_ads  --target prod      # pre-baked: ships in the package
+det run shiphero  --target prod      # custom:   ./connectors/shiphero/
 ```
 
 A run's `default_destination: bigquery` typically resolves to the **pre-baked**
@@ -190,7 +190,7 @@ destination.
 **Project-local wins on a name collision.** To customize a baked connector — fix
 a bug, add a stream, change pagination — copy it into `connectors/<same_name>/`
 and edit. The engine finds the project-local copy first and the baked one is
-shadowed. No fork of the `simple_e` package, no patching: overriding is just a
+shadowed. No fork of the `det` package, no patching: overriding is just a
 folder.
 
 ## Target selection
@@ -198,36 +198,36 @@ folder.
 The active environment is chosen per invocation:
 
 ```bash
-simple_e run shiphero --target prod        # explicit
-simple_e run shiphero                      # uses simple_e_project.yml default_target
+det run shiphero --target prod        # explicit
+det run shiphero                      # uses det_project.yml default_target
 ```
 
 ```python
-import simple_e
-simple_e.run(connector="shiphero", target="prod")
+import det
+det.run(connector="shiphero", target="prod")
 ```
 
 The resolved target drives the full config layering from chapter 03 §6 —
-`register.yaml` defaults, then `simple_e_project.yml` `vars`, then the target's
+`register.yaml` defaults, then `det_project.yml` `vars`, then the target's
 `profiles.yml` blocks, then CLI/`run()` overrides — producing the immutable
 `Config` the connector body receives. Switching `--target` changes credentials
 and environment values without touching a single connector folder.
 
-## The `.simple_e/` working directory
+## The `.det/` working directory
 
 The disposable build directory — the `target/` analog. Created and owned by the
 engine, **git-ignored**, safe to delete at any time (the next run rebuilds it).
 
 | Path | Purpose |
 |---|---|
-| `.simple_e/manifest.json` | Cached, validated catalog of every discovered connector (its `register.yaml` parsed, streams, decorator bindings checked). Rebuilt when a `register.yaml` changes; speeds up repeat runs. |
-| `.simple_e/logs/` | Per-run structured log files, timestamped. |
-| `.simple_e/cache/` | Per-run scratch — destination schema introspection, temp artifacts. |
+| `.det/manifest.json` | Cached, validated catalog of every discovered connector (its `register.yaml` parsed, streams, decorator bindings checked). Rebuilt when a `register.yaml` changes; speeds up repeat runs. |
+| `.det/logs/` | Per-run structured log files, timestamped. |
+| `.det/cache/` | Per-run scratch — destination schema introspection, temp artifacts. |
 
-Nothing in `.simple_e/` is a source of truth. Incremental **state** is *not*
-here — it lives in the destination's `_simple_e_state` table (chapter 03 §3.5),
+Nothing in `.det/` is a source of truth. Incremental **state** is *not*
+here — it lives in the destination's `_det_state` table (chapter 03 §3.5),
 so a fresh checkout on a new machine resumes correctly with an empty
-`.simple_e/`.
+`.det/`.
 
 ## Recommended `.gitignore`
 
@@ -236,27 +236,27 @@ so a fresh checkout on a new machine resumes correctly with an empty
 profiles.yml
 
 # disposable working directory
-.simple_e/
+.det/
 ```
 
 ## Creating a project
 
 ```bash
-simple_e init acme_el
+det init acme_el
 ```
 
-Scaffolds the tree above: `simple_e_project.yml` with sensible defaults, a
+Scaffolds the tree above: `det_project.yml` with sensible defaults, a
 `profiles.yml` template with a single `dev` target, empty `connectors/` and
 `destinations/` folders, and the `.gitignore`. From there:
 
 ```bash
-simple_e new connector shiphero      # scaffold a custom source folder
-simple_e validate                    # discovery-time validation (chapter 03 §7)
-simple_e run shiphero --target dev   # run it
+det new connector shiphero      # scaffold a custom source folder
+det validate                    # discovery-time validation (chapter 03 §7)
+det run shiphero --target dev   # run it
 ```
 
 > [Open question: should `profiles.yml` live in the project root (visible,
-> easy to template per-repo) or default to `~/.simple_e/profiles.yml` like dbt's
+> easy to template per-repo) or default to `~/.det/profiles.yml` like dbt's
 > home-directory default (one credentials file shared across projects)? Current
 > lean: project-root by default — explicit and CI-friendly — with a
 > `--profiles-dir` flag for teams who prefer the dbt-style shared home file.]

@@ -1,4 +1,4 @@
-"""Unit tests for the simpl.E contract types — ``simple_e/types.py``.
+"""Unit tests for the det contract types — ``det/types.py``.
 
 These exercise *behavior*: enum parsing from YAML scalars, schema lookup and
 the engine-appended column, cursor observe/start_value semantics, Config
@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from simple_e.types import (
+from det.types import (
     Batch,
     Capability,
     Config,

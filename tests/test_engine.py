@@ -24,13 +24,13 @@ from pathlib import Path
 import duckdb
 import pytest
 
-import simple_e
-from simple_e.engine import config as cfg
-from simple_e.engine import discovery as disc
-from simple_e.engine.config import ConfigError
-from simple_e.engine.discovery import DiscoveryError
-from simple_e.engine.logger import RedactingFilter, build_logger
-from simple_e.types import (
+import det
+from det.engine import config as cfg
+from det.engine import discovery as disc
+from det.engine.config import ConfigError
+from det.engine.discovery import DiscoveryError
+from det.engine.logger import RedactingFilter, build_logger
+from det.types import (
     Incremental,
     ParamSpec,
     ParamType,
@@ -39,7 +39,7 @@ from simple_e.types import (
     WriteDisposition,
 )
 
-# The committed test project — tests/fixtures/ holds simple_e_project.yml,
+# The committed test project — tests/fixtures/ holds det_project.yml,
 # profiles.yml and connectors/echo/.
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -56,9 +56,9 @@ def _write_project(
     default_destination: str = "duckdb",
     vars_block: str = "",
 ) -> None:
-    """Write a minimal ``simple_e_project.yml`` into ``root``."""
+    """Write a minimal ``det_project.yml`` into ``root``."""
     root.mkdir(parents=True, exist_ok=True)
-    (root / "simple_e_project.yml").write_text(
+    (root / "det_project.yml").write_text(
         textwrap.dedent(
             f"""\
             name: tmp_project
@@ -101,7 +101,7 @@ def _write_echo_clone(folder: Path, *, summary: str, tags: str = "[fixture]") ->
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from simple_e import Batch, stream
+            from det import Batch, stream
             from collections.abc import Iterator
 
 
@@ -127,8 +127,8 @@ def test_find_project_root_walks_up(tmp_path: Path) -> None:
 
 
 def test_find_project_root_missing_raises(tmp_path: Path) -> None:
-    """A directory tree with no simple_e_project.yml raises DiscoveryError."""
-    with pytest.raises(DiscoveryError, match="no simple_e_project.yml"):
+    """A directory tree with no det_project.yml raises DiscoveryError."""
+    with pytest.raises(DiscoveryError, match="no det_project.yml"):
         disc.find_project_root(tmp_path)
 
 
@@ -143,13 +143,13 @@ def test_resolve_connector_project_local(tmp_path: Path) -> None:
 
 
 def test_resolve_connector_baked_destination(tmp_path: Path) -> None:
-    """The baked DuckDB destination resolves from simple_e/destinations/."""
+    """The baked DuckDB destination resolves from det/destinations/."""
     _write_project(tmp_path)
     loaded = disc.resolve_connector("duckdb", tmp_path, ["connectors"])
     assert loaded.manifest.name == "duckdb"
     assert loaded.manifest.kind.value == "destination"
     # It resolved from the baked package path, not the (empty) project.
-    assert "simple_e" in str(loaded.folder)
+    assert "det" in str(loaded.folder)
     assert "destinations" in str(loaded.folder)
 
 
@@ -163,9 +163,9 @@ def test_project_local_shadows_baked(tmp_path: Path) -> None:
     shadow = tmp_path / "connectors" / "duckdb"
     _write_echo_clone(shadow, summary="shadowing-copy")
     folder = disc.find_connector_folder("duckdb", tmp_path, ["connectors"])
-    # The project-local folder, NOT the baked simple_e/destinations/duckdb.
+    # The project-local folder, NOT the baked det/destinations/duckdb.
     assert folder == shadow.resolve()
-    assert "simple_e/destinations" not in str(folder)
+    assert "det/destinations" not in str(folder)
 
 
 def test_resolve_connector_unknown_name_raises(tmp_path: Path) -> None:
@@ -264,7 +264,7 @@ def test_validation_rejects_bad_stream_signature(tmp_path: Path) -> None:
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from simple_e import Batch, stream
+            from det import Batch, stream
             from collections.abc import Iterator
 
 
@@ -307,7 +307,7 @@ def test_config_precedence_register_default_only() -> None:
 
 
 def test_config_precedence_project_vars_over_default() -> None:
-    """simple_e_project.yml vars override the register.yaml default."""
+    """det_project.yml vars override the register.yaml default."""
     resolved = cfg.resolve_params(
         {"page_size": ParamSpec(type=ParamType.INT, default=50)},
         project_vars={"page_size": 100},
@@ -411,7 +411,7 @@ def test_secret_profile_value_nested_env(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_project_config_loads_fixture() -> None:
     """The committed fixture project parses with its documented keys."""
     project = cfg.ProjectConfig.load(FIXTURES_DIR)
-    assert project.name == "simple_e_test_project"
+    assert project.name == "det_test_project"
     assert project.connector_paths == ("connectors",)
     assert project.default_destination == "duckdb"
     assert project.default_target == "dev"
@@ -461,7 +461,7 @@ def test_build_logger_redacts(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # ==========================================================================
-# The run lifecycle — end to end through simple_e.run (docs/02)
+# The run lifecycle — end to end through det.run (docs/02)
 # ==========================================================================
 
 
@@ -475,8 +475,8 @@ def _query(db_path: str, sql: str) -> list[tuple]:
 
 
 def test_run_succeeds_and_returns_runresult(duckdb_path: str) -> None:
-    """simple_e.run drives the echo connector and returns a SUCCEEDED RunResult."""
-    result = simple_e.run(
+    """det.run drives the echo connector and returns a SUCCEEDED RunResult."""
+    result = det.run(
         connector="echo",
         target="dev",
         project_dir=str(FIXTURES_DIR),
@@ -493,7 +493,7 @@ def test_run_succeeds_and_returns_runresult(duckdb_path: str) -> None:
 
 def test_run_target_defaults_to_project_default(duckdb_path: str) -> None:
     """run() with no target uses the project's default_target (docs/06)."""
-    result = simple_e.run(
+    result = det.run(
         connector="echo",
         project_dir=str(FIXTURES_DIR),
         destination_params={"path": duckdb_path},
@@ -509,7 +509,7 @@ def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
     yield 0 items; a ``full_refresh`` run 2 ignores the cursor and re-extracts
     all 5.
     """
-    first = simple_e.run(
+    first = det.run(
         connector="echo",
         target="dev",
         project_dir=str(FIXTURES_DIR),
@@ -519,7 +519,7 @@ def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
     assert items_first is not None and items_first.rows_loaded == 5
 
     # A plain re-run resumes — items yields 0.
-    plain = simple_e.run(
+    plain = det.run(
         connector="echo",
         target="dev",
         project_dir=str(FIXTURES_DIR),
@@ -529,7 +529,7 @@ def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
     assert items_plain is not None and items_plain.rows_loaded == 0
 
     # A full-refresh re-run ignores the committed cursor — items yields all 5.
-    refreshed = simple_e.run(
+    refreshed = det.run(
         connector="echo",
         target="dev",
         project_dir=str(FIXTURES_DIR),
@@ -543,7 +543,7 @@ def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
 
 def test_run_select_skips_unselected_streams(duckdb_path: str) -> None:
     """run(select=...) runs only the named streams; the rest are SKIPPED."""
-    result = simple_e.run(
+    result = det.run(
         connector="echo",
         target="dev",
         project_dir=str(FIXTURES_DIR),
@@ -559,7 +559,7 @@ def test_run_select_skips_unselected_streams(duckdb_path: str) -> None:
 
 def test_run_failure_returns_failed_runresult(duckdb_path: str) -> None:
     """run() never raises — an unknown connector becomes a FAILED RunResult."""
-    result = simple_e.run(
+    result = det.run(
         connector="no_such_connector",
         target="dev",
         project_dir=str(FIXTURES_DIR),
@@ -579,7 +579,7 @@ def test_run_failing_stream_keeps_prior_stream_state(
 
     docs/02 §Commit granularity: state commits per stream. This builds a source
     whose first stream succeeds and whose second stream raises. The run fails,
-    but the first stream's row already committed to ``_simple_e_state`` — proof
+    but the first stream's row already committed to ``_det_state`` — proof
     that per-stream commit survives a later failure and a re-run would resume.
     """
     _write_project(tmp_path)
@@ -611,7 +611,7 @@ def test_run_failing_stream_keeps_prior_stream_state(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from simple_e import Batch, stream
+            from det import Batch, stream
             from collections.abc import Iterator
 
 
@@ -628,7 +628,7 @@ def test_run_failing_stream_keeps_prior_stream_state(
         )
     )
 
-    result = simple_e.run(
+    result = det.run(
         connector="partial",
         target="dev",
         project_dir=str(tmp_path),
@@ -642,10 +642,10 @@ def test_run_failing_stream_keeps_prior_stream_state(
     assert bad_result is not None and bad_result.status.value == "failed"
 
     # The crash-safety guarantee: the `good` stream's state committed before
-    # `bad` failed, so its row survives in _simple_e_state.
+    # `bad` failed, so its row survives in _det_state.
     state = _query(
         duckdb_path,
-        "SELECT stream, rows_total FROM _simple_e_state WHERE connector = 'partial'",
+        "SELECT stream, rows_total FROM _det_state WHERE connector = 'partial'",
     )
     streams_committed = {row[0]: row[1] for row in state}
     assert streams_committed.get("good") == 2
@@ -696,7 +696,7 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from simple_e import Batch, stream
+            from det import Batch, stream
             from collections.abc import Iterator
 
 
@@ -710,7 +710,7 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
         )
     )
 
-    result = simple_e.run(
+    result = det.run(
         connector="crasher",
         target="dev",
         project_dir=str(tmp_path),
@@ -725,7 +725,7 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
     # ...and no cursor/state row was committed for the stream either.
     state = _query(
         duckdb_path,
-        "SELECT COUNT(*) FROM _simple_e_state WHERE connector = 'crasher'",
+        "SELECT COUNT(*) FROM _det_state WHERE connector = 'crasher'",
     )
     assert state[0][0] == 0
 
@@ -761,7 +761,7 @@ def test_run_inferred_schema_for_undeclared_stream(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from simple_e import Batch, stream
+            from det import Batch, stream
             from collections.abc import Iterator
 
 
@@ -771,7 +771,7 @@ def test_run_inferred_schema_for_undeclared_stream(
             """
         )
     )
-    result = simple_e.run(
+    result = det.run(
         connector="noschema",
         target="dev",
         project_dir=str(tmp_path),
@@ -816,7 +816,7 @@ def test_run_strict_schema_rejects_divergence(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from simple_e import Batch, stream
+            from det import Batch, stream
             from collections.abc import Iterator
 
 
@@ -826,7 +826,7 @@ def test_run_strict_schema_rejects_divergence(
             """
         )
     )
-    result = simple_e.run(
+    result = det.run(
         connector="strict",
         target="dev",
         project_dir=str(tmp_path),
@@ -863,7 +863,7 @@ def test_run_default_destination_when_no_binding(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from simple_e import Batch, stream
+            from det import Batch, stream
             from collections.abc import Iterator
 
 
@@ -873,7 +873,7 @@ def test_run_default_destination_when_no_binding(
             """
         )
     )
-    result = simple_e.run(
+    result = det.run(
         connector="nobinding",
         target="dev",
         project_dir=str(tmp_path),
@@ -885,7 +885,7 @@ def test_run_default_destination_when_no_binding(
 
 def test_run_rejects_running_a_destination(duckdb_path: str) -> None:
     """Asking run() to run a destination connector fails cleanly."""
-    result = simple_e.run(
+    result = det.run(
         connector="duckdb",
         target="dev",
         project_dir=str(FIXTURES_DIR),
@@ -903,7 +903,7 @@ def test_run_incremental_initial_value_seeds_cursor(duckdb_path: str) -> None:
     On the first run the engine parses ``"0"`` → ``0``, so the stream yields all
     5 records and the committed cursor is the int 5.
     """
-    result = simple_e.run(
+    result = det.run(
         connector="echo",
         target="dev",
         project_dir=str(FIXTURES_DIR),
@@ -915,7 +915,7 @@ def test_run_incremental_initial_value_seeds_cursor(duckdb_path: str) -> None:
     assert items.cursor_after == 5  # observed max
     state = _query(
         duckdb_path,
-        "SELECT cursor_type FROM _simple_e_state "
+        "SELECT cursor_type FROM _det_state "
         "WHERE connector = 'echo' AND stream = 'items'",
     )
     assert state[0][0] == "int"

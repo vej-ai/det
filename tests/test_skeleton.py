@@ -1,8 +1,8 @@
-"""Smoke test for the simpl.E package skeleton."""
+"""Smoke test for the det package skeleton."""
 
-import simple_e
+import det
 
 
 def test_package_imports_and_has_version() -> None:
     """The package imports cleanly and exposes a non-empty version string."""
-    assert simple_e.__version__
+    assert det.__version__

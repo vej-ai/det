@@ -1,13 +1,13 @@
-# Contributing to simpl.E
+# Contributing to det
 
-Thanks for your interest in simpl.E. This is a short stub — it will grow as the
+Thanks for your interest in det. This is a short stub — it will grow as the
 project does. The governing principle is in the
 [design handbook](./docs/00-vision-and-naming.md): **keep it as simple as
 possible.**
 
 ## Dev setup
 
-simpl.E targets Python 3.11+. Clone the repo, then create a virtual environment
+det targets Python 3.11+. Clone the repo, then create a virtual environment
 and install the package in editable mode with the `dev` extras:
 
 ```sh
@@ -26,7 +26,7 @@ pytest -q
 
 ```sh
 ruff check .
-mypy simple_e
+mypy det
 ```
 
 Please make sure `pytest`, `ruff check`, and `mypy` all pass before opening a
@@ -39,5 +39,5 @@ implementation and remains the canonical *intent*. But once a contract is
 implemented in code, **the code is the source of truth** — if the handbook and
 the code diverge, fix the handbook to match the code, not the other way around.
 This avoids re-litigating handbook ambiguities at every stage. Notable already:
-`simple_e/types.py::StateRecord` defines the canonical `_simple_e_state` schema
+`det/types.py::StateRecord` defines the canonical `_det_state` schema
 (docs/03 §3.5 and docs/05 §5.1 follow it).

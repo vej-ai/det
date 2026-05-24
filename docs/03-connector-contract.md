@@ -1,7 +1,7 @@
 # 03 — The Connector Contract
 
 This is the most important chapter in the handbook. It defines the single,
-mandatory contract every simpl.E connector obeys. If you read only one section,
+mandatory contract every det connector obeys. If you read only one section,
 read this one.
 
 ## Design principle
@@ -15,10 +15,10 @@ like. The Python files are the *implementation*: the actual extract/load logic,
 wrapped in decorators.
 
 This split is the "dlt meets dbt" cut. dbt's `dbt_project.yml` and schema YAML
-declare structure; the `.sql` files carry logic. simpl.E does the same. We do
+declare structure; the `.sql` files carry logic. det does the same. We do
 **not** push request payloads, pagination paths, or query strings into YAML —
 that road leads to Airbyte's config-driven YAML blackbox, which is explicitly
-what simpl.E is not.
+what det is not.
 
 A useful litmus test, applied to every `register.yaml` key in this chapter:
 
@@ -131,7 +131,7 @@ prototype with inference, ship with an explicit schema.
 
 The engine always appends one column the connector author never declares:
 
-- `_simple_e_synced_at` (`TIMESTAMP`) — load timestamp, set by the engine.
+- `_det_synced_at` (`TIMESTAMP`) — load timestamp, set by the engine.
 
 This generalizes ShipHero's hand-rolled `_synced_at` field.
 
@@ -219,10 +219,10 @@ The engine resolves refs lazily and never logs secret values.
 schedule: "0 */6 * * *"   # cron, or an alias: hourly | daily | weekly
 ```
 
-`schedule` is advisory. simpl.E does not run a daemon. The value is surfaced to
-whatever orchestrator invokes simpl.E (cron, Airflow, Cloud Scheduler, a CI job)
+`schedule` is advisory. det does not run a daemon. The value is surfaced to
+whatever orchestrator invokes det (cron, Airflow, Cloud Scheduler, a CI job)
 so the schedule lives next to the connector instead of in a separate system. The
-engine reads it for `simple-e list --schedules` but never acts on it.
+engine reads it for `det list --schedules` but never acts on it.
 
 ### 2.7 Worked example A — a simple REST source
 
@@ -342,7 +342,7 @@ flatten-vs-JSON-column discussion.)*
 
 ## 3. The decorator API
 
-The connector body is plain Python decorated with simpl.E decorators. There is
+The connector body is plain Python decorated with det decorators. There is
 **one default authoring style** and one escape hatch (§4).
 
 ### 3.1 `@stream` — the default for sources
@@ -352,7 +352,7 @@ the only decorator a normal source author needs.
 
 ```python
 # connectors/shiphero/source.py
-from simple_e import stream
+from det import stream
 
 @stream(name="shipments")
 def shipments(config, state, cursor, log):
@@ -428,7 +428,7 @@ writes cursor state itself — that is the engine's job, which is what makes
 
 `@resource` is a registered **alias** of `@stream`, provided so authors arriving
 from dlt feel at home. It is identical in every respect. The handbook, examples,
-and `simple-e new` scaffolding all use `@stream`. `@resource` is mentioned once,
+and `det new` scaffolding all use `@stream`. `@resource` is mentioned once,
 here, and never again — there is one authoring style, not two.
 
 ### 3.4 The `@destination` hooks — the destination contract
@@ -442,7 +442,7 @@ than one entry point because the job genuinely is more than one thing.
 
 ```python
 # connectors/bigquery/destination.py
-from simple_e import destination, Capability, Schema, Batch, StateRecord
+from det import destination, Capability, Schema, Batch, StateRecord
 
 @destination.capabilities
 def capabilities() -> set[Capability]:
@@ -481,7 +481,7 @@ def close(conn):                         # flush + release — always runs
 | `@destination.open` | **Yes** | Acquires a connection/handle from `config`. Called once per run. |
 | `@destination.ensure_schema` | **Yes** | Creates the target table if absent; performs additive `ALTER` for schema evolution. Receives a `StreamMeta`. |
 | `@destination.write_batch` | **Yes** | Persists one batch (a `list[dict]` yielded by a source `@stream`) per the stream's `write_disposition`. Receives a `StreamMeta`. Returns rows written. |
-| `@destination.commit_state` | If `Capability.STATE` | Writes cursor state to `_simple_e_state`. Called **only** after all batches durably land. |
+| `@destination.commit_state` | If `Capability.STATE` | Writes cursor state to `_det_state`. Called **only** after all batches durably land. |
 | `@destination.read_state` | If `Capability.STATE` | Loads prior cursor state at run start. |
 | `@destination.state_backend` | If **not** `Capability.STATE` | Returns a companion state backend for Tier B (object-storage) destinations. |
 | `@destination.transaction` | If `Capability.TRANSACTIONAL_LOAD` | A context-manager hook the engine wraps around each stream's `write_batch`+`commit_state` block, so data and cursor flip atomically. See chapter 05 §1. |
@@ -504,7 +504,7 @@ write-disposition implementations, and the Tier A/B state model are specified in
 chapter **05 — Destinations & State**; this section defines only the decorator
 contract a destination author binds to.
 
-### 3.5 The state table — `_simple_e_state`
+### 3.5 The state table — `_det_state`
 
 Incremental state lives **in the destination**, in a table the engine owns. This
 generalizes ShipHero's `sync_checkpoints` table.
@@ -516,12 +516,12 @@ generalizes ShipHero's `sync_checkpoints` table.
 | `cursor_value` | JSON | Last observed max cursor value (serialized). |
 | `cursor_type` | STRING | `timestamp` / `date` / `int` / `string` — how to deserialize `cursor_value`. |
 | `state_blob` | JSON | Free-form per-stream `State` contents. |
-| `last_run_id` | STRING | `run_id` of the run that last advanced this row — joins to `_simple_e_runs`. |
+| `last_run_id` | STRING | `run_id` of the run that last advanced this row — joins to `_det_runs`. |
 | `rows_total` | INTEGER | Cumulative rows loaded for this stream. |
 | `updated_at` | TIMESTAMP | When this row was last written. |
 
 Primary key: `(connector, stream)`. Eight columns — the canonical schema; this
-table and chapter **05 §5.1** both follow `simple_e/types.py::StateRecord`, the
+table and chapter **05 §5.1** both follow `det/types.py::StateRecord`, the
 source of truth. The engine reads this row at the start of a run and writes it
 after batches are durably loaded — never mid-batch in a way that could lose
 data. Because state lives with the data, a fresh checkout of a project resumes
@@ -537,7 +537,7 @@ cross-stream ordering constraints — a connector may instead subclass
 
 ```python
 # connectors/complex_erp/source.py
-from simple_e import Connector, stream_method
+from det import Connector, stream_method
 
 class ComplexERPSource(Connector):
     """Escape hatch: a long-lived session shared across streams."""
@@ -575,28 +575,28 @@ inheritance hierarchies. The decorator style keeps each stream a single,
 self-contained, testable function. Reach for the class **only** when a
 genuinely shared lifecycle (`setup`/`teardown`) cannot be expressed cleanly
 per-function. If you are not writing `setup()`/`teardown()`, you do not need the
-class. `simple-e new` never scaffolds it.
+class. `det new` never scaffolds it.
 
 ## 5. Connector resolution — baked vs custom
 
 A run names a connector. The engine resolves the name in a fixed order:
 
 1. **Project-local connectors** — `connectors/<name>/` under the user's project
-   (`connector_paths` in `simple_e_project.yml`, chapter 06).
-2. **Pre-baked connectors** — `simple_e/connectors/<name>/` shipped inside the
-   installed `simple_e` package.
+   (`connector_paths` in `det_project.yml`, chapter 06).
+2. **Pre-baked connectors** — `det/connectors/<name>/` shipped inside the
+   installed `det` package.
 
 Project-local wins on a name collision, so a user can fork and override a baked
 connector by dropping a same-named folder into their project.
 
 ```python
-import simple_e
+import det
 
 # baked connector shipped in the package
-simple_e.run(connector="meta_ads", target="prod")
+det.run(connector="meta_ads", target="prod")
 
 # project-local connector in ./connectors/custom/
-simple_e.run(connector="custom", target="prod")
+det.run(connector="custom", target="prod")
 ```
 
 There is no third category and no registry service — resolution is two
@@ -610,17 +610,17 @@ Resolution is layered, lowest precedence first:
 ```
 register.yaml params[].default      (the connector's own defaults)
       └─▶ profiles.yml vars for the target   (per-environment overrides)
-            └─▶ simple_e_project.yml vars     (project-wide overrides)
+            └─▶ det_project.yml vars     (project-wide overrides)
                   └─▶ CLI flags / run() kwargs  (per-invocation, highest)
 ```
 
 ```bash
 # register.yaml default page_size: 50  ->  overridden for this run
-simple-e run shiphero --target prod --param page_size=100
+det run shiphero --target prod --param page_size=100
 ```
 
 ```python
-simple_e.run(connector="shiphero", target="prod", params={"page_size": 100})
+det.run(connector="shiphero", target="prod", params={"page_size": 100})
 ```
 
 The engine resolves all layers, type-checks every value against its `ParamSpec`,
@@ -630,8 +630,8 @@ files itself — it receives `config` and `config.secrets[...]` ready to use.
 
 ## 7. Discovery-time validation
 
-When the engine scans a connector folder (on `simple-e run`, `simple-e validate`,
-or `simple-e list`), it validates **before importing any connector Python**:
+When the engine scans a connector folder (on `det run`, `det validate`,
+or `det list`), it validates **before importing any connector Python**:
 
 1. **`register.yaml` exists and parses** as YAML.
 2. **Schema check** — every top-level key is known; every required key is
@@ -660,7 +660,7 @@ Then it imports the Python and validates the **code ↔ manifest** binding:
    parameter name is an error, because the engine would not know what to inject.
 
 Validation is fail-fast and reports every problem found, not just the first, so
-`simple-e validate` is a useful pre-commit / CI gate.
+`det validate` is a useful pre-commit / CI gate.
 
 ---
 

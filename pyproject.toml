@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "simple-e"
+name = "det"
 version = "0.1.0"
-description = "simpl.E — a simple, open-source Python extract-load (EL) tool. dlt meets dbt."
+description = "det — a simple, open-source Python extract-load (EL) tool. dlt meets dbt."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -46,24 +46,24 @@ gcs = ["google-cloud-storage>=2.10"]
 s3 = ["boto3>=1.28"]
 
 [project.scripts]
-simple-e = "simple_e.cli:main"
+det = "det.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/albinasplesnys/simple_e"
-Documentation = "https://github.com/albinasplesnys/simple_e/tree/main/docs"
-Source = "https://github.com/albinasplesnys/simple_e"
+Homepage = "https://github.com/albinasplesnys/det"
+Documentation = "https://github.com/albinasplesnys/det/tree/main/docs"
+Source = "https://github.com/albinasplesnys/det"
 
 [tool.hatch.build]
 include = [
-    "simple_e/**",
+    "det/**",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["simple_e"]
+packages = ["det"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "simple_e/**",
+    "det/**",
     "docs/**",
     "tests/**",
     "README.md",

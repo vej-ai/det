@@ -1,4 +1,4 @@
-"""CLI tests — real ``simple-e`` invocations via click's :class:`CliRunner`.
+"""CLI tests — real ``det`` invocations via click's :class:`CliRunner`.
 
 The CLI is a thin shell over the engine, so these tests invoke the command
 group exactly as a shell would and assert on exit codes and printed output:
@@ -28,8 +28,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner, Result
 
-import simple_e
-from simple_e.cli import cli
+import det
+from det.cli import cli
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -41,13 +41,13 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 @pytest.fixture
 def runner() -> CliRunner:
-    """A click test runner that invokes the ``simple-e`` command group."""
+    """A click test runner that invokes the ``det`` command group."""
     return CliRunner()
 
 
 @pytest.fixture
 def cli_project(tmp_path: Path) -> Path:
-    """A throwaway copy of ``tests/fixtures/`` — a real, runnable simpl.E project.
+    """A throwaway copy of ``tests/fixtures/`` — a real, runnable det project.
 
     Copied per test so a ``run`` / ``state reset`` mutates a temp tree, never
     the committed fixture. Returns the project root.
@@ -83,14 +83,14 @@ def _show(result: Result) -> str:
 
 
 def test_version(runner: CliRunner) -> None:
-    """``simple-e --version`` prints the package version and exits 0."""
+    """``det --version`` prints the package version and exits 0."""
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0, _show(result)
-    assert simple_e.__version__ in result.output
+    assert det.__version__ in result.output
 
 
 def test_help_lists_every_command(runner: CliRunner) -> None:
-    """``simple-e --help`` lists all seven command groups."""
+    """``det --help`` lists all seven command groups."""
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0, _show(result)
     for command in ("run", "list", "validate", "init", "new", "state"):
@@ -346,7 +346,7 @@ def test_init_scaffolds_project(runner: CliRunner, tmp_path: Path) -> None:
     target = tmp_path / "fresh_project"
     result = runner.invoke(cli, ["init", str(target)])
     assert result.exit_code == 0, _show(result)
-    assert (target / "simple_e_project.yml").is_file()
+    assert (target / "det_project.yml").is_file()
     assert (target / "profiles.yml").is_file()
     assert (target / ".gitignore").is_file()
     assert (target / "README.md").is_file()
@@ -373,10 +373,10 @@ def test_init_force_overwrites(runner: CliRunner, tmp_path: Path) -> None:
 
 
 def test_init_scaffolds_runnable_project(runner: CliRunner, tmp_path: Path) -> None:
-    """A scaffolded project's simple_e_project.yml is a valid, parseable project."""
+    """A scaffolded project's det_project.yml is a valid, parseable project."""
     target = tmp_path / "p"
     runner.invoke(cli, ["init", str(target)])
-    # `list` walks up for simple_e_project.yml — it succeeds on the scaffold.
+    # `list` walks up for det_project.yml — it succeeds on the scaffold.
     result = runner.invoke(cli, ["list", "--project-dir", str(target)])
     assert result.exit_code == 0, _show(result)
 
@@ -422,7 +422,7 @@ def test_new_connector_destination_kind(runner: CliRunner, tmp_path: Path) -> No
 
 
 def test_new_connector_is_validatable(runner: CliRunner, tmp_path: Path) -> None:
-    """A scaffolded source connector passes ``simple-e validate`` out of the box."""
+    """A scaffolded source connector passes ``det validate`` out of the box."""
     project = tmp_path / "proj"
     runner.invoke(cli, ["init", str(project)])
     runner.invoke(cli, ["new", "connector", "fresh", "--project-dir", str(project)])

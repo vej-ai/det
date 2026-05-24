@@ -13,17 +13,17 @@ points the connector's ``base_url`` at it. The stub:
   specific request so the retry / backoff / fail-fast paths are covered.
 
 The end-to-end test runs the connector through the real engine
-(:func:`simple_e.run`) into a tmp DuckDB destination and asserts rows land
-plus the ``_simple_e_state`` cursor advances. Tests use the project at
-``tests/fixtures/`` (already a real simpl.E project with a default DuckDB
+(:func:`det.run`) into a tmp DuckDB destination and asserts rows land
+plus the ``_det_state`` cursor advances. Tests use the project at
+``tests/fixtures/`` (already a real det project with a default DuckDB
 destination) and rely on the stripe baked connector under
-``simple_e/connectors/stripe/``.
+``det/connectors/stripe/``.
 
 Citations:
 
 * docs/03 §2.5 — secret refs ``${env.STRIPE_API_KEY}`` resolved by the engine.
 * docs/connectors/stripe-research.md §B — REST pagination + auth shape.
-* docs/03 §3.2 — incremental cursor + ``_simple_e_state`` semantics.
+* docs/03 §3.2 — incremental cursor + ``_det_state`` semantics.
 """
 
 from __future__ import annotations
@@ -40,9 +40,9 @@ from urllib.parse import parse_qsl, urlparse
 import duckdb
 import pytest
 
-import simple_e
-from simple_e.connectors.stripe.client import StripeAPIError, StripeClient
-from simple_e.connectors.stripe.pagination import paginate
+import det
+from det.connectors.stripe.client import StripeAPIError, StripeClient
+from det.connectors.stripe.pagination import paginate
 
 # --------------------------------------------------------------------------
 # Stub Stripe server — stdlib HTTPServer on a random port
@@ -320,7 +320,7 @@ def test_pagination_walks_three_pages_with_starting_after(
 
 
 def _make_stripe_project(tmp_path: Path, base_url: str) -> Path:
-    """Write a minimal simpl.E project that drives the stripe baked connector.
+    """Write a minimal det project that drives the stripe baked connector.
 
     The project has no project-local connectors — the engine finds `stripe`
     under the baked path. It overrides `base_url` via the project-wide
@@ -328,7 +328,7 @@ def _make_stripe_project(tmp_path: Path, base_url: str) -> Path:
     kwargs) so the stripe connector points at our stub server.
     """
     project_root = tmp_path
-    (project_root / "simple_e_project.yml").write_text(
+    (project_root / "det_project.yml").write_text(
         textwrap.dedent(
             f"""\
             name: stripe_test_project
@@ -353,7 +353,7 @@ def _make_stripe_project(tmp_path: Path, base_url: str) -> Path:
               dev:
                 destinations:
                   duckdb:
-                    path: ".simple_e/warehouse.duckdb"
+                    path: ".det/warehouse.duckdb"
             """
         )
     )
@@ -377,7 +377,7 @@ def test_first_run_no_cursor_omits_created_gte(
 
     project_root = _make_stripe_project(tmp_path, base_url)
     db_path = str(project_root / "warehouse.duckdb")
-    result = simple_e.run(
+    result = det.run(
         connector="stripe",
         target="dev",
         project_dir=str(project_root),
@@ -430,7 +430,7 @@ def test_second_run_sends_created_gte_from_committed_cursor(
     project_root = _make_stripe_project(tmp_path, base_url)
     db_path = str(project_root / "warehouse.duckdb")
 
-    first = simple_e.run(
+    first = det.run(
         connector="stripe",
         target="dev",
         project_dir=str(project_root),
@@ -438,7 +438,7 @@ def test_second_run_sends_created_gte_from_committed_cursor(
     )
     assert first.status.value == "succeeded", first.error
 
-    second = simple_e.run(
+    second = det.run(
         connector="stripe",
         target="dev",
         project_dir=str(project_root),
@@ -471,7 +471,7 @@ def test_extra_query_params_propagate(
     # are the highest-precedence layer per docs/03 §6; merged into the source
     # config and surfaced to every stream that declares the same param name).
     db_path = str(project_root / "warehouse.duckdb")
-    result = simple_e.run(
+    result = det.run(
         connector="stripe",
         target="dev",
         project_dir=str(project_root),
@@ -489,7 +489,7 @@ def test_end_to_end_lands_rows_and_advances_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: rows land in DuckDB and `_simple_e_state` carries the cursor."""
+    """End-to-end: rows land in DuckDB and `_det_state` carries the cursor."""
     scenario, base_url = stripe_stub
     monkeypatch.setenv("STRIPE_API_KEY", "sk_test_e2e")
 
@@ -537,7 +537,7 @@ def test_end_to_end_lands_rows_and_advances_state(
 
     project_root = _make_stripe_project(tmp_path, base_url)
     db_path = str(project_root / "warehouse.duckdb")
-    result = simple_e.run(
+    result = det.run(
         connector="stripe",
         target="dev",
         project_dir=str(project_root),
@@ -561,9 +561,9 @@ def test_end_to_end_lands_rows_and_advances_state(
             ("ch_y", 1720000100, 2000, "usd"),
             ("ch_z", 1720000200, 3000, "usd"),
         ]
-        # _simple_e_state row carries the advanced cursor.
+        # _det_state row carries the advanced cursor.
         state = conn.execute(
-            "SELECT cursor_value, cursor_type, rows_total FROM _simple_e_state "
+            "SELECT cursor_value, cursor_type, rows_total FROM _det_state "
             "WHERE connector = 'stripe' AND stream = 'charges'"
         ).fetchall()
         assert len(state) == 1
@@ -598,7 +598,7 @@ def test_api_key_never_appears_in_logs(
     project_root = _make_stripe_project(tmp_path, base_url)
     db_path = str(project_root / "warehouse.duckdb")
     with caplog.at_level("DEBUG"):
-        result = simple_e.run(
+        result = det.run(
             connector="stripe",
             target="dev",
             project_dir=str(project_root),
