@@ -5,6 +5,14 @@
 
 This section specifies how det **loads** data and how it remembers **where it left off**. It is the architectural keystone of the tool: state is what makes incremental extraction correct, and the destination is where state lives.
 
+> # NOTE: post-8.B, the *binding* of a source to a destination lives in a
+> **pipeline config** (chapter 12), not in the source's `register.yaml`. The
+> destination contract specified in this chapter — the `@destination` hooks,
+> the capability tiers, the state design — is unchanged; only where the
+> source decides which destination to write to changed. Connection params
+> (Tier A destinations' DB endpoints and credentials) live in `profiles.yml`,
+> destination-keyed (chapter 06).
+
 ---
 
 ## 1. A destination is a connector

@@ -66,18 +66,24 @@ destinations resolve through the *same* path — they are the same kind of objec
 A `det run` (or `det.run()`) is one synchronous pass through a fixed
 sequence. It either reaches `commit` and exits `0`, or it fails and exits non-zero.
 
+The runtime unit is a **config** (chapter 12) — a pipeline file under
+`configs/` naming source + destination + target + params. The CLI's `-p` /
+`--conf` arg names the config; the library's `det.run(config=...)` mirrors it.
+
 ```
-  det run -c custom
+  det run -p my_pipeline
         │
         ▼
   ┌─────────────────────────────────────────────────────────────────┐
-  │ 1. DISCOVER    locate project; resolve connector(s) by name/tag  │
-  │ 2. RESOLVE     merge det_project.yml + profiles.yml + env +  │
-  │                CLI flags  →  one frozen RunConfig                │
+  │ 1. DISCOVER    locate project; LOAD CONFIG by name; resolve     │
+  │                its source + destination (project-local-first)    │
+  │ 2. RESOLVE     merge register.yaml + det_project.yml vars +     │
+  │                config params + profiles.yml row + env + CLI     │
+  │                → one frozen RunConfig                            │
   │ 3. INIT DEST   open destination connector; ensure it is ready;   │
   │                determine its capability tier                    │
-  │ 4. LOAD STATE  read _det_state from the destination         │
-  │                (or its companion state backend — see tiers)     │
+  │ 4. LOAD STATE  read _det_state from the destination (keyed by   │
+  │                source name — chapter 12 §6)                     │
   │ 5. RUN STREAMS for each selected stream  (sequential in v1):     │
   │      a. EXTRACT    drive the @stream generator → batches         │
   │      b. NORMALIZE  infer/evolve schema; coerce types per batch   │
@@ -91,12 +97,15 @@ sequence. It either reaches `commit` and exits `0`, or it fails and exits non-ze
 Stages 1–4 are setup; stage 5 is the real work; stage 6 is the audit trail.
 
 - **Discover** — find the project root (walk up for `det_project.yml`),
-  then resolve every connector implied by `-c` or `--tag`.
-- **Resolve** — config precedence, lowest to highest: connector `register.yaml`
-  defaults → `det_project.yml` defaults → `profiles.yml` (active profile) →
-  environment variables → CLI flags. The result is a **frozen `RunConfig`** —
-  nothing reads ambient config after this point. (The `defaults` + override idea
-  is borrowed from Sling's replication YAML.)
+  load `configs/` and look up the named config, resolve its source +
+  destination via project-local-first lookup (chapter 03 §5).
+- **Resolve** — merge every config layer. For a source param:
+  `register.yaml` defaults → `det_project.yml` `vars:` → the active config's
+  `params:` block → environment variables → CLI/`run()` overrides. For a
+  destination param: register.yaml defaults → project `vars:` →
+  `profiles.yml[<destination>].targets[<target>]` → config's
+  `destination_params:` → env → CLI/`run()` overrides. The result is a
+  **frozen `RunConfig`** — nothing reads ambient config after this point.
 - **Init destination** — open the destination connector and confirm it can
   receive writes. This also fixes its **capability tier** (next section), which
   decides where state lives.
@@ -168,17 +177,21 @@ generators; both are pulled the same way. (Their full contract — signature,
 `register.yaml` declaration, the class escape hatch — is owned by the connector
 handbook.)
 
-## Tag-based selection
+## Pipeline selection — by config name (post-8.B)
 
-det selects work the way dbt does — by **name** or by **tag**.
+det selects work by **pipeline config name** (chapter 12):
 
-- `det run -c orders` — run one connector by name.
-- `det run --tag hourly` — run every connector whose `register.yaml`
-  declares the `hourly` tag.
-- Wildcards (`-c "shopify.*"`) select families of streams, the pattern borrowed
-  from Sling's wildcard replication.
+- `det run -p shiphero_prod` — run one pipeline by its config name.
+- `det run --conf shiphero_prod` — same, long-form alias.
 
-Tags are declared in each connector's `register.yaml` and resolved at the
+> # NOTE: pre-8.B det supported `-c <connector>` and `--tag <tag>`
+> selection. Stage 8.B removed both. A connector alone is not a complete
+> runtime unit (no destination, no target); a config is. The `tags` key on a
+> source's `register.yaml` is still parsed (it appears in `det list`), but
+> no longer drives selection — a project author groups pipelines by writing
+> multiple configs.
+
+Tags are still declared in each connector's `register.yaml` and resolved at the
 **discover** stage into a concrete connector set before anything runs. Selection
 is purely a *filter over discovered connectors* — it adds no runtime concept,
 which is why it passes the det test.

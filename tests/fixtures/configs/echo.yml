@@ -1,0 +1,17 @@
+# Test-suite configs — both bound to the echo source (docs/12).
+#
+# Smoke + engine tests resolve `echo_dev` by name (`-p echo_dev` /
+# det.run(config="echo_dev")). The DuckDB `path` defaults to the fixture
+# profiles block; per-test overrides come in via run(destination_params_override=…).
+# The `echo_prod` config exists so tests can prove a different config name
+# routes the same source through a different target.
+configs:
+  - name: echo_dev
+    source: echo
+    destination: duckdb
+    target: dev
+
+  - name: echo_prod
+    source: echo
+    destination: duckdb
+    target: prod

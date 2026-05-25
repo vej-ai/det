@@ -1,29 +1,29 @@
-# det profiles for the engine test suite (docs/06).
+# det profiles for the engine test suite (docs/06 post-8.B).
 #
 # Normally NOT committed — here it is a test fixture, so it carries no real
-# secrets. Each target is a named environment selected by run(target=...).
-targets:
+# secrets. Top-level keys are destination connector names (each carries its
+# own `default_target` + `targets:` connection params). A parallel top-level
+# `profiles:` block, keyed by target name, carries source-secret rows so
+# ${profile.<block>.<key>} still resolves under the locked two-form contract.
 
+# The pre-baked DuckDB destination. Engine tests override `path` per-test via
+# run(destination_params_override={"path": ...}), so the values here are the
+# fall-throughs the test config's own destination_params can take.
+duckdb:
+  default_target: dev
+  targets:
+    dev:
+      path: ".det/warehouse.duckdb"
+    prod:
+      path: ".det/warehouse-prod.duckdb"
+
+# Per-target source-secret blocks. The `echo` fixture declares no secrets;
+# this is here so the secret-resolution engine test has a profile value to
+# resolve via ${profile.echo.sample_token}.
+profiles:
   dev:
-    # Destination credential/routing blocks, keyed by destination connector
-    # name (docs/06). The DuckDB destination's `path` defaults to a project-
-    # local file; engine tests override it per-test via run(destination_params=).
-    destinations:
-      duckdb:
-        path: ".det/warehouse.duckdb"
-
-    # Named credential blocks resolved by ${profile.<block>.<key>} secret refs
-    # in any register.yaml (docs/03 §2.5). The `echo` fixture declares no
-    # secrets; this block exists so the secret-resolution engine test has a
-    # profile value to resolve against.
-    profiles:
-      echo:
-        sample_token: "dev-profile-token"
-
+    echo:
+      sample_token: "dev-profile-token"
   prod:
-    destinations:
-      duckdb:
-        path: ".det/warehouse-prod.duckdb"
-    profiles:
-      echo:
-        sample_token: "prod-profile-token"
+    echo:
+      sample_token: "prod-profile-token"

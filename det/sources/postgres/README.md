@@ -83,7 +83,7 @@ streams:
 
 ```python
 from det import stream
-from det.connectors.postgres.source import extract_stream
+from det.sources.postgres.source import extract_stream
 
 @stream(name="users")
 def users(config, cursor, log):

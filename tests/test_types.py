@@ -596,6 +596,7 @@ def test_run_config_is_frozen_and_selects() -> None:
     """RunConfig is immutable; selects() honors the --select subset."""
     rc = RunConfig(
         run_id="a1b9f3",
+        pipeline="stripe_prod",
         connector="stripe",
         target="prod",
         config=Config(params={"page_size": 100}),
@@ -610,7 +611,9 @@ def test_run_config_is_frozen_and_selects() -> None:
 
 def test_run_config_select_all_when_empty() -> None:
     """An empty select means every stream is in scope."""
-    rc = RunConfig(run_id="r", connector="c", target="dev", config=Config())
+    rc = RunConfig(
+        run_id="r", pipeline="p", connector="c", target="dev", config=Config()
+    )
     assert rc.is_select_all
     assert rc.selects("anything")
 
@@ -636,6 +639,7 @@ def test_run_result_duration_and_lookup() -> None:
     end = start + timedelta(seconds=41, milliseconds=200)
     rr = RunResult(
         run_id="a1b9f3",
+        config="stripe_prod",
         connector="stripe",
         target="prod",
         destination="bigquery",
@@ -655,6 +659,7 @@ def test_run_result_to_dict_succeeded() -> None:
     start = datetime(2026, 5, 21, tzinfo=UTC)
     rr = RunResult(
         run_id="r1",
+        config="stripe_prod",
         connector="stripe",
         target="prod",
         destination="bigquery",
@@ -676,6 +681,7 @@ def test_run_result_raise_for_status_succeeded_returns_self() -> None:
     start = datetime(2026, 5, 21, tzinfo=UTC)
     rr = RunResult(
         run_id="r1",
+        config="stripe_prod",
         connector="c",
         target="t",
         destination="d",
@@ -692,6 +698,7 @@ def test_run_result_raise_for_status_failed_raises() -> None:
     err = RuntimeError("extract failed")
     rr = RunResult(
         run_id="r1",
+        config="stripe_prod",
         connector="c",
         target="t",
         destination="d",
@@ -709,6 +716,7 @@ def test_run_result_to_dict_failed_renders_error() -> None:
     start = datetime(2026, 5, 21, tzinfo=UTC)
     rr = RunResult(
         run_id="r1",
+        config="stripe_prod",
         connector="c",
         target="t",
         destination="d",

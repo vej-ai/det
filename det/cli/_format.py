@@ -80,7 +80,10 @@ def print_run_result(result: RunResult) -> None:
     failed run the engine's ``error`` is surfaced as a clean one-line message
     (no traceback) — ``run()`` already folds the exception into ``RunResult``.
     """
-    click.echo(f"connector {result.connector} -> {result.destination}  (target: {result.target})")
+    click.echo(
+        f"config {result.config}: source {result.connector} -> "
+        f"destination {result.destination}  (target: {result.target})"
+    )
 
     stream_rows: list[list[str]] = []
     for s in result.streams:

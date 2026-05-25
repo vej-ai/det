@@ -29,17 +29,17 @@ import pytest
 
 import det
 from det import Config, Cursor
-from det.connectors.rest.client import AuthSpec, build_client
-from det.connectors.rest.extractors import ExtractionError, extract_records
-from det.connectors.rest.pagination import (
+from det.engine.logger import build_logger
+from det.sources.rest.client import AuthSpec, build_client
+from det.sources.rest.extractors import ExtractionError, extract_records
+from det.sources.rest.pagination import (
     CursorPagination,
     LinkHeaderPagination,
     OffsetPagination,
     PagePagination,
     build_strategy,
 )
-from det.connectors.rest.source import extract_stream
-from det.engine.logger import build_logger
+from det.sources.rest.source import extract_stream
 
 # Reuse the fixtures project — it has det_project.yml + profiles.yml and
 # the duckdb destination is the project's default. The smoke test does the same.
@@ -677,15 +677,29 @@ def test_end_to_end_run_lands_rows(
 
     routes = {"/items": items_handler, "/events": events_handler}
 
+    # Build a throwaway project that binds the baked rest source to duckdb.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "det_project.yml").write_text(
+        "name: rest_test\nversion: '1.0.0'\nsource_paths: [sources]\n"
+        "destination_paths: [destinations]\nconfig_paths: [configs]\n"
+    )
+    (project_dir / "profiles.yml").write_text(
+        "duckdb:\n  default_target: dev\n  targets:\n    dev: {}\n"
+    )
+    (project_dir / "configs").mkdir()
+    (project_dir / "configs" / "rest_dev.yml").write_text(
+        "name: rest_dev\nsource: rest\ndestination: duckdb\ntarget: dev\n"
+    )
+
     db_path = str(tmp_path / "warehouse.duckdb")
     with stub_server(routes) as (base_url, requests_seen):
         monkeypatch.setenv("REST_API_TOKEN", "secret-from-env")
         result = det.run(
-            connector="rest",
-            target="dev",
-            project_dir=str(PROJECT_DIR),
-            params={"base_url": base_url, "auth_type": "bearer"},
-            destination_params={"path": db_path},
+            config="rest_dev",
+            project_dir=str(project_dir),
+            params_override={"base_url": base_url, "auth_type": "bearer"},
+            destination_params_override={"path": db_path},
         )
 
     assert result.status.value == "succeeded", result.error
@@ -708,14 +722,24 @@ def test_end_to_end_run_lands_rows(
 # ==========================================================================
 
 
-def test_secret_resolves_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The engine resolves ``${env.REST_API_TOKEN}`` and hands it to the connector.
+def test_secret_resolves_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine resolves ``${env.REST_API_TOKEN}`` and hands it to the connector."""
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "det_project.yml").write_text(
+        "name: rest_test\nversion: '1.0.0'\nsource_paths: [sources]\n"
+        "destination_paths: [destinations]\nconfig_paths: [configs]\n"
+    )
+    (project_dir / "profiles.yml").write_text(
+        "duckdb:\n  default_target: dev\n  targets:\n    dev: {}\n"
+    )
+    (project_dir / "configs").mkdir()
+    (project_dir / "configs" / "rest_dev.yml").write_text(
+        "name: rest_dev\nsource: rest\ndestination: duckdb\ntarget: dev\n"
+    )
 
-    A run with the env var set must observe the same token on every request;
-    a run without the env var set fails at config resolution (the engine
-    raises :class:`~det.engine.config.ConfigError`, surfaced as a
-    ``FAILED`` ``RunResult``).
-    """
     # Path 1 — env set: the token reaches the wire as the bearer credential.
     def handler(h: _RecordingHandler) -> None:
         _write_json(h, 200, {"data": [], "meta": {}})
@@ -723,11 +747,10 @@ def test_secret_resolves_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     with stub_server({"/items": handler, "/events": handler}) as (base_url, requests_seen):
         monkeypatch.setenv("REST_API_TOKEN", "env-secret-token-abcdef")
         result = det.run(
-            connector="rest",
-            target="dev",
-            project_dir=str(PROJECT_DIR),
-            params={"base_url": base_url, "auth_type": "bearer"},
-            destination_params={"path": ":memory:"},
+            config="rest_dev",
+            project_dir=str(project_dir),
+            params_override={"base_url": base_url, "auth_type": "bearer"},
+            destination_params_override={"path": ":memory:"},
         )
     assert result.status.value == "succeeded", result.error
     seen_tokens = {r["headers"].get("Authorization") for r in requests_seen}
@@ -736,11 +759,10 @@ def test_secret_resolves_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Path 2 — env missing: the run fails cleanly with a non-leaking message.
     monkeypatch.delenv("REST_API_TOKEN", raising=False)
     result = det.run(
-        connector="rest",
-        target="dev",
-        project_dir=str(PROJECT_DIR),
-        params={"base_url": "http://127.0.0.1:1", "auth_type": "bearer"},
-        destination_params={"path": ":memory:"},
+        config="rest_dev",
+        project_dir=str(project_dir),
+        params_override={"base_url": "http://127.0.0.1:1", "auth_type": "bearer"},
+        destination_params_override={"path": ":memory:"},
     )
     assert result.status.value == "failed"
     assert result.error is not None

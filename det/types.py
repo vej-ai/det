@@ -624,6 +624,15 @@ class DestinationBinding:
     other keys are free-form routing params (e.g. ``dataset``) whose meaning is
     defined by that destination's own ``register.yaml``. The binding never
     names a project, host, or credential — those are environment concerns.
+
+    # NOTE: as of build stage 8.B, ``DestinationBinding`` is *no longer* part of
+    # the source contract — the source's ``register.yaml`` may not declare a
+    # ``destination:`` block, and the project picks the destination via a
+    # ``configs/<name>.yml`` file instead (docs/06, docs/12). The dataclass is
+    # kept so older fixtures and external authors who still carry a
+    # ``destination:`` block parse without error; the engine logs a warning when
+    # it encounters one and otherwise ignores it. The field is expected to be
+    # removed in a later stage.
     """
 
     connector: str
@@ -1065,11 +1074,18 @@ class RunConfig:
     The engine merges every config layer (register.yaml defaults → project →
     profiles → env → CLI/run kwargs) into this single immutable object; after
     it is built, nothing reads ambient config. It names the run's *intent*
-    (which connector, which target, which streams, full-refresh or not) and
-    carries the resolved :class:`Config` handed to connector code.
+    (which pipeline, which source, which target, which streams, full-refresh or
+    not) and carries the resolved :class:`Config` handed to connector code.
+
+    # NOTE: ``connector`` keeps meaning "source connector name" — the
+    # ``_det_state.connector`` column is keyed by source so a re-run of a
+    # different config against the same source reuses state correctly. The
+    # ``pipeline`` field names the :class:`PipelineConfig` the run was driven
+    # from (the CLI's ``-p/--conf`` arg).
     """
 
     run_id: str
+    pipeline: str
     connector: str
     target: str
     config: Config
@@ -1132,6 +1148,7 @@ class RunResult:
     """
 
     run_id: str
+    config: str
     connector: str
     target: str
     destination: str
@@ -1174,6 +1191,7 @@ class RunResult:
         """
         return {
             "run_id": self.run_id,
+            "config": self.config,
             "connector": self.connector,
             "target": self.target,
             "destination": self.destination,
@@ -1190,3 +1208,106 @@ class RunResult:
                 else f"{type(self.error).__name__}: {self.error}"
             ),
         }
+
+
+# ---------------------------------------------------------------------------
+# PipelineConfig — the parsed configs/<name>.yml file (docs/06, docs/12)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    """One parsed pipeline config — a named binding of source + destination + target.
+
+    docs/12 §The config concept. A *config* is the runtime unit: one config =
+    one pipeline. It names which source feeds which destination at which
+    target, plus the params that customize both ends.
+
+    Discovery scans ``configs/*.yml`` and ``configs/*.yaml`` under the project
+    root; a file may carry one config (top-level keys ``name`` / ``source`` /
+    …) or many (under a ``configs:`` list). Duplicate names across files are a
+    hard error at discovery time. The engine then resolves a config NAME to
+    one of these and runs its lifecycle.
+
+    # NOTE: ``PipelineConfig`` is the new first-class concept of stage 8.B.
+    # New per-pipeline concerns are added as fields here, never as new CLI
+    # flags or engine ``run()`` args — the same stability rule
+    # :class:`StreamMeta` follows for the destination contract.
+
+    Fields:
+
+    * ``name`` — config name; the CLI's ``-p/--conf`` matches this.
+    * ``source`` — source connector name (resolved project-local-first,
+      then baked — docs/03 §5).
+    * ``destination`` — destination connector name (same resolution rule).
+    * ``target`` — which ``profiles.yml[<destination>].targets[<target>]``
+      block supplies the destination's connection params. ``None`` falls
+      back to ``profiles.yml[<destination>].default_target`` (docs/06).
+    * ``params`` — source param overrides (a higher precedence layer than
+      ``register.yaml`` defaults and ``det_project.yml`` ``vars``; lower
+      than CLI ``--param`` / ``run(params_override=)``).
+    * ``destination_params`` — per-config destination param overrides
+      (higher than ``profiles.yml`` rows, lower than CLI
+      ``--destination-param``).
+    * ``select`` — streams to run; empty means "all". A CLI ``--select``
+      *replaces* (not unions) this list (docs/07).
+    * ``schedule`` — advisory cron expression for an external scheduler;
+      the engine itself never acts on it (docs/03 §2.6).
+    """
+
+    name: str
+    source: str
+    destination: str
+    target: str | None = None
+    params: Mapping[str, Any] = field(default_factory=dict)
+    destination_params: Mapping[str, Any] = field(default_factory=dict)
+    select: tuple[str, ...] = ()
+    schedule: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> PipelineConfig:
+        """Build a :class:`PipelineConfig` from a parsed YAML mapping — docs/12.
+
+        Enforces the required keys (``name``, ``source``, ``destination``) and
+        rejects unknown top-level keys (catches typos like ``destintion``).
+        Coerces ``select`` from a string-or-list scalar into a tuple.
+        """
+        known = {
+            "name",
+            "source",
+            "destination",
+            "target",
+            "params",
+            "destination_params",
+            "select",
+            "schedule",
+        }
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(f"unknown config key(s): {', '.join(sorted(unknown))}")
+        for required in ("name", "source", "destination"):
+            if required not in data:
+                raise ValueError(f"config requires a {required!r} key")
+
+        select_raw = data.get("select") or ()
+        if isinstance(select_raw, str):
+            select: tuple[str, ...] = (select_raw,)
+        elif isinstance(select_raw, (list, tuple)):
+            select = tuple(str(s) for s in select_raw)
+        else:
+            raise ValueError(
+                f"config {data['name']!r}: 'select' must be a string or list of stream names"
+            )
+
+        target_raw = data.get("target")
+        schedule_raw = data.get("schedule")
+        return cls(
+            name=str(data["name"]),
+            source=str(data["source"]),
+            destination=str(data["destination"]),
+            target=None if target_raw is None else str(target_raw),
+            params=dict(data.get("params") or {}),
+            destination_params=dict(data.get("destination_params") or {}),
+            select=select,
+            schedule=None if schedule_raw is None else str(schedule_raw),
+        )

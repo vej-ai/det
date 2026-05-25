@@ -71,14 +71,21 @@ imported. It is pure data — no expressions, no logic.
 | `summary` | string | No | `""` | One-line human description. |
 | `tags` | list[string] | No | `[]` | Free-form labels for catalog/search (e.g. `["ecommerce", "graphql"]`). Not interpreted by the engine. |
 | `streams` | list[Stream] | Yes for `kind: source` | — | The tables this source produces. See §2.2. A destination omits this. |
-| `destination` | Destination binding | No | project default | Which destination this source's data flows to. See §2.3. |
 | `params` | map[string → ParamSpec] | No | `{}` | Declared, typed configuration knobs for the connector. See §2.4. |
 | `secrets` | list[SecretRef] | No | `[]` | Declared secret references the connector needs. See §2.5. |
 | `schedule` | string (cron or alias) | No | `null` | A *hint* for how often this connector should run. See §2.6. |
 | `requires` | list[string] | No | `[]` | pip requirement specifiers, mirrored from `requirements.txt` if present. The engine validates these are installable. |
 
-That is the complete top-level key set. Eleven keys. If a future feature needs a
-twelfth, it must justify the ceremony.
+That is the complete top-level key set. Ten keys (post-8.B: the
+source-side `destination:` binding moved to a pipeline config — chapter 12).
+If a future feature needs an eleventh, it must justify the ceremony.
+
+> # NOTE: `register.yaml` may still carry an old-style `destination:` block
+> from a pre-8.B project; the parser preserves the field (a parsed
+> `DestinationBinding` is still returned) but the engine logs a warning and
+> ignores it at run time. The field is expected to be removed in a future
+> stage. The runtime unit is now a config (chapter 12), and configs are
+> where the source-to-destination binding lives.
 
 ### 2.2 The `streams` list
 
@@ -135,26 +142,42 @@ The engine always appends one column the connector author never declares:
 
 This generalizes ShipHero's hand-rolled `_synced_at` field.
 
-### 2.3 The `destination` binding
+### 2.3 The `destination` binding — now lives in a config (post-8.B)
 
-A source declares where its streams land. Absence means "use the project
-default destination" (see chapter 06).
-
-```yaml
-destination:
-  connector: bigquery        # name of a destination-kind connector
-  dataset: shiphero          # destination-specific routing param
-```
-
-| Key | Type | Required | Default | Purpose |
-|---|---|---|---|---|
-| `connector` | string | **Yes** (if block present) | — | `name` of a `kind: destination` connector. |
-| *(others)* | any | No | — | Free-form routing params passed to the destination connector's `params`. Their meaning is defined by the destination's `register.yaml`. |
-
-> **Note — what is NOT here.** The destination binding never names a BigQuery
-> *project*, a database host, or any credential. Those are environment concerns
-> and live in `profiles.yml` (chapter 06). `register.yaml` is portable across
-> dev/staging/prod; only the binding *shape* is fixed here.
+> # NOTE: stage 8.B moved the source-to-destination binding out of
+> `register.yaml` and into a **pipeline config** under `configs/` (chapter 12).
+> A source's `register.yaml` no longer carries a `destination:` block;
+> instead, a config file names the source + destination + target + params as
+> one pipeline. The CLI runs configs: `det run -p <config_name>`.
+>
+> The `DestinationBinding` dataclass remains in `det.types` for
+> backwards-parsing compatibility — an older `register.yaml` still loads
+> without error and the engine emits a warning + ignores the field at run
+> time. The field is expected to be removed entirely in a later stage.
+>
+> What used to live here:
+>
+> ```yaml
+> # PRE-8.B — no longer the source contract.
+> destination:
+>   connector: bigquery
+>   dataset: shiphero
+> ```
+>
+> The post-8.B equivalent (chapter 12):
+>
+> ```yaml
+> # configs/shiphero_prod.yml
+> name: shiphero_prod
+> source: shiphero
+> destination: bigquery
+> target: prod
+> destination_params:
+>   dataset: shiphero
+> ```
+>
+> The destination-side `Destination` interface (chapter 05) is unchanged.
+> Only the *binding* moved.
 
 ### 2.4 `params` — declared configuration
 
@@ -260,11 +283,19 @@ streams:
       - {name: rate,      type: FLOAT}
       - {name: base,      type: STRING}
 
-destination:
-  connector: bigquery
-  dataset: finance
-
 schedule: daily
+```
+
+The matching config (chapter 12):
+
+```yaml
+# configs/exchange_rates_prod.yml
+name: exchange_rates_prod
+source: exchange_rates
+destination: bigquery
+target: prod
+destination_params:
+  dataset: finance
 ```
 
 ### 2.8 Worked example B — a multi-stream GraphQL source (ShipHero)
@@ -329,11 +360,19 @@ streams:
       initial_value: "2025-01-01"
     # schema omitted -> inferred from first batch (prototype mode)
 
-destination:
-  connector: bigquery
-  dataset: shiphero
-
 schedule: "0 */6 * * *"
+```
+
+The matching config:
+
+```yaml
+# configs/shiphero_prod.yml
+name: shiphero_prod
+source: shiphero
+destination: bigquery
+target: prod
+destination_params:
+  dataset: shiphero
 ```
 
 The `shipping_labels` / `line_items` nested objects are declared as `JSON`

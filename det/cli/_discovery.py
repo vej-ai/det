@@ -1,17 +1,15 @@
-"""Connector enumeration helpers for the CLI's ``list`` / ``validate`` commands.
+"""Source / destination / config enumeration helpers for the CLI.
 
-The engine's :mod:`det.engine.discovery` resolves a connector *by name*
-(:func:`resolve_connector`) and answers "which connectors carry tag X"
-(:func:`connectors_with_tag`), but it has no public "enumerate every connector"
-call. ``det list`` and ``det validate --all`` need exactly that.
+``det list`` and ``det validate`` need an "enumerate every discoverable
+component" call; the engine's :mod:`det.engine.discovery` resolves only *by
+name*, and :mod:`det.engine.configs` only loads configs. This module supplies
+the enumeration: it walks the same project-local + baked roots the engine
+walks (separately for sources and destinations after the stage 8.B split),
+parses each ``register.yaml`` into a :class:`~det.types.ConnectorManifest`,
+and yields the result. It is **not** engine logic — no data ever moves here.
 
-This module supplies that enumeration. It is **not** engine logic — it only
-walks the same connector roots the engine's discovery walks, parses each
-``register.yaml`` into a :class:`~det.types.ConnectorManifest`, and yields
-the result. The parsing is the engine's own
-:class:`~det.types.ConnectorManifest.from_dict`; the walking mirrors
-:func:`det.engine.discovery.connectors_with_tag` (which is the documented
-"filter over discovered connectors"). No data ever moves here.
+For configs: :func:`discover_all_configs` re-uses
+:func:`det.engine.configs.discover_configs` directly.
 """
 
 from __future__ import annotations
@@ -21,16 +19,17 @@ from pathlib import Path
 
 import yaml
 
+from det.engine import configs as cfgs
 from det.engine import discovery as disc
-from det.types import ConnectorManifest
+from det.types import ConnectorKind, ConnectorManifest, PipelineConfig
 
 
 @dataclass(frozen=True)
 class DiscoveredConnector:
-    """One connector found on disk — its folder, manifest, and origin label.
+    """One source or destination found on disk — its folder, manifest, origin.
 
-    ``origin`` is ``"project"`` for a folder under the project's
-    ``connector_paths`` and ``"baked"`` for one shipped inside the ``det``
+    ``origin`` is ``"project"`` for a folder under the project's source/
+    destination paths and ``"baked"`` for one shipped inside the ``det``
     package, so ``det list`` can show where a connector came from.
     """
 
@@ -39,34 +38,25 @@ class DiscoveredConnector:
     manifest: ConnectorManifest
     origin: str
 
+    @property
+    def kind(self) -> ConnectorKind:
+        """The connector's kind — convenience accessor."""
+        return self.manifest.kind
 
-def discover_all(
-    project_root: Path, connector_paths: list[str] | None = None
-) -> list[DiscoveredConnector]:
-    """Enumerate every connector reachable from a project — for ``det list``.
 
-    Walks the project-local ``connector_paths`` directories and the baked
-    connector roots (the exact roots
-    :func:`det.engine.discovery.connectors_with_tag` walks), parses each
-    folder's ``register.yaml``, and returns one
-    :class:`DiscoveredConnector` per folder that parses cleanly.
+def _walk_roots(
+    roots: list[tuple[Path, str]],
+    found: dict[str, DiscoveredConnector],
+) -> None:
+    """Walk each ``(root, origin)`` pair, populating ``found`` with discoveries.
 
-    Resolution order matches the engine (docs/03 §5): project-local shadows a
-    same-named baked connector, so a name seen under ``connector_paths`` first
-    is not re-added from the baked roots. A folder whose ``register.yaml`` will
-    not parse is skipped silently — mirroring ``connectors_with_tag``'s "a
-    broken connector should not block listing the good ones"; it fails loudly
-    later if a run or ``validate`` actually selects it.
+    A project-local folder that matches a baked name shadows the baked entry
+    (docs/03 §5) — the engine's own resolution rule. A folder whose
+    ``register.yaml`` will not parse is skipped silently, mirroring the engine's
+    "a broken connector should not block listing the good ones" rule; it fails
+    loudly later if a run or ``validate`` actually selects it.
     """
-    project_roots = [
-        (project_root / rel, "project") for rel in (connector_paths or ["connectors"])
-    ]
-    # disc._baked_dirs() is the engine's own (connectors/, destinations/) pair —
-    # reused here so the CLI's listing matches what the engine would resolve.
-    baked_roots = [(d, "baked") for d in disc._baked_dirs()]
-
-    found: dict[str, DiscoveredConnector] = {}
-    for root, origin in [*project_roots, *baked_roots]:
+    for root, origin in roots:
         if not root.is_dir():
             continue
         for child in sorted(root.iterdir()):
@@ -78,7 +68,6 @@ def discover_all(
                 manifest = ConnectorManifest.from_dict(raw)
             except (yaml.YAMLError, ValueError, TypeError, OSError):
                 continue
-            # Project-local beats baked: a name already found is not overwritten.
             if manifest.name in found:
                 continue
             found[manifest.name] = DiscoveredConnector(
@@ -87,4 +76,63 @@ def discover_all(
                 manifest=manifest,
                 origin=origin,
             )
-    return sorted(found.values(), key=lambda c: c.name)
+
+
+def discover_all_sources(
+    project_root: Path, source_paths: list[str] | None = None
+) -> list[DiscoveredConnector]:
+    """Enumerate every SOURCE reachable from a project — docs/03 §5, docs/06.
+
+    Walks the project-local ``source_paths`` (default ``["sources"]``) first,
+    then the baked ``det/sources/``. Project-local shadows baked. Folders
+    whose ``register.yaml`` declares ``kind: destination`` are filtered out —
+    a destination accidentally placed under ``sources/`` is ignored from this
+    listing (``discover_all_destinations`` will pick it up if and only if it
+    lives under a destination path).
+    """
+    project = [(project_root / rel, "project") for rel in (source_paths or ["sources"])]
+    baked = [(disc._baked_source_dir(), "baked")]
+    found: dict[str, DiscoveredConnector] = {}
+    _walk_roots([*project, *baked], found)
+    return sorted(
+        (c for c in found.values() if c.manifest.kind is ConnectorKind.SOURCE),
+        key=lambda c: c.name,
+    )
+
+
+def discover_all_destinations(
+    project_root: Path, destination_paths: list[str] | None = None
+) -> list[DiscoveredConnector]:
+    """Enumerate every DESTINATION reachable from a project — docs/03 §5, docs/06.
+
+    Destination-side analogue of :func:`discover_all_sources`: walks the
+    project-local ``destination_paths`` (default ``["destinations"]``) then
+    the baked ``det/destinations/``. Folders whose ``register.yaml`` declares
+    ``kind: source`` are filtered out for the same reason.
+    """
+    project = [
+        (project_root / rel, "project")
+        for rel in (destination_paths or ["destinations"])
+    ]
+    baked = [(disc._baked_destination_dir(), "baked")]
+    found: dict[str, DiscoveredConnector] = {}
+    _walk_roots([*project, *baked], found)
+    return sorted(
+        (c for c in found.values() if c.manifest.kind is ConnectorKind.DESTINATION),
+        key=lambda c: c.name,
+    )
+
+
+def discover_all_configs(
+    project_root: Path, config_paths: list[str] | None = None
+) -> list[PipelineConfig]:
+    """Enumerate every PIPELINE CONFIG reachable from a project — docs/12.
+
+    Delegates to :func:`det.engine.configs.discover_configs` and returns the
+    parsed :class:`PipelineConfig` objects in sorted-name order, ready for
+    ``det list --kind config`` rendering.
+    """
+    return sorted(
+        cfgs.discover_configs(project_root, config_paths).values(),
+        key=lambda c: c.name,
+    )

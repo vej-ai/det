@@ -38,14 +38,14 @@ import pytest
 
 import det
 from det import Config, Cursor
-from det.connectors.shiphero.client import ShipHeroClient, derive_auth_url
-from det.connectors.shiphero.pagination import (
+from det.sources.shiphero.client import ShipHeroClient, derive_auth_url
+from det.sources.shiphero.pagination import (
     extract_records,
     paginate,
     walk_field_path,
 )
-from det.connectors.shiphero.source import extract_stream
-from det.connectors.shiphero.windows import (
+from det.sources.shiphero.source import extract_stream
+from det.sources.shiphero.windows import (
     compute_start,
     date_windows,
     to_utc_dt,
@@ -677,31 +677,46 @@ def test_extract_stream_observes_cursor_values(
 
 @pytest.fixture
 def shiphero_project(tmp_path: Path) -> Path:
-    """Build a throwaway det project that runs the shiphero baked connector."""
+    """Build a throwaway det project that runs the shiphero baked source.
+
+    Writes det_project.yml (post-8.B keys), a destination-keyed profiles.yml
+    with a `dev` duckdb target, and a `shiphero_dev` config binding
+    shiphero → duckdb → dev (docs/12).
+    """
     (tmp_path / "det_project.yml").write_text(
         textwrap.dedent(
             """\
             name: shiphero_test_project
             version: "1.0.0"
-            connector_paths:
-              - connectors
-            default_destination: duckdb
-            default_target: dev
+            source_paths: [sources]
+            destination_paths: [destinations]
+            config_paths: [configs]
             """
         )
     )
     (tmp_path / "profiles.yml").write_text(
         textwrap.dedent(
             """\
-            targets:
-              dev:
-                destinations:
-                  duckdb:
-                    path: ".det/warehouse.duckdb"
+            duckdb:
+              default_target: dev
+              targets:
+                dev:
+                  path: ".det/warehouse.duckdb"
             """
         )
     )
-    (tmp_path / "connectors").mkdir()
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "shiphero_dev.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: shiphero_dev
+            source: shiphero
+            destination: duckdb
+            target: dev
+            """
+        )
+    )
     return tmp_path
 
 
@@ -725,10 +740,9 @@ def test_end_to_end_run_lands_shipments_into_duckdb(
     # is not necessary because the stub cycles through its `pages` list — each
     # stream gets fresh pages from the start.
     result = det.run(
-        connector="shiphero",
-        target="dev",
+        config="shiphero_dev",
         project_dir=str(shiphero_project),
-        params={
+        params_override={
             "api_url": api_url,
             "start_date": "2024-01-01",
             "step_days": 365,
@@ -738,7 +752,7 @@ def test_end_to_end_run_lands_shipments_into_duckdb(
             "batch_size": 50,
             "page_size": 50,
         },
-        destination_params={"path": db_path},
+        destination_params_override={"path": db_path},
     )
 
     assert result.status.value == "succeeded", result.error
@@ -802,10 +816,9 @@ def test_end_to_end_refresh_token_not_logged(
     db_path = str(tmp_path / "out.duckdb")
 
     det.run(
-        connector="shiphero",
-        target="dev",
+        config="shiphero_dev",
         project_dir=str(shiphero_project),
-        params={
+        params_override={
             "api_url": api_url,
             "step_days": 365,
             "lookback_days": 0,
@@ -814,7 +827,7 @@ def test_end_to_end_refresh_token_not_logged(
             "batch_size": 50,
             "page_size": 50,
         },
-        destination_params={"path": db_path},
+        destination_params_override={"path": db_path},
     )
 
     captured = capfd.readouterr()
@@ -841,10 +854,9 @@ def test_secrets_resolved_from_env_var(
     """
     monkeypatch.delenv("SHIPHERO_REFRESH_TOKEN", raising=False)
     bad = det.run(
-        connector="shiphero",
-        target="dev",
+        config="shiphero_dev",
         project_dir=str(shiphero_project),
-        params={"api_url": "http://127.0.0.1:1/graphql"},  # unreachable port
+        params_override={"api_url": "http://127.0.0.1:1/graphql"},  # unreachable port
     )
     assert bad.status.value == "failed"
     # The failure is a ConfigError about the missing env var (not a network

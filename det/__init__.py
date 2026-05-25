@@ -15,11 +15,13 @@ the enums). A connector body should need to import only from ``det``::
     from det import stream, destination, Capability, Schema
 
 As of build stage 5 it also exposes the engine entry point :func:`run` — the
-library front door onto the run lifecycle (docs/02 §The triad). The CLI (a
-later stage) is a thin shell over this same function::
+library front door onto the run lifecycle (docs/02 §The triad). The CLI is a
+thin shell over this same function. Stage 8.B made *configs* the runtime
+unit — a config (``configs/<name>.yml``) names one source-to-destination
+pipeline; ``run`` takes the config's name::
 
     import det
-    result = det.run(connector="shiphero", target="prod")
+    result = det.run(config="shiphero_prod")
 
 ``run`` returns a :class:`~det.types.RunResult` and never raises on a
 connector/destination failure (docs/07 §4.1).
@@ -48,6 +50,7 @@ from det.types import (
     Field,
     FieldMode,
     FieldType,
+    PipelineConfig,
     Record,
     RunConfig,
     RunResult,
@@ -86,6 +89,7 @@ __all__ = [
     "Field",
     "FieldMode",
     "FieldType",
+    "PipelineConfig",
     "Record",
     "RunConfig",
     "RunResult",

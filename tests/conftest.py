@@ -34,8 +34,10 @@ from det.types import ConnectorManifest
 # The pre-baked DuckDB destination folder, inside the installed package.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 DUCKDB_CONNECTOR_DIR = _REPO_ROOT / "det" / "destinations" / "duckdb"
-# The echo fixture source folder, under tests/.
-ECHO_CONNECTOR_DIR = _REPO_ROOT / "tests" / "fixtures" / "connectors" / "echo"
+# The echo fixture source folder, under tests/. Stage 8.B split connectors/
+# into sources/ + destinations/ — the echo source lives at tests/fixtures/
+# sources/echo/ (the test project's own source_paths: [sources]).
+ECHO_CONNECTOR_DIR = _REPO_ROOT / "tests" / "fixtures" / "sources" / "echo"
 
 
 class LoadedConnector:

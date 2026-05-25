@@ -105,10 +105,12 @@ stands for "data extraction tool."
 | Thing | Form | Notes |
 |-------|------|-------|
 | Product name | **det** | Always lowercase. "data extraction tool." |
-| CLI binary | `det` | `det run -c meta_ads`. |
+| CLI binary | `det` | `det run -p meta_ads_prod` (post-8.B: the `-p / --conf` arg names a pipeline config — chapter 12). |
 | Python package / import | `det` | `import det` / `from det import run`. |
+| Runtime unit | **config** | A pipeline (one source + one destination + one target + params). Lives under `configs/` (chapter 12). |
 | State table | `_det_state` | Underscore-prefixed, lives in the destination. |
 | Project config | `det_project.yml` | The dbt-style project manifest at the project root. |
+| Per-destination connection params | `profiles.yml` | dbt-outputs style: top-level keys are destination names, each with `default_target:` + `targets:`. |
 | Working dir | `.det/` | Disposable build/cache/log output. Git-ignored. The `target/` analog. |
 | Synced-at column | `_det_synced_at` | Engine-appended load timestamp on every loaded table. |
 

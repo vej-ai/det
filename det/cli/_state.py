@@ -23,8 +23,12 @@ hooks:
   # hook; reset fails cleanly (caught by the CLI) rather than silently. This
   # is an accepted v1 limitation, flagged here rather than hidden.
 
-This module resolves the destination through the engine's *public* discovery +
-config surface — it never re-implements discovery.
+Stage 8.B made *configs* the runtime unit; state operations now take a config
+NAME instead of a source name. The config resolves the (source, destination,
+target) triple — but state rows themselves are still keyed by *source* name
+in ``_det_state`` (a property of where data lives, not how it was extracted).
+A re-run under a different config that names the same source resumes off
+the same rows.
 """
 
 from __future__ import annotations
@@ -35,12 +39,11 @@ from pathlib import Path
 from typing import Any
 
 from det.engine import config as cfg
+from det.engine import configs as cfgs
 from det.engine import discovery as disc
 from det.types import Config, StateRecord
 
-# The engine-owned state table name (docs/05 §5.1). Mirrors the constant the
-# DuckDB destination defines privately — repeated here because ``reset`` issues
-# the DELETE itself and there is no public accessor for it.
+# The engine-owned state table name (docs/05 §5.1).
 _STATE_TABLE = "_det_state"
 
 
@@ -52,19 +55,20 @@ class StateError(Exception):
 class _ResolvedDestination:
     """The destination hooks + an open connection for a state operation."""
 
+    source_name: str
     name: str
     hooks: Mapping[str, Any]
     conn: Any
 
 
 def _resolve_destination(
-    connector: str,
+    config_name: str,
     *,
     project_dir: str | Path | None,
     target: str | None,
     destination_params: Mapping[str, Any] | None,
 ) -> tuple[Path, _ResolvedDestination]:
-    """Resolve + open the destination a source connector binds to.
+    """Resolve + open the destination a config binds to.
 
     Runs the same discovery + config path the engine's ``run`` does (stages
     1-3, DISCOVER → RESOLVE → INIT DEST), but stops once the destination is
@@ -74,29 +78,29 @@ def _resolve_destination(
     project_root = disc.find_project_root(project_dir)
     project = cfg.ProjectConfig.load(project_root)
     profiles = cfg.Profiles.load(project_root)
-    target_name = cfg.resolve_target_name(target, project, profiles)
-    target_block = profiles.target(target_name) if profiles.targets else {}
-
-    source = disc.resolve_connector(
-        connector, project_root, list(project.connector_paths)
+    pipeline = cfgs.load_config(
+        config_name, project_root, list(project.config_paths)
     )
-    if source.manifest.kind.value != "source":
-        raise StateError(
-            f"connector {connector!r} is a {source.manifest.kind.value}, not a "
-            f"source; state is scoped per source connector"
-        )
-    destination_name = cfg.resolve_destination_name(source.manifest, project)
-    dest = disc.resolve_connector(
-        destination_name, project_root, list(project.connector_paths)
+    target_name = cfg.resolve_target_name(
+        target if target is not None else pipeline.target,
+        pipeline.destination,
+        profiles,
     )
 
-    routing = dict(source.manifest.destination.routing) if source.manifest.destination else {}
-    dest_config = cfg.build_config(
+    source = disc.resolve_source(
+        pipeline.source, project_root, list(project.source_paths)
+    )
+    dest = disc.resolve_destination(
+        pipeline.destination, project_root, list(project.destination_paths)
+    )
+
+    dest_config = cfg.build_destination_config(
         dest.manifest,
         project,
-        target_block,
-        section="destinations",
-        overrides={**routing, **dict(destination_params or {})},
+        pipeline,
+        target_name=target_name,
+        profiles=profiles,
+        overrides=dict(destination_params or {}),
     )
 
     hooks: dict[str, Any] = {}
@@ -104,65 +108,69 @@ def _resolve_destination(
         hook = dest.registry.hook(hook_name)
         if hook is None:
             raise StateError(
-                f"destination {destination_name!r} is missing the @destination."
-                f"{hook_name} hook required for state operations"
+                f"destination {pipeline.destination!r} is missing the "
+                f"@destination.{hook_name} hook required for state operations"
             )
         hooks[hook_name] = hook.func
 
     conn = hooks["open"](Config(params=dict(dest_config.params)))
     return project_root, _ResolvedDestination(
-        name=destination_name, hooks=hooks, conn=conn
+        source_name=source.manifest.name,
+        name=pipeline.destination,
+        hooks=hooks,
+        conn=conn,
     )
 
 
 def list_state(
-    connector: str,
+    config_name: str,
     *,
     project_dir: str | Path | None = None,
     target: str | None = None,
     destination_params: Mapping[str, Any] | None = None,
 ) -> list[StateRecord]:
-    """Return the ``_det_state`` rows for one source connector.
+    """Return the ``_det_state`` rows for one config's source.
 
     Opens the bound destination and calls its ``read_state`` hook — the same
     call the engine makes at run start (docs/05 §1). The connection is always
-    closed. An empty list means the connector has never committed state (or
-    its state was reset).
+    closed. An empty list means the source has never committed state (or its
+    state was reset).
     """
     _, dest = _resolve_destination(
-        connector,
+        config_name,
         project_dir=project_dir,
         target=target,
         destination_params=destination_params,
     )
     try:
-        records = dest.hooks["read_state"](dest.conn, connector)
+        records = dest.hooks["read_state"](dest.conn, dest.source_name)
         return list(records)
     finally:
         dest.hooks["close"](dest.conn)
 
 
 def reset_state(
-    connector: str,
+    config_name: str,
     *,
     stream: str | None = None,
     project_dir: str | Path | None = None,
     target: str | None = None,
     destination_params: Mapping[str, Any] | None = None,
 ) -> int:
-    """Clear ``_det_state`` rows so the next run is a full re-extract.
+    """Clear ``_det_state`` rows so the next run of this config is a full re-extract.
 
-    Deletes the ``(connector)`` rows — or the single ``(connector, stream)``
-    row when ``stream`` is given — from the destination's ``_det_state``
-    table. The next run then finds no prior cursor and seeds from each stream's
+    Deletes the ``(source)`` rows — or the single ``(source, stream)`` row
+    when ``stream`` is given — from the destination's ``_det_state`` table.
+    The next run then finds no prior cursor and seeds from each stream's
     ``initial_value`` (docs/03 §3.2), exactly as a first run does. Loaded data
     is untouched — this is the surgical alternative to ``--full-refresh``.
 
-    Returns the number of rows deleted. See the module ``# NOTE:`` for why this
-    issues a DELETE directly rather than going through a destination hook.
+    Returns the number of rows deleted. See the module ``# NOTE:`` for why
+    this issues a DELETE directly rather than going through a destination
+    hook.
     """
     _, dest = _resolve_destination(
-        connector,
+        config_name,
         project_dir=project_dir,
         target=target,
         destination_params=destination_params,
@@ -175,23 +183,16 @@ def reset_state(
                 f"`state reset` supports SQL-backed Tier-A destinations only "
                 f"(DuckDB in v1). Use `det run --full-refresh` instead."
             )
-        # The _det_state table is created lazily on first read. Calling
-        # the destination's own read_state hook here both creates it (so the
-        # DELETE below never hits an "unknown table") and tells us how many
-        # rows the reset will clear — without the CLI assuming the table
-        # already exists.
-        prior = dest.hooks["read_state"](dest.conn, connector)
+        prior = dest.hooks["read_state"](dest.conn, dest.source_name)
         if stream is not None:
             count_before = sum(1 for r in prior if r.stream == stream)
         else:
             count_before = len(list(prior))
-        params: list[Any] = [connector]
+        params: list[Any] = [dest.source_name]
         sql = f"DELETE FROM {_STATE_TABLE} WHERE connector = ?"
         if stream is not None:
             sql += " AND stream = ?"
             params.append(stream)
-        # DuckDB autocommits a bare DML statement; the DELETE is durable once
-        # close() runs. No explicit COMMIT is issued (none is needed).
         raw.execute(sql, params)
         return count_before
     finally:

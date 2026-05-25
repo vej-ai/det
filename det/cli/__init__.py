@@ -2,27 +2,32 @@
 
 docs/07 §The CLI is a thin shell over a real Python library: every command here
 parses arguments, calls the engine's *public* surface — :func:`det.run`,
-the discovery functions in :mod:`det.engine.discovery` — and formats the
-result. There is **no** run logic in this module; the engine owns all of it.
+the discovery functions in :mod:`det.engine.discovery`, and the config loader
+in :mod:`det.engine.configs` — and formats the result. There is **no** run
+logic in this module; the engine owns all of it.
 
-Command surface (the seven commands the build stage scopes):
+Stage 8.B made *configs* the runtime unit (docs/12). The CLI's primary
+selection arg is now ``-p / --conf <config_name>``; a connector alone is no
+longer runnable because it doesn't say where to write. ``det list`` /
+``det validate`` cover sources, destinations, AND configs; ``det init``
+scaffolds the new layout (``sources/`` + ``destinations/`` + ``configs/``);
+``det new`` has three subcommands (``source``, ``destination``, ``config``);
+``det state`` is keyed by config (which resolves to a source for the actual
+state lookup).
 
-* ``det run``     — extract + load one connector (or every connector
-  carrying a ``--tag``); blocks until the run finishes; exit 0 on success,
-  1 on any failure.
-* ``det list``    — list discoverable connectors (name, kind, streams, tags).
-* ``det validate``— run discovery-time validation on one connector or all.
-* ``det init``    — scaffold a new project tree.
-* ``det new connector`` — scaffold a connector folder.
-* ``det state``   — inspect (``list``) / clear (``reset``) incremental state.
+Command surface:
+
+* ``det run -p <config> [--target T] [--select S] [--full-refresh]
+  [--param k=v] [--destination-param k=v]`` — extract + load one config.
+* ``det list [--kind {{source,destination,config}}]`` — list discoverable
+  components.
+* ``det validate`` — discovery-time validation of every source, destination,
+  and config.
+* ``det init [<dir>]`` — scaffold a new project tree.
+* ``det new {{source,destination,config}} <name>`` — scaffold one folder/file.
+* ``det state list -p <config>`` / ``det state reset -p <config>
+  [--stream S]`` — inspect / clear incremental state.
 * ``det --version`` — print the version.
-
-# NOTE: docs/07 §2 also documents ``det test`` and a ``--log-level`` flag,
-# and §3 a five-value exit-code table (0/1/2/3/130). The build stage scopes the
-# CLI to exactly the seven commands above, so ``test`` and ``--log-level`` are
-# deliberately not built here. The exit code is collapsed to 0/1 — see the
-# ``run`` command's own ``# NOTE:`` for why. These are tracked doc-vs-code
-# divergences, resolved toward the task's explicit scope.
 """
 
 from __future__ import annotations
@@ -35,18 +40,28 @@ from typing import Any
 import click
 
 import det
-from det.cli._discovery import discover_all
+from det.cli._discovery import (
+    discover_all_configs,
+    discover_all_destinations,
+    discover_all_sources,
+)
 from det.cli._format import print_run_result, render_table
-from det.cli._scaffold import ScaffoldError, scaffold_connector, scaffold_project
+from det.cli._scaffold import (
+    ScaffoldError,
+    scaffold_config,
+    scaffold_destination,
+    scaffold_project,
+    scaffold_source,
+)
 from det.cli._state import StateError, list_state, reset_state
 from det.engine import ConfigError, DiscoveryError, EngineError
 from det.engine import config as cfg
 from det.engine import discovery as disc
-from det.types import ConnectorKind, RunStatus
+from det.types import RunStatus
 
 # Exceptions the engine raises for "cannot start / cannot discover" problems.
 # The CLI catches these at the command boundary and prints a clean one-line
-# message instead of a Python traceback (the task's friendly-error bar).
+# message instead of a Python traceback.
 _FRIENDLY_ERRORS = (DiscoveryError, ConfigError, EngineError, ScaffoldError, StateError)
 
 
@@ -63,7 +78,8 @@ def _split_select(values: Sequence[str]) -> tuple[str, ...]:
     # (``--select a,b``); the build task says repeatable (``--select a
     # --select b``). Both are supported — each occurrence is split on commas —
     # so the doc form and the task form are equivalent. Empty / whitespace
-    # entries are dropped.
+    # entries are dropped. A non-empty ``--select`` REPLACES the config's own
+    # ``select:`` (it does not union — docs/07 / docs/12).
     """
     out: list[str] = []
     for value in values:
@@ -74,20 +90,16 @@ def _split_select(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _parse_destination_params(values: Sequence[str]) -> dict[str, Any]:
-    """Parse repeatable ``--destination-param key=value`` options into a dict.
+def _parse_kv(label: str, values: Sequence[str]) -> dict[str, Any]:
+    """Parse repeatable ``--<label> key=value`` options into a dict.
 
-    Lets the operator override a destination's own config for this invocation —
-    e.g. ``--destination-param path=/tmp/wh.duckdb`` to point DuckDB at a
-    scratch file. Passed straight through to ``det.run(destination_params=)``.
-    A value with no ``=`` is a usage error.
+    Shared by ``--param`` and ``--destination-param``. A value with no ``=``
+    is a usage error — surfaced as a clean message + exit 2.
     """
     out: dict[str, Any] = {}
     for value in values:
         if "=" not in value:
-            _fail(
-                f"--destination-param expects key=value, got {value!r}", code=2
-            )
+            _fail(f"--{label} expects key=value, got {value!r}", code=2)
         key, _, val = value.partition("=")
         out[key.strip()] = val
     return out
@@ -114,24 +126,27 @@ def cli() -> None:
 
 
 @cli.command()
-@click.option("-c", "--connector", "connector", help="Run a single connector by name.")
 @click.option(
-    "--tag",
-    "tag",
-    help="Run every connector carrying this tag, in sequence. "
-    "Mutually exclusive with --connector.",
+    "-p",
+    "--conf",
+    "config",
+    required=True,
+    metavar="CONFIG",
+    help="Run the pipeline config of this name (under configs/).",
 )
 @click.option(
     "--target",
     "target",
-    help="profiles.yml target to use. Defaults to the project's default_target.",
+    help="Override the config's `target:`. Falls back to the destination's "
+    "default_target in profiles.yml.",
 )
 @click.option(
     "--select",
     "select",
     multiple=True,
     metavar="STREAM",
-    help="Limit the run to these streams. Repeatable and/or comma-separated.",
+    help="Replace the config's `select:` with these streams (repeatable / "
+    "comma-separated).",
 )
 @click.option(
     "--full-refresh",
@@ -145,6 +160,13 @@ def cli() -> None:
     help="Project root (or a directory under it). Defaults to the current directory.",
 )
 @click.option(
+    "--param",
+    "params",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Override a source param for this run. Repeatable.",
+)
+@click.option(
     "--destination-param",
     "destination_params",
     multiple=True,
@@ -152,15 +174,15 @@ def cli() -> None:
     help="Override a destination config value for this run. Repeatable.",
 )
 def run(
-    connector: str | None,
-    tag: str | None,
+    config: str,
     target: str | None,
     select: tuple[str, ...],
     full_refresh: bool,
     project_dir: Path | None,
+    params: tuple[str, ...],
     destination_params: tuple[str, ...],
 ) -> None:
-    """Extract and load — the core command.
+    """Extract and load — the core command, driven by a pipeline config.
 
     Runs synchronously: it blocks until the run finishes, then exits. This is
     the "wait until it succeeds" contract orchestrators depend on.
@@ -168,66 +190,25 @@ def run(
     Exit codes:
 
     \b
-      0  every run succeeded.
-      1  any run failed (or a config/discovery error stopped a run).
+      0  the run succeeded.
+      1  the run failed (config/discovery error or load error).
     """
-    # NOTE: docs/07 §3 specifies a finer exit-code table — 0/1/2/3/130, splitting
-    # config errors (2) and planning errors (3) from runtime failures (1). The
-    # engine's ``det.run()`` returns a uniform FAILED ``RunResult`` for
-    # every failure class and never raises (runner.py docstring), so the CLI
-    # has no signal to tell a config error from a load error apart. Per the
-    # task ("0 = all succeeded, 1 = any failed"; code is source of truth), the
-    # CLI collapses to 0/1. SIGINT still surfaces naturally via KeyboardInterrupt.
-    if bool(connector) == bool(tag):
-        _fail("pass exactly one of --connector / --tag", code=2)
-
-    dest_params = _parse_destination_params(destination_params)
+    src_overrides = _parse_kv("param", params)
+    dest_overrides = _parse_kv("destination-param", destination_params)
     selected = _split_select(select)
 
-    # Resolve which connectors to run. --tag fans out to a sequence.
-    try:
-        if tag:
-            project_root = disc.find_project_root(project_dir)
-            project = cfg.ProjectConfig.load(project_root)
-            names = disc.connectors_with_tag(
-                tag, project_root, list(project.connector_paths)
-            )
-            if not names:
-                _fail(f"no connectors carry the tag {tag!r}", code=2)
-        else:
-            assert connector is not None  # guaranteed by the XOR check above.
-            names = [connector]
-    except _FRIENDLY_ERRORS as exc:
-        _fail(str(exc), code=2)
-        return  # unreachable — _fail raises — but keeps mypy's flow analysis happy.
-
-    # Run each connector. det.run() never raises — it returns a FAILED
-    # RunResult — so the only thing that can throw here is a programming bug.
-    any_failed = False
-    for index, name in enumerate(names):
-        if index:
-            click.echo()  # blank line between connectors in a --tag run.
-        result = det.run(
-            name,
-            target,
-            project_dir=project_dir,
-            full_refresh=full_refresh,
-            select=selected,
-            destination_params=dest_params or None,
-        )
-        print_run_result(result)
-        if result.status is not RunStatus.SUCCEEDED:
-            any_failed = True
-
-    if len(names) > 1:
-        click.echo()
-        if any_failed:
-            verdict = click.style("one or more FAILED", fg="red")
-        else:
-            verdict = click.style("all succeeded", fg="green")
-        click.echo(f"{len(names)} connector(s): {verdict}")
-
-    raise SystemExit(1 if any_failed else 0)
+    # det.run() never raises — it returns a FAILED RunResult.
+    result = det.run(
+        config,
+        project_dir=project_dir,
+        target_override=target,
+        params_override=src_overrides or None,
+        destination_params_override=dest_overrides or None,
+        full_refresh=full_refresh,
+        select=selected,
+    )
+    print_run_result(result)
+    raise SystemExit(0 if result.status is RunStatus.SUCCEEDED else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -236,61 +217,119 @@ def run(
 
 
 @cli.command(name="list")
-@click.option("--tag", "tag", help="Show only connectors carrying this tag.")
+@click.option(
+    "--kind",
+    "kind",
+    type=click.Choice(["source", "destination", "config"]),
+    help="Restrict the listing to one kind (default: list all three).",
+)
 @click.option(
     "--project-dir",
     "project_dir",
     type=click.Path(file_okay=False, path_type=Path),
     help="Project root. Defaults to the current directory.",
 )
-def list_connectors(tag: str | None, project_dir: Path | None) -> None:
-    """List discoverable connectors — name, kind, streams, tags.
+def list_components(kind: str | None, project_dir: Path | None) -> None:
+    """List discoverable sources, destinations, and configs — docs/03 §5, docs/12.
 
-    Reads each connector's ``register.yaml`` via discovery; runs nothing.
+    Reads each ``register.yaml`` / config file via discovery; runs nothing.
     Project-local connectors shadow same-named baked ones (docs/03 §5).
     """
     try:
         project_root = disc.find_project_root(project_dir)
         project = cfg.ProjectConfig.load(project_root)
-        connectors = discover_all(project_root, list(project.connector_paths))
     except _FRIENDLY_ERRORS as exc:
         _fail(str(exc), code=2)
         return  # unreachable.
 
-    if tag:
-        connectors = [c for c in connectors if tag in c.manifest.tags]
+    show_src = kind is None or kind == "source"
+    show_dst = kind is None or kind == "destination"
+    show_cfg = kind is None or kind == "config"
 
-    if not connectors:
-        msg = "no connectors found"
-        if tag:
-            msg += f" with tag {tag!r}"
-        click.echo(msg)
-        return
+    sections: list[tuple[str, str]] = []
 
-    rows: list[list[str]] = []
-    for c in connectors:
-        m = c.manifest
-        if m.kind is ConnectorKind.SOURCE:
-            stream_count = str(len(m.streams))
-            streams = ", ".join(s.name for s in m.streams) or "-"
+    if show_src:
+        try:
+            sources = discover_all_sources(project_root, list(project.source_paths))
+        except _FRIENDLY_ERRORS as exc:
+            _fail(str(exc), code=2)
+            return
+        src_rows: list[list[str]] = []
+        for s in sources:
+            stream_names = ", ".join(x.name for x in s.manifest.streams) or "-"
+            src_rows.append(
+                [
+                    s.name,
+                    s.origin,
+                    str(len(s.manifest.streams)),
+                    stream_names,
+                    ", ".join(s.manifest.tags) or "-",
+                ]
+            )
+        if src_rows:
+            sections.append(
+                ("SOURCES", render_table(
+                    ["NAME", "ORIGIN", "#STREAMS", "STREAMS", "TAGS"], src_rows
+                ))
+            )
         else:
-            stream_count = "-"
-            streams = "-"
-        rows.append(
-            [
-                c.name,
-                m.kind.value,
-                c.origin,
-                stream_count,
-                streams,
-                ", ".join(m.tags) or "-",
-            ]
-        )
-    click.echo(
-        render_table(
-            ["CONNECTOR", "KIND", "ORIGIN", "#STREAMS", "STREAMS", "TAGS"], rows
-        )
-    )
+            sections.append(("SOURCES", "(no sources found)"))
+
+    if show_dst:
+        try:
+            destinations = discover_all_destinations(
+                project_root, list(project.destination_paths)
+            )
+        except _FRIENDLY_ERRORS as exc:
+            _fail(str(exc), code=2)
+            return
+        dst_rows: list[list[str]] = []
+        for d in destinations:
+            dst_rows.append(
+                [
+                    d.name,
+                    d.origin,
+                    ", ".join(d.manifest.tags) or "-",
+                ]
+            )
+        if dst_rows:
+            sections.append(
+                ("DESTINATIONS", render_table(["NAME", "ORIGIN", "TAGS"], dst_rows))
+            )
+        else:
+            sections.append(("DESTINATIONS", "(no destinations found)"))
+
+    if show_cfg:
+        try:
+            configs = discover_all_configs(project_root, list(project.config_paths))
+        except _FRIENDLY_ERRORS as exc:
+            _fail(str(exc), code=2)
+            return
+        cfg_rows: list[list[str]] = []
+        for c in configs:
+            cfg_rows.append(
+                [
+                    c.name,
+                    c.source,
+                    c.destination,
+                    c.target or "-",
+                    ", ".join(c.select) or "(all)",
+                ]
+            )
+        if cfg_rows:
+            sections.append(
+                ("CONFIGS", render_table(
+                    ["NAME", "SOURCE", "DESTINATION", "TARGET", "SELECT"], cfg_rows
+                ))
+            )
+        else:
+            sections.append(("CONFIGS", "(no configs found)"))
+
+    for index, (title, body) in enumerate(sections):
+        if index:
+            click.echo()
+        click.echo(click.style(title, bold=True))
+        click.echo(body)
 
 
 # ---------------------------------------------------------------------------
@@ -300,63 +339,124 @@ def list_connectors(tag: str | None, project_dir: Path | None) -> None:
 
 @cli.command()
 @click.option(
-    "-c", "--connector", "connector", help="Validate a single connector by name."
-)
-@click.option(
     "--project-dir",
     "project_dir",
     type=click.Path(file_okay=False, path_type=Path),
     help="Project root. Defaults to the current directory.",
 )
-def validate(connector: str | None, project_dir: Path | None) -> None:
-    """Run discovery-time validation (docs/03 §7) on connectors.
+def validate(project_dir: Path | None) -> None:
+    """Run discovery-time validation on every source, destination, and config.
 
-    Validates one connector (``-c``) or every discoverable connector. Reports
-    each problem found; exits non-zero if any connector is invalid — a useful
-    CI / pre-commit gate.
+    Sources + destinations: docs/03 §7 — schema parse, kind consistency,
+    stream integrity, decorator coverage, signature injectability. Configs:
+    parse + cross-check ``source`` exists, ``destination`` exists, and
+    ``target`` (if given) is defined for the destination in
+    ``profiles.yml``. Reports each problem found; exits non-zero if any
+    component is invalid — a useful CI / pre-commit gate.
     """
     try:
         project_root = disc.find_project_root(project_dir)
         project = cfg.ProjectConfig.load(project_root)
-        paths = list(project.connector_paths)
+        profiles = cfg.Profiles.load(project_root)
     except _FRIENDLY_ERRORS as exc:
         _fail(str(exc), code=2)
         return  # unreachable.
 
-    if connector:
-        names = [connector]
-    else:
-        names = [c.name for c in discover_all(project_root, paths)]
-        if not names:
-            click.echo("no connectors found to validate")
-            return
-
     invalid = 0
-    for name in names:
+    total = 0
+
+    # Sources
+    try:
+        sources = discover_all_sources(project_root, list(project.source_paths))
+    except _FRIENDLY_ERRORS as exc:
+        _fail(str(exc), code=2)
+        return
+    for s in sources:
+        total += 1
         try:
-            # resolve_connector runs validate_connector internally (validate=True
-            # is the default) — discovery + validation in one call.
-            disc.resolve_connector(name, project_root, paths)
+            disc.resolve_source(s.name, project_root, list(project.source_paths))
         except (DiscoveryError, ConfigError) as exc:
             invalid += 1
-            click.echo(click.style(f"FAIL  {name}", fg="red"))
+            click.echo(click.style(f"FAIL  source {s.name}", fg="red"))
             for line in str(exc).splitlines():
                 click.echo(f"      {line}")
         else:
-            click.echo(click.style(f"ok    {name}", fg="green"))
+            click.echo(click.style(f"ok    source {s.name}", fg="green"))
 
-    total = len(names)
+    # Destinations
+    try:
+        destinations = discover_all_destinations(
+            project_root, list(project.destination_paths)
+        )
+    except _FRIENDLY_ERRORS as exc:
+        _fail(str(exc), code=2)
+        return
+    for d in destinations:
+        total += 1
+        try:
+            disc.resolve_destination(
+                d.name, project_root, list(project.destination_paths)
+            )
+        except (DiscoveryError, ConfigError) as exc:
+            invalid += 1
+            click.echo(click.style(f"FAIL  destination {d.name}", fg="red"))
+            for line in str(exc).splitlines():
+                click.echo(f"      {line}")
+        else:
+            click.echo(click.style(f"ok    destination {d.name}", fg="green"))
+
+    # Configs
+    try:
+        configs = discover_all_configs(project_root, list(project.config_paths))
+    except _FRIENDLY_ERRORS as exc:
+        _fail(str(exc), code=2)
+        return
+    src_names = {s.name for s in sources}
+    dst_names = {d.name for d in destinations}
+    for c in configs:
+        total += 1
+        problems: list[str] = []
+        if c.source not in src_names:
+            problems.append(
+                f"source {c.source!r} is not discoverable under "
+                f"{', '.join(project.source_paths)}/ or baked sources"
+            )
+        if c.destination not in dst_names:
+            problems.append(
+                f"destination {c.destination!r} is not discoverable under "
+                f"{', '.join(project.destination_paths)}/ or baked destinations"
+            )
+        if c.target is not None and c.destination in profiles.destinations:
+            block = profiles.destinations[c.destination]
+            if c.target not in block.targets:
+                known = ", ".join(sorted(block.targets)) or "(none defined)"
+                problems.append(
+                    f"target {c.target!r} is not defined under "
+                    f"destination {c.destination!r} in profiles.yml; "
+                    f"known targets: {known}"
+                )
+        if problems:
+            invalid += 1
+            click.echo(click.style(f"FAIL  config {c.name}", fg="red"))
+            for line in problems:
+                click.echo(f"      {line}")
+        else:
+            click.echo(click.style(f"ok    config {c.name}", fg="green"))
+
     if invalid:
         click.echo()
         click.echo(
             click.style(
-                f"{invalid} of {total} connector(s) failed validation", fg="red"
+                f"{invalid} of {total} component(s) failed validation", fg="red"
             ),
             err=True,
         )
         raise SystemExit(1)
+    if total == 0:
+        click.echo("no components found to validate")
+        return
     click.echo()
-    click.echo(click.style(f"all {total} connector(s) valid", fg="green"))
+    click.echo(click.style(f"all {total} component(s) valid", fg="green"))
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +477,10 @@ def validate(connector: str | None, project_dir: Path | None) -> None:
 def init(directory: Path, force: bool) -> None:
     """Scaffold a new det project in DIRECTORY (default: current directory).
 
-    Writes ``det_project.yml``, ``profiles.yml``, ``connectors/``,
-    ``destinations/``, ``.gitignore`` and a short ``README.md``. Refuses to
-    clobber an existing project unless ``--force`` is passed.
+    Writes ``det_project.yml``, ``profiles.yml`` (destination-keyed),
+    empty ``sources/`` and ``destinations/`` folders, a ``configs/`` folder
+    seeded with one ``example.yml`` stub, ``.gitignore`` and a short
+    ``README.md``. Refuses to clobber an existing project unless ``--force``.
     """
     try:
         root = scaffold_project(directory, force=force)
@@ -388,66 +489,102 @@ def init(directory: Path, force: bool) -> None:
         return  # unreachable.
     click.echo(click.style(f"created det project at {root}", fg="green"))
     click.echo("next:")
-    click.echo("  det new connector my_source")
+    click.echo("  det new source my_source")
+    click.echo("  det new config my_pipeline")
     click.echo("  det validate")
-    click.echo("  det run -c my_source")
+    click.echo("  det run -p my_pipeline")
 
 
 # ---------------------------------------------------------------------------
-# new connector
+# new <source|destination|config>
 # ---------------------------------------------------------------------------
 
 
 @cli.group()
 def new() -> None:
-    """Scaffold a new component (a connector)."""
+    """Scaffold a new component (source, destination, or config)."""
 
 
-@new.command(name="connector")
+@new.command(name="source")
 @click.argument("name")
-@click.option(
-    "--kind",
-    type=click.Choice(["source", "destination"]),
-    default="source",
-    show_default=True,
-    help="Connector kind to scaffold.",
-)
 @click.option(
     "--project-dir",
     "project_dir",
     type=click.Path(file_okay=False, path_type=Path),
     help="Project root. Defaults to the current directory.",
 )
-def new_connector(name: str, kind: str, project_dir: Path | None) -> None:
-    """Scaffold a connector folder ``connectors/NAME/``.
-
-    A source gets a ``register.yaml`` with an example stream plus a ``source.py``
-    ``@stream`` stub; a destination gets a ``register.yaml`` plus a
-    ``destination.py`` ``@destination`` hook stub. Modeled on the ``echo``
-    fixture connector.
-    """
-    # NOTE: ``--kind`` is documented in docs/07 §2 but the build task's prose
-    # described only the source form. It is included here because omitting it
-    # would make ``det new connector x --kind destination`` (a documented
-    # invocation) fail. Code/docs are reconciled toward supporting both.
+def new_source(name: str, project_dir: Path | None) -> None:
+    """Scaffold a source folder ``sources/NAME/``."""
     try:
         project_root = disc.find_project_root(project_dir)
     except DiscoveryError as exc:
         _fail(str(exc), code=2)
         return  # unreachable.
-    # New connectors go under connectors/ (sources) or destinations/ — the
-    # readability convention of docs/06; both are on connector_paths anyway.
-    subdir = "connectors" if kind == "source" else "destinations"
-    target_dir = project_root / subdir
+    target_dir = project_root / "sources"
     target_dir.mkdir(parents=True, exist_ok=True)
     try:
-        folder = scaffold_connector(target_dir, name, kind=kind)
+        folder = scaffold_source(target_dir, name)
     except _FRIENDLY_ERRORS as exc:
         _fail(str(exc), code=2)
         return  # unreachable.
-    click.echo(click.style(f"created {kind} connector at {folder}", fg="green"))
-    click.echo(f"edit {folder}/register.yaml and its connector body, then:")
-    click.echo(f"  det validate -c {name}")
+    click.echo(click.style(f"created source at {folder}", fg="green"))
+    click.echo(f"edit {folder}/register.yaml and {folder}/source.py, then:")
+    click.echo("  det new config <name>   # bind this source to a destination")
+    click.echo("  det validate")
+
+
+@new.command(name="destination")
+@click.argument("name")
+@click.option(
+    "--project-dir",
+    "project_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Project root. Defaults to the current directory.",
+)
+def new_destination(name: str, project_dir: Path | None) -> None:
+    """Scaffold a destination folder ``destinations/NAME/``."""
+    try:
+        project_root = disc.find_project_root(project_dir)
+    except DiscoveryError as exc:
+        _fail(str(exc), code=2)
+        return  # unreachable.
+    target_dir = project_root / "destinations"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        folder = scaffold_destination(target_dir, name)
+    except _FRIENDLY_ERRORS as exc:
+        _fail(str(exc), code=2)
+        return  # unreachable.
+    click.echo(click.style(f"created destination at {folder}", fg="green"))
+    click.echo(f"edit {folder}/register.yaml and {folder}/destination.py, then:")
+    click.echo("  det validate")
+
+
+@new.command(name="config")
+@click.argument("name")
+@click.option(
+    "--project-dir",
+    "project_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Project root. Defaults to the current directory.",
+)
+def new_config(name: str, project_dir: Path | None) -> None:
+    """Scaffold a pipeline config file ``configs/NAME.yml`` — docs/12."""
+    try:
+        project_root = disc.find_project_root(project_dir)
+    except DiscoveryError as exc:
+        _fail(str(exc), code=2)
+        return  # unreachable.
+    target_dir = project_root / "configs"
+    try:
+        path = scaffold_config(target_dir, name)
+    except _FRIENDLY_ERRORS as exc:
+        _fail(str(exc), code=2)
+        return  # unreachable.
+    click.echo(click.style(f"created config at {path}", fg="green"))
+    click.echo(f"edit {path}, then:")
+    click.echo("  det validate")
+    click.echo(f"  det run -p {name}")
 
 
 # ---------------------------------------------------------------------------
@@ -462,9 +599,16 @@ def state() -> None:
 
 @state.command(name="list")
 @click.option(
-    "-c", "--connector", "connector", required=True, help="Source connector name."
+    "-p",
+    "--conf",
+    "config",
+    required=True,
+    metavar="CONFIG",
+    help="Pipeline config name.",
 )
-@click.option("--target", "target", help="profiles.yml target to use.")
+@click.option(
+    "--target", "target", help="Override the config's target for this lookup."
+)
 @click.option(
     "--project-dir",
     "project_dir",
@@ -479,21 +623,23 @@ def state() -> None:
     help="Override a destination config value. Repeatable.",
 )
 def state_list(
-    connector: str,
+    config: str,
     target: str | None,
     project_dir: Path | None,
     destination_params: tuple[str, ...],
 ) -> None:
-    """Show the ``_det_state`` rows for a connector.
+    """Show the ``_det_state`` rows for one config's source.
 
-    Opens the bound destination and calls its ``read_state`` hook — the same
-    call the engine makes at run start. One row per stream that has committed
-    incremental state.
+    Opens the config's bound destination and calls its ``read_state`` hook
+    — the same call the engine makes at run start. One row per stream that
+    has committed incremental state. State rows are keyed by source name
+    (not config name) — a re-run under a different config that shares this
+    source resumes off the same rows.
     """
-    dest_params = _parse_destination_params(destination_params)
+    dest_params = _parse_kv("destination-param", destination_params)
     try:
         records = list_state(
-            connector,
+            config,
             project_dir=project_dir,
             target=target,
             destination_params=dest_params or None,
@@ -503,7 +649,7 @@ def state_list(
         return  # unreachable.
 
     if not records:
-        click.echo(f"connector {connector!r} has no committed state")
+        click.echo(f"config {config!r} has no committed state")
         return
 
     rows: list[list[str]] = []
@@ -519,21 +665,28 @@ def state_list(
         )
     click.echo(
         render_table(
-            ["CONNECTOR", "STREAM", "CURSOR VALUE", "ROWS TOTAL", "UPDATED AT"], rows
+            ["SOURCE", "STREAM", "CURSOR VALUE", "ROWS TOTAL", "UPDATED AT"], rows
         )
     )
 
 
 @state.command(name="reset")
 @click.option(
-    "-c", "--connector", "connector", required=True, help="Source connector name."
+    "-p",
+    "--conf",
+    "config",
+    required=True,
+    metavar="CONFIG",
+    help="Pipeline config name.",
 )
 @click.option(
     "--stream",
     "stream_name",
     help="Reset only this stream's cursor. Omit to reset every stream.",
 )
-@click.option("--target", "target", help="profiles.yml target to use.")
+@click.option(
+    "--target", "target", help="Override the config's target for this reset."
+)
 @click.option(
     "--project-dir",
     "project_dir",
@@ -548,7 +701,7 @@ def state_list(
     help="Override a destination config value. Repeatable.",
 )
 def state_reset(
-    connector: str,
+    config: str,
     stream_name: str | None,
     target: str | None,
     project_dir: Path | None,
@@ -556,15 +709,15 @@ def state_reset(
 ) -> None:
     """Clear incremental state so the next run is a full re-extract.
 
-    Deletes the connector's ``_det_state`` rows (or one stream's, with
-    ``--stream``). The next run finds no prior cursor and seeds from each
-    stream's ``initial_value`` — the surgical alternative to ``--full-refresh``.
-    Loaded data is untouched.
+    Deletes the rows in ``_det_state`` for the config's source (or one
+    stream's, with ``--stream``). The next run finds no prior cursor and
+    seeds from each stream's ``initial_value`` — the surgical alternative to
+    ``--full-refresh``. Loaded data is untouched.
     """
-    dest_params = _parse_destination_params(destination_params)
+    dest_params = _parse_kv("destination-param", destination_params)
     try:
         cleared = reset_state(
-            connector,
+            config,
             stream=stream_name,
             project_dir=project_dir,
             target=target,
@@ -577,7 +730,7 @@ def state_reset(
     scope = f"stream {stream_name!r}" if stream_name else "all streams"
     click.echo(
         click.style(
-            f"reset state for connector {connector!r} ({scope}): "
+            f"reset state for config {config!r} ({scope}): "
             f"{cleared} cursor row(s) cleared",
             fg="green",
         )

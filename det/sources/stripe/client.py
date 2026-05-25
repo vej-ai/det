@@ -21,7 +21,7 @@ not have to think about:
 
 Design citation: docs/connectors/stripe-research.md §B "The standard REST
 API" pins the auth + pagination shape; cursor pagination is implemented in
-:mod:`det.connectors.stripe.pagination`, kept separate so this file is
+:mod:`det.sources.stripe.pagination`, kept separate so this file is
 purely the transport layer.
 """
 
@@ -120,7 +120,7 @@ class StripeClient:
     The lifetime of one instance is one ``@stream`` invocation: the source
     builds a client from :class:`~det.types.Config` at the top of the
     stream, then drives the cursor pagination loop in
-    :mod:`det.connectors.stripe.pagination` against it. A long-lived
+    :mod:`det.sources.stripe.pagination` against it. A long-lived
     :class:`requests.Session` keeps the TCP connection warm across the pages of
     one stream.
 

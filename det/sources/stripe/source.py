@@ -29,8 +29,8 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from det import Batch, Config, Cursor, stream
-from det.connectors.stripe.client import StripeClient
-from det.connectors.stripe.pagination import paginate
+from det.sources.stripe.client import StripeClient
+from det.sources.stripe.pagination import paginate
 
 # --------------------------------------------------------------------------
 # Stream-name → endpoint resolution

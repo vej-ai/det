@@ -39,6 +39,6 @@ streams:
       - {name: label,      type: STRING}
       - {name: updated_at, type: INTEGER}
 
-# Bind to the pre-baked DuckDB destination (docs/03 §2.3).
-destination:
-  connector: duckdb
+# As of build stage 8.B, the source's register.yaml no longer carries a
+# `destination:` block. The fixture project's configs/ folder carries
+# echo_dev (and other) configs binding echo → duckdb → dev (docs/12).

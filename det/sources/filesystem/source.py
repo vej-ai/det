@@ -55,8 +55,8 @@ from datetime import datetime
 from typing import Any
 
 from det import Batch, Config, Cursor, stream
-from det.connectors.filesystem.backends import FileRef, pick_backend
-from det.connectors.filesystem.readers import infer_format, reader_for_format
+from det.sources.filesystem.backends import FileRef, pick_backend
+from det.sources.filesystem.readers import infer_format, reader_for_format
 
 # Synthetic record field carrying the per-file cursor key. Recorded as a
 # module constant so the test / docs / a future explicit schema declaration

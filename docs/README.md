@@ -18,9 +18,10 @@ Read it in order. Sections **00–02** set the *why* — the vision, the competi
 | 03 | [The Connector Contract](./03-connector-contract.md) | The connector folder, `register.yaml`, the `@stream` / `@resource` / `@destination` decorators. |
 | 04 | [The Connector Body](./04-connector-body.md) | Writing extraction logic — pagination, cursors, incremental records, batching. |
 | 05 | [Destinations and State](./05-destinations-and-state.md) | The destination interface, the pre-baked catalog, schema handling, write dispositions, and the `_det_state` design with the capability-tier model. |
-| 06 | [Project Anatomy](./06-project-anatomy.md) | `det_project.yml`, the `connectors/` and `destinations/` directories, `.det/`, tags, targets. |
-| 07 | [CLI and Library API](./07-cli-and-library-api.md) | The full `det` command surface, exit codes, the importable Python library, orchestrator use, config precedence. |
+| 06 | [Project Anatomy](./06-project-anatomy.md) | `det_project.yml`, the `sources/`, `destinations/`, and `configs/` directories, `.det/`, the destination-keyed `profiles.yml`. |
+| 07 | [CLI and Library API](./07-cli-and-library-api.md) | The full `det` command surface (`run -p <config>`, `list --kind`, `new {source,destination,config}`, `state -p <config>`), exit codes, the importable Python library, orchestrator use, config precedence. |
 | 08 | [Security](./08-security.md) | Credentials, `profiles.yml`, `${ENV_VAR}` interpolation, secret managers, `.gitignore` defaults, log redaction, and the third-party-connector trust model. |
 | 09 | [Logging and Observability](./09-logging-and-observability.md) | Structured per-run logs, run lifecycle events, the run record and `_det_runs`, log levels and redaction. |
 | 10 | [Roadmap and Scope](./10-roadmap-and-scope.md) | v1 scope, the v1→v2→v3 phased plan, open-source release considerations, and project risks. |
 | 11 | [Open Questions](./11-open-questions.md) | Every decision the handbook deliberately left open, with current leans and what is at stake. Resolve before the v1 freeze. |
+| 12 | [Configs](./12-configs.md) | The pipeline-config concept — one config = one pipeline (source + destination + target + params). The CLI's `-p/--conf` arg names a config. |

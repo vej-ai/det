@@ -4,6 +4,11 @@
 
 det is invoked the way dbt is: `pip install`, then a CLI. But the CLI is a **thin shell over a real Python library** — every command is one function call away. This is deliberate. Orchestrators (Dagster, Airflow) and notebooks should never shell out; they import det. The CLI and the library are the *same engine*, exposed twice.
 
+Stage 8.B made **pipeline configs** (chapter 12) the runtime unit. The CLI's
+primary selector is now `-p / --conf <config_name>`; the connector-alone
+selector (`-c / --connector`) is gone, because a source without a destination
+binding cannot run.
+
 ---
 
 ## 1. Installation
@@ -12,177 +17,214 @@ det is invoked the way dbt is: `pip install`, then a CLI. But the CLI is a **thi
 pip install det
 ```
 
-This installs the engine, the CLI entry point `det`, and the pre-baked connectors/destinations (BigQuery, DuckDB; more in v2 — see [10 — Roadmap](./10-roadmap-and-scope.md)). Source connectors with heavy dependencies are installed per-connector via each connector's `requirements.txt`.
+This installs the engine, the CLI entry point `det`, and the pre-baked
+sources/destinations. Source connectors with heavy dependencies are installed
+per-connector via each connector's `requirements.txt`.
 
 ---
 
 ## 2. CLI surface
 
-All commands share a project root: the directory containing `det_project.yml` (see [06 — Project Anatomy](./06-project-anatomy.md)). det walks up from the CWD to find it, like dbt and git.
+All commands share a project root: the directory containing
+`det_project.yml` (see [06 — Project Anatomy](./06-project-anatomy.md)). det
+walks up from the CWD to find it, like dbt and git.
 
-### `det init` — scaffold a project
+### `det init [<dir>]` — scaffold a project
 
 ```bash
 det init my_pipelines
 ```
 
-Creates a minimal project:
+Creates the stage-8.B project tree:
 
 ```
 my_pipelines/
-  det_project.yml      # project name, version, connector paths
-  profiles.yml              # connection config (gitignored)
-  connectors/               # custom source connectors (kind: source)
-  destinations/             # custom destination connectors (kind: destination)
+  det_project.yml      # project name, version, *_paths, vars
+  profiles.yml         # per-destination connection params (gitignored)
+  sources/             # custom SOURCE connectors (kind: source)
+  destinations/        # custom DESTINATION connectors (kind: destination)
+  configs/             # pipeline configs (one source + one destination each)
+    example.yml        # a starter config stub
   .det/                # run state, logs, cache (gitignored)
-  .gitignore                # pre-populated — see section 08
+  .gitignore           # pre-populated
 ```
 
-`connectors/` and `destinations/` are a readability convention, not a typed boundary — both are scanned via `connector_paths`. See [06 — Project Anatomy](./06-project-anatomy.md).
-
-### `det new connector <name>` — scaffold a connector
+### `det new {source|destination|config} <name>` — scaffold a component
 
 ```bash
-det new connector stripe              # a source (default)
-det new connector my_warehouse --kind destination
+det new source stripe              # → sources/stripe/
+det new destination my_warehouse   # → destinations/my_warehouse/
+det new config stripe_dev          # → configs/stripe_dev.yml
 ```
 
-Generates a connector folder with a `register.yaml` and a stub `connector.py` containing a commented `@stream` (or `@destination`) example. The fastest path from zero to a working connector.
+Each subcommand writes a stub the user edits. A scaffolded source's
+`register.yaml` carries an example stream; a scaffolded destination carries
+the full `@destination` hook stub set; a scaffolded config binds a
+placeholder source to the baked `duckdb` destination.
 
-### `det list` — discover what exists
+### `det list [--kind {source|destination|config}]` — discover what exists
 
 ```bash
-det list                  # all connectors, their kind, streams, tags
-det list --connector stripe   # detail one connector
+det list                       # sources, destinations, configs (all three)
+det list --kind config         # just configs
 ```
+
+Output is grouped under three section headers:
 
 ```
 $ det list
-CONNECTOR        KIND         STREAMS                       TAGS
-stripe           source       charges, customers, invoices  finance, daily
-hubspot          source       contacts, deals               crm, daily
-bigquery         destination  —                             (baked)
-webhook_sink     destination  —                             custom
+SOURCES
+NAME      ORIGIN   #STREAMS  STREAMS                       TAGS
+stripe    baked    4         charges, customers, ...       saas, payments
+shiphero  project  3         shipments, orders, products   ecommerce
+
+DESTINATIONS
+NAME    ORIGIN  TAGS
+duckdb  baked   warehouse, duckdb, local, tier-a
+
+CONFIGS
+NAME           SOURCE    DESTINATION  TARGET  SELECT
+stripe_prod    stripe    bigquery     prod    (all)
+shiphero_dev   shiphero  duckdb       dev     shipments, orders
 ```
 
-### `det run` — extract and load
+`ORIGIN` is `baked` for a component shipped with det and `project` for one
+under the project's `source_paths` / `destination_paths`.
 
-The core command. Runs **synchronously**: it blocks until the run succeeds or fails, streaming logs to stdout. "Wait until it succeeds" is the contract — no background jobs, no polling, no daemon.
+### `det run -p <config> [...]` — extract and load
+
+The core command. Runs **synchronously**: it blocks until the run succeeds or
+fails, streaming logs to stdout. "Wait until it succeeds" is the contract —
+no background jobs, no polling, no daemon.
 
 ```bash
-det run -c stripe                     # run one connector, all streams
-det run -c stripe --select charges,invoices   # only these streams
-det run --tag daily                   # run every connector tagged 'daily'
-det run -c stripe --target prod       # use the 'prod' profile target
-det run -c stripe --full-refresh      # ignore state, reload from scratch
-det run -c stripe --dry-run           # plan only: resolve config, schema,
-                                           # dispositions — extract nothing
+det run -p stripe_prod                            # run the pipeline by config name
+det run --conf stripe_prod                        # long alias
+det run -p stripe_prod --select charges           # narrow streams (repeatable)
+det run -p stripe_prod --target staging           # override the config's target
+det run -p stripe_prod --full-refresh             # ignore state, reload
+det run -p stripe_prod --param page_size=500      # override a source param
+det run -p stripe_prod --destination-param dataset=raw   # override a dest param
 ```
 
 | Flag | Purpose |
 |---|---|
-| `-c, --connector <name>` | Run a single connector. Mutually exclusive with `--tag`. |
-| `--tag <tag>` | Run every connector carrying this tag. Repeatable. |
-| `--select <streams>` | Comma-separated stream subset within the connector(s). |
-| `--target <name>` | Profile target from `profiles.yml`. Defaults to the profile's `default`. |
-| `--full-refresh` | Discard state for the selected streams; reload from the beginning. For `replace`/`merge` streams this recreates the table. |
-| `--dry-run` | Resolve and validate everything (config, credentials present, schema, disposition vs. destination capability) but extract/load nothing. Exit 0 if the plan is valid. |
-| `--log-level <level>` | `debug`/`info`/`warn`/`error`. Default `info`. See [09 — Logging](./09-logging-and-observability.md). |
+| `-p, --conf <name>` | **Required.** The pipeline config to run (under `configs/`). |
+| `--target <name>` | Override the config's `target:`. Falls back to `profiles.yml[<destination>].default_target`. |
+| `--select <stream>` | **Replace** (not union) the config's `select:`. Repeatable / comma-separated. |
+| `--full-refresh` | Discard state for the selected streams; reload from the beginning. |
+| `--param k=v` | Override a source param. Repeatable. Top precedence (chapter 03 §6). |
+| `--destination-param k=v` | Override a destination param. Repeatable. Top precedence (chapter 12 §5). |
+| `--project-dir <dir>` | Project root (or any dir under it). Defaults to CWD. |
 
-Example run output (human-readable on a TTY; JSON-lines when piped — see [09](./09-logging-and-observability.md)):
+Example run output:
 
 ```
-$ det run -c stripe --tag daily
-[info] run a1b9f3 started · connector=stripe · target=prod → bigquery
-[info] stream charges: resuming from cursor created_at=2026-05-20T00:00:00Z
-[info] stream charges: batch 1 written (5000 rows)
-[info] stream charges: batch 2 written (2310 rows)
-[info] stream charges: done — 7310 extracted, 7310 loaded
-[info] stream customers: full refresh (replace)
-[info] stream customers: done — 1840 extracted, 1840 loaded
-[info] state committed · charges→2026-05-21T00:00:00Z · customers→(replace)
-[info] run a1b9f3 succeeded in 41.2s — 9150 rows across 2 streams
+$ det run -p stripe_prod
+[info] running stream 'charges'
+[info] stream 'charges' loaded 7310 row(s)
+[info] running stream 'customers'
+[info] stream 'customers' loaded 1840 row(s)
+config stripe_prod: source stripe -> destination bigquery  (target: prod)
+    STREAM     EXTRACTED  LOADED  CURSOR
+ok  charges    7310       7310    2026-05-20T00:00:00Z -> 2026-05-21T00:00:00Z
+ok  customers  1840       1840
+run run-a1b9f3eb1234: succeeded - 9150 row(s), 41.20s
 ```
 
-### `det test` — validate connectors
+### `det validate` — validate every component
 
 ```bash
-det test -c stripe          # connectivity + schema test, no full load
+det validate
 ```
 
-`test` calls each source's `@stream` for a tiny sample and validates the destination connection and capabilities. It is what CI runs and what `--dry-run` extends. It never advances state.
+Walks every source, destination, and config the project can discover, runs
+discovery-time validation (chapter 03 §7) on the connectors, and checks each
+config's `source` and `destination` exist + its `target` is defined in
+`profiles.yml`. Reports each problem found; exits non-zero if any component
+fails — a useful CI / pre-commit gate.
 
-### `det state` — inspect and reset state
+### `det state {list|reset}` — inspect and reset state
+
+State operations take a **config name**; the config resolves to a (source,
+destination, target) triple. State rows in `_det_state` are keyed by source
+name (chapter 12 §6), so two configs naming the same source share the same
+state rows.
 
 ```bash
-det state list                          # all cursors across connectors
-det state show -c stripe                # cursors for one connector
-det state reset -c stripe --select charges   # clear one stream's cursor
-det state set -c stripe --select charges --cursor '2026-01-01T00:00:00Z'
+det state list -p stripe_prod                       # cursors for this config's source
+det state reset -p stripe_prod                      # clear all cursors
+det state reset -p stripe_prod --stream charges     # clear just one
 ```
 
-```
-$ det state show -c stripe
-STREAM      CURSOR FIELD   CURSOR VALUE              LAST RUN   ROWS TOTAL
-charges     created_at     2026-05-21T00:00:00Z      a1b9f3     2,104,553
-customers   —              (replace)                 a1b9f3     1,840
-invoices    created_at     2026-05-19T00:00:00Z      9c2d10     88,201
-```
+`state reset` is the safe, surgical alternative to `--full-refresh`: it
+clears the cursor without touching loaded data, so the next run re-extracts
+the window. Both read/write the `_det_state` table described in
+[05 — Destinations and State](./05-destinations-and-state.md).
 
-`state reset` is the safe, surgical alternative to `--full-refresh`: it clears the cursor without touching loaded data, so the next run re-extracts the window. `state set` lets an operator pin a resume point (e.g. to re-pull a known-bad day). Both read/write the `_det_state` table or sidecar described in [05 — Destinations and State](./05-destinations-and-state.md).
+### `det --version`
+
+Print the installed package version and exit 0.
 
 ---
 
 ## 3. Exit codes and synchronous semantics
 
-`det run` blocks for the entire run. There is no async mode in the CLI — an orchestrator that wants concurrency runs multiple `det` invocations, or uses the library. Exit codes are stable and scriptable:
+`det run` blocks for the entire run. There is no async mode in the CLI — an
+orchestrator that wants concurrency runs multiple `det` invocations, or uses
+the library.
 
 | Code | Meaning |
 |---|---|
-| `0` | Run succeeded. All selected streams loaded; state committed. |
-| `1` | Run failed — an extract/load error. State **not** advanced (see [05 §5.3](./05-destinations-and-state.md)). |
-| `2` | Configuration error — bad `register.yaml`, missing credential, unknown connector/target. Nothing ran. |
-| `3` | Planning error — a stream requests a disposition the destination cannot satisfy (caught by `--dry-run` too). |
-| `130` | Interrupted (Ctrl-C / SIGTERM). Partial batches may be written; state not advanced. |
+| `0` | Run succeeded. |
+| `1` | Run failed — extract / load error, or config / discovery / validation problem stopped the run. |
+| `2` | CLI usage error (missing flag, bad value). |
+| `130` | Interrupted (Ctrl-C / SIGTERM). |
 
-The distinction between `1`, `2`, and `3` lets CI and orchestrators react correctly: `2`/`3` are "fix your config", `1` is "retry may help".
-
-A `--tag` run executes connectors sequentially. If one fails, remaining connectors **still run** (so one broken source doesn't block the rest); the overall exit code is the worst code observed. Per-connector results are in the run record ([09](./09-logging-and-observability.md)).
+> # NOTE: docs/07 §3 originally specified a finer 0/1/2/3/130 table that split
+> config errors from load errors. The engine's `det.run()` returns a uniform
+> FAILED `RunResult` for every failure class and never raises (runner.py), so
+> the CLI collapses to 0/1 — the code is source of truth (CONTRIBUTING.md
+> precedence rule).
 
 ---
 
 ## 4. The Python library API
 
-Everything the CLI does, the library does — because the CLI calls the library. The importable surface is small and stable.
+Everything the CLI does, the library does — because the CLI calls the
+library. The importable surface is small and stable.
 
 ```python
 import det
 
-# Load the project (walks up for det_project.yml, like the CLI).
-project = det.load_project("./my_pipelines")
-
-# Run a connector. Blocks until done — same synchronous contract as the CLI.
-result = project.run(
-    connector="stripe",
-    select=["charges", "invoices"],   # optional stream subset
-    target="prod",                    # optional; defaults to profile default
+# Run a config. Blocks until done — same synchronous contract as the CLI.
+result = det.run(
+    config="stripe_prod",                        # the config NAME under configs/
+    project_dir="./my_pipelines",                # walks up if omitted
+    target_override="staging",                   # overrides the config's target
+    params_override={"page_size": 500},          # source param overrides
+    destination_params_override={"dataset": "raw"},  # destination param overrides
     full_refresh=False,
-    dry_run=False,
+    select=("charges", "invoices"),              # replaces config's `select:`
 )
 
-print(result.status)        # "succeeded" | "failed"
-print(result.run_id)        # "a1b9f3"
+print(result.status)        # RunStatus.SUCCEEDED | RunStatus.FAILED
+print(result.run_id)        # "run-a1b9f3eb1234"
+print(result.config)        # "stripe_prod"  — the pipeline that ran
+print(result.connector)     # "stripe"        — the source name
+print(result.destination)   # "bigquery"
+print(result.target)        # "staging"
 print(result.rows_loaded)   # 9150
 for s in result.streams:
     print(s.name, s.rows_extracted, s.rows_loaded, s.cursor_after)
 
-if result.status == "failed":
-    raise result.error      # the original exception, re-raisable
+if result.status.value == "failed":
+    raise result.error      # or call result.raise_for_status()
 ```
 
 ### 4.1 The `RunResult` object
 
-`project.run(...)` returns a `RunResult` — the same structure persisted as the run record ([09](./09-logging-and-observability.md)):
+`det.run(...)` returns a `RunResult`:
 
 ```python
 @dataclass
@@ -192,35 +234,30 @@ class StreamResult:
     rows_loaded: int
     cursor_before: Any | None
     cursor_after: Any | None
-    status: str                 # "succeeded" | "failed" | "skipped"
+    status: StreamStatus            # SUCCEEDED | FAILED | SKIPPED
 
 @dataclass
 class RunResult:
     run_id: str
-    connector: str
+    config: str                     # the pipeline config name (e.g. "stripe_prod")
+    connector: str                  # the SOURCE name (e.g. "stripe")
     target: str
-    status: str                 # "succeeded" | "failed"
+    destination: str
+    status: RunStatus               # SUCCEEDED | FAILED
     started_at: datetime
     ended_at: datetime
     streams: list[StreamResult]
     rows_loaded: int
-    error: Exception | None
-    log_path: str               # .det/logs/<run_id>/run.jsonl
+    full_refresh: bool
+    error: BaseException | None
+    log_path: str
 ```
 
-`project.run()` does **not** raise on a failed run — it returns a `RunResult` with `status="failed"` and a populated `error`. This lets callers decide whether to raise, retry, or record. (The CLI translates `status` into the exit code.) A caller wanting exceptions uses `result.error` or a `project.run(...).raise_for_status()` helper.
+`det.run()` does **not** raise on a failed run — it returns a `RunResult`
+with `status=FAILED` and a populated `error`. A caller wanting exceptions
+calls `result.raise_for_status()`.
 
-### 4.2 Tag runs and listing from the library
-
-```python
-results = project.run_tag("daily")        # -> list[RunResult]
-connectors = project.list_connectors()    # -> list[ConnectorInfo]
-state = project.state("stripe")           # -> list[StateRecord], see 05
-```
-
-### 4.3 Calling det from an orchestrator (Dagster)
-
-Because the library is synchronous and returns a plain result object, orchestrator integration is trivial — no SDK, no callbacks:
+### 4.2 Calling det from an orchestrator (Dagster)
 
 ```python
 # dagster_pipeline.py
@@ -229,9 +266,8 @@ import det
 
 @op
 def load_stripe():
-    project = det.load_project("/opt/pipelines")
-    result = project.run(connector="stripe", target="prod")
-    if result.status == "failed":
+    result = det.run(config="stripe_prod", project_dir="/opt/pipelines")
+    if result.status.value == "failed":
         raise Failure(
             description=f"det run {result.run_id} failed",
             metadata={"run_id": result.run_id, "log": result.log_path},
@@ -243,32 +279,36 @@ def daily_ingest():
     load_stripe()
 ```
 
-The same pattern works for Airflow (`PythonOperator`), Prefect, or a bare cron + script. det does not ship orchestrator-specific adapters in v1 — the library *is* the adapter. A thin official `dagster-det` helper package is a v2 nicety, not a requirement. See [10 — Roadmap](./10-roadmap-and-scope.md).
-
-> [Open question: should the library expose a streaming/iterator API (`for batch in project.extract("stripe", "charges"): ...`) for users who want to handle loading themselves? It is a clean extension of the engine but widens the supported surface. Proposal: keep v1 to whole-run `project.run()`; revisit after real demand.]
+The same pattern works for Airflow (`PythonOperator`), Prefect, or a bare
+cron + script.
 
 ---
 
 ## 5. Configuration precedence
 
-det resolves every setting through a fixed precedence chain. Higher wins:
+det resolves every setting through a fixed precedence chain. Higher wins.
 
-```
-CLI flag  >  environment variable  >  profiles.yml  >  register.yaml default
-```
+For a **source param** (lowest → highest):
 
-1. **`register.yaml` default** — the connector author's baseline (e.g. `page_size: 100`). Lowest precedence; never secret.
-2. **`profiles.yml`** — the operator's per-environment config and connection details, including `${ENV_VAR}` interpolation. Gitignored. Canonical format and security rules in [08 — Security](./08-security.md).
-3. **Environment variable** — `SIMPLE_E_*` variables override matching keys. Useful in CI/containers where mounting a `profiles.yml` is awkward.
-4. **CLI flag** — `--target`, `--full-refresh`, `--select`, `--log-level`, etc. Always wins; it is the explicit operator intent for *this invocation*.
+1. The source's `register.yaml` `params[].default`.
+2. The project's `det_project.yml` `vars:` block.
+3. The active config's `params:` block.
+4. `SIMPLE_E_PARAM_<NAME>` environment variable.
+5. `det run --param k=v` flag / `det.run(params_override=)` kwarg.
 
-Example: `page_size` defaults to `100` in `register.yaml`, is set to `500` in `profiles.yml` for the `prod` target, and `SIMPLE_E_STRIPE__PAGE_SIZE=1000` is exported in CI → the run uses `1000`. A `--dry-run` prints the fully resolved config (with secrets redacted — see [08](./08-security.md)) so the operator can confirm what *would* run.
+For a **destination param** (lowest → highest):
 
-The library honors the identical chain: `load_project()` reads `profiles.yml` and env vars; arguments to `project.run()` are the library's equivalent of CLI flags and take top precedence. CLI and library are genuinely equal.
+1. The destination's `register.yaml` `params[].default`.
+2. The project's `det_project.yml` `vars:` block.
+3. The destination's `profiles.yml[<destination>].targets[<target>]` row.
+4. The active config's `destination_params:` block.
+5. `SIMPLE_E_PARAM_<NAME>` environment variable.
+6. `det run --destination-param k=v` flag / `det.run(destination_params_override=)` kwarg.
 
 ### Reference
 
-- Project layout, `det_project.yml` → [06 — Project Anatomy](./06-project-anatomy.md)
+- Project layout, `det_project.yml`, `profiles.yml` → [06 — Project Anatomy](./06-project-anatomy.md)
+- Configs in depth → [12 — Configs](./12-configs.md)
 - `profiles.yml` format, secrets, `${ENV_VAR}` → [08 — Security](./08-security.md)
 - Run logs and the run record → [09 — Logging and Observability](./09-logging-and-observability.md)
 - Destinations, targets, state → [05 — Destinations and State](./05-destinations-and-state.md)

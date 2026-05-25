@@ -199,6 +199,8 @@ streams:
       - {name: items,          type: JSON}
       - {name: metadata,       type: JSON}
 
-# `destination:` omitted — defers to the project default (docs/03 §2.3).
+# As of build stage 8.B, the source's register.yaml no longer carries a
+# `destination:` block. A config (configs/<name>.yml) binds this source to
+# a destination + target (docs/12).
 
 schedule: "0 */6 * * *"

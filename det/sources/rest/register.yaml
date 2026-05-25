@@ -98,7 +98,6 @@ streams:
       - {name: kind,       type: STRING}
       - {name: created_at, type: TIMESTAMP}
 
-# Bind to the pre-baked DuckDB destination (docs/03 §2.3). Override via the
-# project / target if you want a different warehouse.
-destination:
-  connector: duckdb
+# As of build stage 8.B, the source's register.yaml no longer carries a
+# `destination:` block. A config (configs/<name>.yml) binds this source to
+# a destination + target (docs/12).

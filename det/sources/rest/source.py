@@ -35,9 +35,9 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 from det import Batch, Config, Cursor, stream
-from det.connectors.rest.client import AuthSpec, build_client
-from det.connectors.rest.extractors import extract_records
-from det.connectors.rest.pagination import build_strategy
+from det.sources.rest.client import AuthSpec, build_client
+from det.sources.rest.extractors import extract_records
+from det.sources.rest.pagination import build_strategy
 
 
 def extract_stream(

@@ -1,12 +1,22 @@
-"""Project + connector scaffolding for ``det init`` / ``det new``.
+"""Project + connector + config scaffolding for ``det init`` / ``det new``.
 
-These functions write the starter files docs/06 describes — a project tree
-(``det_project.yml``, ``profiles.yml``, ``connectors/``, ``destinations/``,
-``.gitignore``, ``README.md``) and a connector folder (``register.yaml`` +
-a ``source.py`` / ``destination.py`` stub). The templates are modeled on the
-real working ``tests/fixtures/`` project and the ``echo`` fixture connector.
+These functions write the starter files docs/06 describes (post-8.B):
 
-Pure file I/O — no engine logic.
+* :func:`scaffold_project` — a project tree with ``det_project.yml``,
+  ``profiles.yml`` (destination-keyed), ``sources/``, ``destinations/``,
+  ``configs/`` (with one example config), ``.gitignore`` and a short
+  ``README.md``.
+* :func:`scaffold_source` — a source folder ``sources/<name>/`` with a
+  ``register.yaml`` + ``source.py`` ``@stream`` stub.
+* :func:`scaffold_destination` — a destination folder
+  ``destinations/<name>/`` with a ``register.yaml`` + ``destination.py``
+  full hook stub set.
+* :func:`scaffold_config` — a config file ``configs/<name>.yml`` binding a
+  source + destination + target.
+
+Pure file I/O — no engine logic. The templates are modeled on the real
+working ``tests/fixtures/`` project, the ``echo`` fixture source, and the
+baked ``duckdb`` destination.
 """
 
 from __future__ import annotations
@@ -18,53 +28,52 @@ from det.engine.discovery import PROJECT_FILE
 # --- project scaffold templates -------------------------------------------
 
 _PROJECT_YML = """\
-# {name} - a det project (docs/06).
+# {name} - a det project (docs/06 post-8.B).
 #
 # Committed to version control. Pure declaration: no logic, no credentials.
 name: {name}
 version: "0.1.0"
 
-# Directories scanned for custom connector folders, relative to this file.
-# 'connectors' and 'destinations' are a readability convention, not a typed
-# boundary - a connector's own register.yaml 'kind:' decides source vs dest.
-connector_paths:
-  - connectors
+# Directories scanned for project-local sources / destinations / configs,
+# relative to this file. Project-local connectors shadow baked same-named
+# ones (docs/03 §5).
+source_paths:
+  - sources
+destination_paths:
   - destinations
-
-# The destination a source binds to when its register.yaml omits a
-# 'destination:' block. 'duckdb' is the pre-baked zero-config dev default.
-default_destination: duckdb
-
-# Which profiles.yml target to use when --target is omitted.
-default_target: dev
+config_paths:
+  - configs
 
 # Project-wide param overrides applied to every connector (docs/03 §6).
+# Lower precedence than the active config's `params:` block, higher than
+# register.yaml param defaults.
 vars: {{}}
 """
 
 _PROFILES_YML = """\
-# profiles.yml - credentials per target (docs/06).
+# profiles.yml - per-destination connection params (docs/06 post-8.B).
 #
 # NOT committed to version control - it is listed in .gitignore. CI and
-# production supply it out of band. Each target is a named environment
-# selected by `det run --target <name>`.
-targets:
+# production supply it out of band. Top-level keys are destination connector
+# names (dbt outputs-style); each carries its own `default_target` plus a
+# `targets:` map of named-environment connection params.
 
-  dev:
-    # Destination credential/routing blocks, keyed by destination name.
-    destinations:
-      # The pre-baked DuckDB destination. 'path' is the .duckdb file; it
-      # defaults to .det/warehouse.duckdb when this block is omitted.
-      duckdb:
-        path: ".det/warehouse.duckdb"
+# The pre-baked DuckDB destination. `path` is the .duckdb file location.
+duckdb:
+  default_target: dev
+  targets:
+    dev:
+      path: ".det/warehouse.duckdb"
+    prod:
+      path: "/var/data/det/warehouse.duckdb"
 
-    # Named credential blocks resolved by ${{profile.<block>.<key>}} secret
-    # refs in any register.yaml (docs/03 §2.5). Add one per connector that
-    # declares secrets, e.g.:
-    #
-    #   profiles:
-    #     my_source:
-    #       api_token: ${{env.MY_SOURCE_API_TOKEN}}
+# Per-target source-secret blocks. Resolved by ${{profile.<block>.<key>}}
+# secret refs in any source's register.yaml (docs/03 §2.5).
+#
+#   profiles:
+#     dev:
+#       my_source:
+#         api_token: ${{env.MY_SOURCE_API_TOKEN_DEV}}
 """
 
 _GITIGNORE = """\
@@ -83,21 +92,37 @@ A [det](https://github.com/albinasplesnys/det) extract-load project.
 ## Layout
 
 - `det_project.yml` - project config (committed).
-- `profiles.yml` - credentials per target (**not** committed - gitignored).
-- `connectors/` - custom source connectors (`kind: source`).
+- `profiles.yml` - per-destination connection params (**not** committed - gitignored).
+- `sources/` - custom source connectors (`kind: source`).
 - `destinations/` - custom destination connectors (`kind: destination`).
+- `configs/` - pipeline configs (one source + one destination + one target each).
 - `.det/` - disposable working dir (gitignored).
 
 ## Getting started
 
 ```bash
-det new connector my_source   # scaffold a source connector
-det validate                  # discovery-time validation
-det run -c my_source          # extract + load
+det new source my_source        # scaffold a source connector
+det new config my_pipeline      # scaffold a configs/my_pipeline.yml
+det validate                    # discovery-time validation
+det run -p my_pipeline          # extract + load
 ```
 """
 
-# --- connector scaffold templates -----------------------------------------
+# An example config so a fresh project has at least one runnable thing.
+# This template is NOT passed through .format() so single braces are fine.
+_EXAMPLE_CONFIG_YML = """\
+# An example pipeline config (docs/12). One config = one source + one
+# destination + one target + the params customizing both ends. Run with
+# `det run -p example`.
+name: example
+source: my_source            # rename me to a source under sources/
+destination: duckdb
+target: dev
+params: {}
+destination_params: {}
+"""
+
+# --- source connector templates -------------------------------------------
 
 _SOURCE_REGISTER_YML = """\
 # {name} - a det SOURCE connector (docs/03).
@@ -116,10 +141,8 @@ streams:
       - {{name: id,   type: INTEGER, mode: REQUIRED}}
       - {{name: name, type: STRING}}
 
-# Where this source's streams land. Omit to use the project's
-# default_destination (docs/03 §2.3).
-destination:
-  connector: duckdb
+# As of stage 8.B, a source's register.yaml carries NO `destination:` block.
+# A config (configs/<name>.yml) binds this source to a destination + target.
 """
 
 _SOURCE_PY = '''\
@@ -155,6 +178,8 @@ def example() -> Iterator[Batch]:
     ]
 '''
 
+# --- destination connector templates --------------------------------------
+
 _DEST_REGISTER_YML = """\
 # {name} - a det DESTINATION connector (docs/05).
 name: {name}
@@ -164,6 +189,8 @@ summary: Describe what {name} writes to.
 tags: []
 
 # Routing/credential knobs the destination needs, declared as typed params.
+# At run time these are supplied by profiles.yml's per-target connection row
+# (docs/06 post-8.B); a config's `destination_params:` block can override.
 params:
   example_path:
     type: string
@@ -234,6 +261,33 @@ def close(conn: object) -> None:
     raise NotImplementedError("implement {name}.close")
 '''
 
+# --- config scaffold template ---------------------------------------------
+
+_CONFIG_YML = """\
+# {name} - a det pipeline config (docs/12).
+#
+# One config = one source + one destination + one target + the params that
+# customize both ends. Run with `det run -p {name}`.
+name: {name}
+source: my_source            # rename me to a source under sources/
+destination: duckdb
+target: dev
+
+# Per-pipeline source param overrides (docs/03 §6 layer 3).
+params: {{}}
+
+# Per-pipeline destination param overrides (docs/12). Layered on top of the
+# destination's profiles.yml row.
+destination_params: {{}}
+
+# Optional: limit to a subset of the source's streams. Empty = all.
+# select: [items, events]
+
+# Optional: cron expression surfaced to an external scheduler. The engine
+# itself never acts on this (docs/03 §2.6).
+# schedule: "0 */6 * * *"
+"""
+
 
 class ScaffoldError(Exception):
     """A scaffold target already exists, or could not be written.
@@ -244,12 +298,14 @@ class ScaffoldError(Exception):
 
 
 def scaffold_project(directory: Path, *, force: bool = False) -> Path:
-    """Write a new det project tree into ``directory`` — docs/06.
+    """Write a new det project tree into ``directory`` — docs/06 post-8.B.
 
-    Creates ``det_project.yml``, ``profiles.yml``, empty ``connectors/``
-    and ``destinations/`` folders, ``.gitignore`` and a short ``README.md``.
-    Refuses to clobber an existing project (a ``det_project.yml`` already
-    present) unless ``force`` is set. Returns the project root.
+    Creates ``det_project.yml``, ``profiles.yml`` (destination-keyed),
+    empty ``sources/``, ``destinations/``, and ``configs/`` folders (the
+    last seeded with one ``example.yml`` stub), ``.gitignore`` and a short
+    ``README.md``. Refuses to clobber an existing project (a
+    ``det_project.yml`` already present) unless ``force`` is set. Returns the
+    project root.
     """
     project_file = directory / PROJECT_FILE
     if project_file.exists() and not force:
@@ -259,41 +315,66 @@ def scaffold_project(directory: Path, *, force: bool = False) -> Path:
         )
     name = directory.resolve().name or "det_project"
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "connectors").mkdir(exist_ok=True)
+    (directory / "sources").mkdir(exist_ok=True)
     (directory / "destinations").mkdir(exist_ok=True)
+    (directory / "configs").mkdir(exist_ok=True)
 
     project_file.write_text(_PROJECT_YML.format(name=name))
     (directory / "profiles.yml").write_text(_PROFILES_YML)
     (directory / ".gitignore").write_text(_GITIGNORE)
     (directory / "README.md").write_text(_README.format(name=name))
-    # An empty folder needs a marker to survive `git add`; a comment file is
-    # friendlier than .gitkeep for a human reading the tree.
+    (directory / "configs" / "example.yml").write_text(_EXAMPLE_CONFIG_YML)
     return directory
 
 
-def scaffold_connector(
-    connectors_dir: Path, name: str, *, kind: str = "source"
-) -> Path:
-    """Write a new connector folder ``connectors_dir/<name>/`` — docs/03, docs/06.
+def scaffold_source(sources_dir: Path, name: str) -> Path:
+    """Write a new source folder ``sources_dir/<name>/`` — docs/03, docs/06.
 
-    For ``kind="source"``: a ``register.yaml`` with one example stream plus a
-    ``source.py`` carrying a ``@stream`` stub. For ``kind="destination"``: a
-    ``register.yaml`` plus a ``destination.py`` carrying the full
-    ``@destination`` hook stub set. Refuses to overwrite an existing folder.
-    Returns the connector folder path.
+    Writes a ``register.yaml`` with one example stream plus a ``source.py``
+    carrying a ``@stream`` stub. Refuses to overwrite an existing folder.
+    Returns the source folder path.
     """
-    if kind not in ("source", "destination"):
-        raise ScaffoldError(f"unknown connector kind {kind!r}; expected source|destination")
-    folder = connectors_dir / name
+    folder = sources_dir / name
     if folder.exists():
         raise ScaffoldError(
-            f"{folder} already exists; choose a different connector name"
+            f"{folder} already exists; choose a different source name"
         )
     folder.mkdir(parents=True)
-    if kind == "source":
-        (folder / "register.yaml").write_text(_SOURCE_REGISTER_YML.format(name=name))
-        (folder / "source.py").write_text(_SOURCE_PY.format(name=name))
-    else:
-        (folder / "register.yaml").write_text(_DEST_REGISTER_YML.format(name=name))
-        (folder / "destination.py").write_text(_DEST_PY.format(name=name))
+    (folder / "register.yaml").write_text(_SOURCE_REGISTER_YML.format(name=name))
+    (folder / "source.py").write_text(_SOURCE_PY.format(name=name))
     return folder
+
+
+def scaffold_destination(destinations_dir: Path, name: str) -> Path:
+    """Write a new destination folder ``destinations_dir/<name>/`` — docs/05, docs/06.
+
+    Writes a ``register.yaml`` plus a ``destination.py`` carrying the full
+    ``@destination`` hook stub set. Refuses to overwrite an existing folder.
+    Returns the destination folder path.
+    """
+    folder = destinations_dir / name
+    if folder.exists():
+        raise ScaffoldError(
+            f"{folder} already exists; choose a different destination name"
+        )
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(_DEST_REGISTER_YML.format(name=name))
+    (folder / "destination.py").write_text(_DEST_PY.format(name=name))
+    return folder
+
+
+def scaffold_config(configs_dir: Path, name: str) -> Path:
+    """Write a new config file ``configs_dir/<name>.yml`` — docs/12.
+
+    Writes a one-config-per-file stub binding a placeholder source to the
+    baked ``duckdb`` destination at the ``dev`` target. Refuses to overwrite
+    an existing file. Returns the config file path.
+    """
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    path = configs_dir / f"{name}.yml"
+    if path.exists():
+        raise ScaffoldError(
+            f"{path} already exists; choose a different config name"
+        )
+    path.write_text(_CONFIG_YML.format(name=name))
+    return path

@@ -34,10 +34,18 @@ pull request.
 
 ## Spec precedence: code is the source of truth
 
-The [design handbook](./docs/) (`docs/00`–`docs/11`) was written before the
+The [design handbook](./docs/) (`docs/00`–`docs/12`) was written before the
 implementation and remains the canonical *intent*. But once a contract is
 implemented in code, **the code is the source of truth** — if the handbook and
 the code diverge, fix the handbook to match the code, not the other way around.
-This avoids re-litigating handbook ambiguities at every stage. Notable already:
-`det/types.py::StateRecord` defines the canonical `_det_state` schema
-(docs/03 §3.5 and docs/05 §5.1 follow it).
+This avoids re-litigating handbook ambiguities at every stage.
+
+Worked examples already in the tree:
+
+- `det/types.py::StateRecord` defines the canonical `_det_state` schema
+  (docs/03 §3.5 and docs/05 §5.1 follow it).
+- **Configs are the runtime unit** (stage 8.B). The CLI's `-p / --conf` arg
+  and `det.run(config=...)` library entry point both take a *config name* —
+  the source-alone selector is gone. Documents `06`, `07`, and the new `12`
+  follow this; older sections that still refer to "running a connector"
+  carry `# NOTE:` comments calling out the post-8.B reality.

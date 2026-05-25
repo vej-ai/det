@@ -1,26 +1,24 @@
-# det project config for the engine test suite (docs/06).
+# det project config for the engine test suite (docs/06 post-8.B).
 #
 # tests/fixtures/ is a real det project: the engine walks up for this file,
-# discovers project-local connectors under connector_paths, and binds sources
-# to the project default destination. The `echo` fixture source already lives
-# at connectors/echo/, exactly where `connector_paths: [connectors]` looks.
+# discovers project-local sources/destinations/configs under the *_paths,
+# resolves a config by name, and drives source → destination through it.
+# The `echo` fixture source lives at sources/echo/, exactly where
+# `source_paths: [sources]` looks.
 name: det_test_project
 version: "1.0.0"
 
-# Project-local connector folders, relative to this file (docs/06).
-connector_paths:
-  - connectors
+# Project-local folder roots, relative to this file (docs/06).
+source_paths:
+  - sources
+destination_paths:
+  - destinations
+config_paths:
+  - configs
 
-# A source whose register.yaml omits a `destination:` block binds here. The
-# `echo` fixture DOES declare `destination: {connector: duckdb}`, so this is
-# the fallback exercised by the engine's destination-resolution tests.
-default_destination: duckdb
-
-# Target used when --target / run(target=...) is omitted.
-default_target: dev
-
-# Project-wide var overrides (docs/03 §6) — lower precedence than profiles,
-# higher than register.yaml param defaults. `echo` declares no params, so this
-# is here purely so the config-precedence engine tests have a layer to assert.
+# Project-wide var overrides (docs/03 §6) — lower precedence than the active
+# config's `params:` block, higher than register.yaml param defaults. `echo`
+# declares no params, so this is here purely so the config-precedence engine
+# tests have a layer to assert.
 vars:
   page_size: 100

@@ -1,21 +1,16 @@
 """CLI tests — real ``det`` invocations via click's :class:`CliRunner`.
 
 The CLI is a thin shell over the engine, so these tests invoke the command
-group exactly as a shell would and assert on exit codes and printed output:
+group exactly as a shell would and assert on exit codes and printed output.
 
-* ``run`` against the ``echo`` fixture succeeds (exit 0) and loads rows;
-* ``run`` of an unknown connector exits 1 with a clean message, no traceback;
-* ``list`` shows the ``echo`` connector;
-* ``validate`` passes a good connector and fails a malformed one;
-* ``init`` scaffolds a project and refuses to clobber one;
-* ``new connector`` scaffolds a folder;
-* ``state list`` shows committed cursors after a run, and ``state reset``
-  clears them so the next run re-extracts;
-* ``--version`` prints the version.
+Stage 8.B made *configs* the runtime unit (docs/12). The CLI's primary
+selection arg is now ``-p / --conf``; ``det list`` and ``det validate`` cover
+sources, destinations, and configs; ``det new`` has source/destination/
+config subcommands.
 
-Tests that need a real project copy ``tests/fixtures/`` into ``tmp_path`` (via
-the ``cli_project`` fixture) so a run never writes into the repo; the DuckDB
-file is redirected with ``--destination-param path=...``.
+Tests that need a real project copy ``tests/fixtures/`` into ``tmp_path``
+(via the ``cli_project`` fixture) so a run never writes into the repo; the
+DuckDB file is redirected with ``--destination-param path=...``.
 """
 
 from __future__ import annotations
@@ -90,7 +85,7 @@ def test_version(runner: CliRunner) -> None:
 
 
 def test_help_lists_every_command(runner: CliRunner) -> None:
-    """``det --help`` lists all seven command groups."""
+    """``det --help`` lists each top-level command group."""
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0, _show(result)
     for command in ("run", "list", "validate", "init", "new", "state"):
@@ -105,13 +100,13 @@ def test_help_lists_every_command(runner: CliRunner) -> None:
 def test_run_echo_succeeds(
     runner: CliRunner, cli_project: Path, warehouse: str
 ) -> None:
-    """``run -c echo`` loads the fixture data and exits 0."""
+    """``run -p echo_dev`` loads the fixture data and exits 0."""
     result = runner.invoke(
         cli,
         [
             "run",
-            "-c",
-            "echo",
+            "-p",
+            "echo_dev",
             "--project-dir",
             str(cli_project),
             "--destination-param",
@@ -120,7 +115,6 @@ def test_run_echo_succeeds(
     )
     assert result.exit_code == 0, _show(result)
     assert "succeeded" in result.output
-    # echo: 4 events + 5 items on a first run.
     assert "9 row(s)" in result.output
     assert "events" in result.output and "items" in result.output
 
@@ -131,8 +125,8 @@ def test_run_incremental_resume(
     """A second ``run`` resumes past the committed cursor — items yields 0 rows."""
     args = [
         "run",
-        "-c",
-        "echo",
+        "-p",
+        "echo_dev",
         "--project-dir",
         str(cli_project),
         "--destination-param",
@@ -142,7 +136,6 @@ def test_run_incremental_resume(
     assert first.exit_code == 0, _show(first)
     second = runner.invoke(cli, args)
     assert second.exit_code == 0, _show(second)
-    # Re-run: events re-appends (4), items resumes from cursor 5 and yields 0.
     assert "4 row(s)" in second.output
 
 
@@ -152,8 +145,8 @@ def test_run_full_refresh(
     """``--full-refresh`` re-extracts the incremental stream past its cursor."""
     args = [
         "run",
-        "-c",
-        "echo",
+        "-p",
+        "echo_dev",
         "--project-dir",
         str(cli_project),
         "--destination-param",
@@ -162,7 +155,6 @@ def test_run_full_refresh(
     runner.invoke(cli, args)
     refreshed = runner.invoke(cli, [*args, "--full-refresh"])
     assert refreshed.exit_code == 0, _show(refreshed)
-    # full-refresh ignores the cursor: items yields all 5 again → 9 total.
     assert "9 row(s)" in refreshed.output
 
 
@@ -174,8 +166,8 @@ def test_run_select_single_stream(
         cli,
         [
             "run",
-            "-c",
-            "echo",
+            "-p",
+            "echo_dev",
             "--select",
             "events",
             "--project-dir",
@@ -185,20 +177,19 @@ def test_run_select_single_stream(
         ],
     )
     assert result.exit_code == 0, _show(result)
-    # Only events ran (4 rows); items was skipped.
     assert "4 row(s)" in result.output
     assert "skip" in result.output
 
 
-def test_run_bad_connector_exits_1_no_traceback(
+def test_run_unknown_config_exits_1_no_traceback(
     runner: CliRunner, cli_project: Path, warehouse: str
 ) -> None:
-    """``run`` of an unknown connector exits 1 with a clean message, no traceback."""
+    """``run`` of an unknown config exits 1 with a clean message, no traceback."""
     result = runner.invoke(
         cli,
         [
             "run",
-            "-c",
+            "-p",
             "does_not_exist",
             "--project-dir",
             str(cli_project),
@@ -209,44 +200,13 @@ def test_run_bad_connector_exits_1_no_traceback(
     assert result.exit_code == 1, _show(result)
     assert "FAILED" in result.output
     assert "does_not_exist" in result.output
-    # No Python traceback leaked to the user.
     assert "Traceback" not in result.output
 
 
-def test_run_requires_connector_or_tag(runner: CliRunner, cli_project: Path) -> None:
-    """``run`` with neither --connector nor --tag is a usage error (exit 2)."""
+def test_run_requires_config(runner: CliRunner, cli_project: Path) -> None:
+    """``run`` with no -p/--conf is a click usage error."""
     result = runner.invoke(cli, ["run", "--project-dir", str(cli_project)])
     assert result.exit_code == 2, _show(result)
-    assert "exactly one" in result.output
-
-
-def test_run_connector_and_tag_mutually_exclusive(
-    runner: CliRunner, cli_project: Path
-) -> None:
-    """``run`` rejects passing both --connector and --tag."""
-    result = runner.invoke(
-        cli,
-        ["run", "-c", "echo", "--tag", "test", "--project-dir", str(cli_project)],
-    )
-    assert result.exit_code == 2, _show(result)
-
-
-def test_run_by_tag(runner: CliRunner, cli_project: Path, warehouse: str) -> None:
-    """``run --tag`` runs every connector carrying the tag (echo has tag 'test')."""
-    result = runner.invoke(
-        cli,
-        [
-            "run",
-            "--tag",
-            "test",
-            "--project-dir",
-            str(cli_project),
-            "--destination-param",
-            f"path={warehouse}",
-        ],
-    )
-    assert result.exit_code == 0, _show(result)
-    assert "echo" in result.output
 
 
 # ==========================================================================
@@ -254,35 +214,47 @@ def test_run_by_tag(runner: CliRunner, cli_project: Path, warehouse: str) -> Non
 # ==========================================================================
 
 
-def test_list_shows_echo(runner: CliRunner, cli_project: Path) -> None:
-    """``list`` shows the echo connector with its kind and streams."""
+def test_list_shows_all_kinds(runner: CliRunner, cli_project: Path) -> None:
+    """``list`` shows sources, destinations, and configs in three sections."""
     result = runner.invoke(cli, ["list", "--project-dir", str(cli_project)])
     assert result.exit_code == 0, _show(result)
+    assert "SOURCES" in result.output
+    assert "DESTINATIONS" in result.output
+    assert "CONFIGS" in result.output
     assert "echo" in result.output
-    assert "source" in result.output
-    assert "events" in result.output and "items" in result.output
-    # The baked duckdb destination is discoverable too.
     assert "duckdb" in result.output
+    assert "echo_dev" in result.output
 
 
-def test_list_tag_filter(runner: CliRunner, cli_project: Path) -> None:
-    """``list --tag`` filters to connectors carrying the tag."""
+def test_list_kind_source(runner: CliRunner, cli_project: Path) -> None:
+    """``list --kind source`` restricts to sources."""
     result = runner.invoke(
-        cli, ["list", "--tag", "fixture", "--project-dir", str(cli_project)]
+        cli, ["list", "--kind", "source", "--project-dir", str(cli_project)]
     )
     assert result.exit_code == 0, _show(result)
-    assert "echo" in result.output
-    # duckdb does not carry the 'fixture' tag.
-    assert "duckdb" not in result.output
+    assert "SOURCES" in result.output
+    assert "DESTINATIONS" not in result.output
+    assert "CONFIGS" not in result.output
 
 
-def test_list_tag_no_match(runner: CliRunner, cli_project: Path) -> None:
-    """``list --tag`` with no match prints a clear "nothing found" line."""
+def test_list_kind_destination(runner: CliRunner, cli_project: Path) -> None:
+    """``list --kind destination`` restricts to destinations."""
     result = runner.invoke(
-        cli, ["list", "--tag", "nonsuch", "--project-dir", str(cli_project)]
+        cli, ["list", "--kind", "destination", "--project-dir", str(cli_project)]
     )
     assert result.exit_code == 0, _show(result)
-    assert "no connectors found" in result.output
+    assert "DESTINATIONS" in result.output
+    assert "SOURCES" not in result.output
+
+
+def test_list_kind_config(runner: CliRunner, cli_project: Path) -> None:
+    """``list --kind config`` restricts to pipeline configs."""
+    result = runner.invoke(
+        cli, ["list", "--kind", "config", "--project-dir", str(cli_project)]
+    )
+    assert result.exit_code == 0, _show(result)
+    assert "CONFIGS" in result.output
+    assert "echo_dev" in result.output
 
 
 # ==========================================================================
@@ -290,29 +262,19 @@ def test_list_tag_no_match(runner: CliRunner, cli_project: Path) -> None:
 # ==========================================================================
 
 
-def test_validate_good_connector(runner: CliRunner, cli_project: Path) -> None:
-    """``validate -c echo`` passes the well-formed fixture connector."""
-    result = runner.invoke(
-        cli, ["validate", "-c", "echo", "--project-dir", str(cli_project)]
-    )
-    assert result.exit_code == 0, _show(result)
-    assert "echo" in result.output
-    assert "valid" in result.output
-
-
-def test_validate_all(runner: CliRunner, cli_project: Path) -> None:
-    """``validate`` with no -c validates every discoverable connector."""
+def test_validate_all_ok(runner: CliRunner, cli_project: Path) -> None:
+    """``validate`` passes a clean project's sources, destinations, configs."""
     result = runner.invoke(cli, ["validate", "--project-dir", str(cli_project)])
     assert result.exit_code == 0, _show(result)
     assert "echo" in result.output
     assert "duckdb" in result.output
+    assert "echo_dev" in result.output
+    assert "valid" in result.output
 
 
-def test_validate_bad_connector_fails(runner: CliRunner, cli_project: Path) -> None:
-    """``validate`` exits non-zero on a connector that fails discovery."""
-    # A malformed connector: declares a stream in register.yaml with no
-    # matching @stream function — a docs/03 §7 coverage failure.
-    bad = cli_project / "connectors" / "broken"
+def test_validate_bad_source_fails(runner: CliRunner, cli_project: Path) -> None:
+    """``validate`` exits non-zero on a source that fails discovery."""
+    bad = cli_project / "sources" / "broken"
     bad.mkdir()
     (bad / "register.yaml").write_text(
         textwrap.dedent(
@@ -328,12 +290,29 @@ def test_validate_bad_connector_fails(runner: CliRunner, cli_project: Path) -> N
     (bad / "source.py").write_text(
         "# no @stream function — 'ghost' is an orphan declaration.\n"
     )
-    result = runner.invoke(
-        cli, ["validate", "-c", "broken", "--project-dir", str(cli_project)]
-    )
+    result = runner.invoke(cli, ["validate", "--project-dir", str(cli_project)])
     assert result.exit_code == 1, _show(result)
     assert "FAIL" in result.output
     assert "broken" in result.output
+
+
+def test_validate_config_missing_source_fails(
+    runner: CliRunner, cli_project: Path
+) -> None:
+    """``validate`` flags a config that names a non-existent source."""
+    (cli_project / "configs" / "ghost.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: ghost_pipe
+            source: ghost_source
+            destination: duckdb
+            target: dev
+            """
+        )
+    )
+    result = runner.invoke(cli, ["validate", "--project-dir", str(cli_project)])
+    assert result.exit_code == 1, _show(result)
+    assert "ghost_source" in result.output
 
 
 # ==========================================================================
@@ -350,8 +329,10 @@ def test_init_scaffolds_project(runner: CliRunner, tmp_path: Path) -> None:
     assert (target / "profiles.yml").is_file()
     assert (target / ".gitignore").is_file()
     assert (target / "README.md").is_file()
-    assert (target / "connectors").is_dir()
+    assert (target / "sources").is_dir()
     assert (target / "destinations").is_dir()
+    assert (target / "configs").is_dir()
+    assert (target / "configs" / "example.yml").is_file()
 
 
 def test_init_refuses_to_clobber(runner: CliRunner, tmp_path: Path) -> None:
@@ -376,69 +357,83 @@ def test_init_scaffolds_runnable_project(runner: CliRunner, tmp_path: Path) -> N
     """A scaffolded project's det_project.yml is a valid, parseable project."""
     target = tmp_path / "p"
     runner.invoke(cli, ["init", str(target)])
-    # `list` walks up for det_project.yml — it succeeds on the scaffold.
     result = runner.invoke(cli, ["list", "--project-dir", str(target)])
     assert result.exit_code == 0, _show(result)
 
 
 # ==========================================================================
-# new connector
+# new <source|destination|config>
 # ==========================================================================
 
 
-def test_new_connector_scaffolds_source(runner: CliRunner, tmp_path: Path) -> None:
-    """``new connector`` scaffolds a source folder under connectors/."""
+def test_new_source_scaffolds(runner: CliRunner, tmp_path: Path) -> None:
+    """``new source <name>`` scaffolds ``sources/<name>/``."""
     project = tmp_path / "proj"
     runner.invoke(cli, ["init", str(project)])
     result = runner.invoke(
-        cli, ["new", "connector", "my_src", "--project-dir", str(project)]
+        cli, ["new", "source", "my_src", "--project-dir", str(project)]
     )
     assert result.exit_code == 0, _show(result)
-    folder = project / "connectors" / "my_src"
+    folder = project / "sources" / "my_src"
     assert (folder / "register.yaml").is_file()
     assert (folder / "source.py").is_file()
 
 
-def test_new_connector_destination_kind(runner: CliRunner, tmp_path: Path) -> None:
-    """``new connector --kind destination`` scaffolds under destinations/."""
+def test_new_destination_scaffolds(runner: CliRunner, tmp_path: Path) -> None:
+    """``new destination <name>`` scaffolds ``destinations/<name>/``."""
     project = tmp_path / "proj"
     runner.invoke(cli, ["init", str(project)])
     result = runner.invoke(
-        cli,
-        [
-            "new",
-            "connector",
-            "my_dest",
-            "--kind",
-            "destination",
-            "--project-dir",
-            str(project),
-        ],
+        cli, ["new", "destination", "my_dst", "--project-dir", str(project)]
     )
     assert result.exit_code == 0, _show(result)
-    folder = project / "destinations" / "my_dest"
+    folder = project / "destinations" / "my_dst"
     assert (folder / "register.yaml").is_file()
     assert (folder / "destination.py").is_file()
 
 
-def test_new_connector_is_validatable(runner: CliRunner, tmp_path: Path) -> None:
-    """A scaffolded source connector passes ``det validate`` out of the box."""
+def test_new_config_scaffolds(runner: CliRunner, tmp_path: Path) -> None:
+    """``new config <name>`` scaffolds ``configs/<name>.yml``."""
     project = tmp_path / "proj"
     runner.invoke(cli, ["init", str(project)])
-    runner.invoke(cli, ["new", "connector", "fresh", "--project-dir", str(project)])
     result = runner.invoke(
-        cli, ["validate", "-c", "fresh", "--project-dir", str(project)]
+        cli, ["new", "config", "my_pipeline", "--project-dir", str(project)]
     )
+    assert result.exit_code == 0, _show(result)
+    assert (project / "configs" / "my_pipeline.yml").is_file()
+
+
+def test_new_source_is_validatable(runner: CliRunner, tmp_path: Path) -> None:
+    """A scaffolded source passes ``det validate`` out of the box."""
+    project = tmp_path / "proj"
+    runner.invoke(cli, ["init", str(project)])
+    runner.invoke(cli, ["new", "source", "fresh", "--project-dir", str(project)])
+    # The scaffolded example.yml config still references the placeholder
+    # 'my_source' — delete it so validate doesn't fail on the dangling config.
+    (project / "configs" / "example.yml").unlink()
+    result = runner.invoke(cli, ["validate", "--project-dir", str(project)])
     assert result.exit_code == 0, _show(result)
 
 
-def test_new_connector_refuses_existing(runner: CliRunner, tmp_path: Path) -> None:
-    """``new connector`` refuses to overwrite an existing connector folder."""
+def test_new_source_refuses_existing(runner: CliRunner, tmp_path: Path) -> None:
+    """``new source`` refuses to overwrite an existing source folder."""
     project = tmp_path / "proj"
     runner.invoke(cli, ["init", str(project)])
-    runner.invoke(cli, ["new", "connector", "dup", "--project-dir", str(project)])
+    runner.invoke(cli, ["new", "source", "dup", "--project-dir", str(project)])
     again = runner.invoke(
-        cli, ["new", "connector", "dup", "--project-dir", str(project)]
+        cli, ["new", "source", "dup", "--project-dir", str(project)]
+    )
+    assert again.exit_code == 2, _show(again)
+    assert "already exists" in again.output
+
+
+def test_new_config_refuses_existing(runner: CliRunner, tmp_path: Path) -> None:
+    """``new config`` refuses to overwrite an existing config file."""
+    project = tmp_path / "proj"
+    runner.invoke(cli, ["init", str(project)])
+    runner.invoke(cli, ["new", "config", "dup", "--project-dir", str(project)])
+    again = runner.invoke(
+        cli, ["new", "config", "dup", "--project-dir", str(project)]
     )
     assert again.exit_code == 2, _show(again)
     assert "already exists" in again.output
@@ -457,8 +452,8 @@ def test_state_list_after_run(
         cli,
         [
             "run",
-            "-c",
-            "echo",
+            "-p",
+            "echo_dev",
             "--project-dir",
             str(cli_project),
             "--destination-param",
@@ -470,8 +465,8 @@ def test_state_list_after_run(
         [
             "state",
             "list",
-            "-c",
-            "echo",
+            "-p",
+            "echo_dev",
             "--project-dir",
             str(cli_project),
             "--destination-param",
@@ -479,7 +474,6 @@ def test_state_list_after_run(
         ],
     )
     assert result.exit_code == 0, _show(result)
-    # echo's items stream commits an int cursor (max updated_at == 5).
     assert "items" in result.output
     assert "events" in result.output
 
@@ -487,14 +481,14 @@ def test_state_list_after_run(
 def test_state_list_no_state(
     runner: CliRunner, cli_project: Path, warehouse: str
 ) -> None:
-    """``state list`` on a never-run connector reports no committed state."""
+    """``state list`` on a never-run config reports no committed state."""
     result = runner.invoke(
         cli,
         [
             "state",
             "list",
-            "-c",
-            "echo",
+            "-p",
+            "echo_dev",
             "--project-dir",
             str(cli_project),
             "--destination-param",
@@ -511,25 +505,24 @@ def test_state_reset_clears_cursor(
     """``state reset`` clears state so the next run re-extracts everything."""
     run_args = [
         "run",
-        "-c",
-        "echo",
+        "-p",
+        "echo_dev",
         "--project-dir",
         str(cli_project),
         "--destination-param",
         f"path={warehouse}",
     ]
-    # Run once → cursor commits at 5 → a re-run would yield 0 items.
     runner.invoke(cli, run_args)
     second = runner.invoke(cli, run_args)
-    assert "4 row(s)" in second.output  # items resumed → 0, only events.
+    assert "4 row(s)" in second.output
 
     reset = runner.invoke(
         cli,
         [
             "state",
             "reset",
-            "-c",
-            "echo",
+            "-p",
+            "echo_dev",
             "--project-dir",
             str(cli_project),
             "--destination-param",
@@ -539,7 +532,6 @@ def test_state_reset_clears_cursor(
     assert reset.exit_code == 0, _show(reset)
     assert "cleared" in reset.output
 
-    # After reset the next run re-extracts items from initial_value → 9 total.
     after = runner.invoke(cli, run_args)
     assert after.exit_code == 0, _show(after)
     assert "9 row(s)" in after.output
@@ -551,8 +543,8 @@ def test_state_reset_single_stream(
     """``state reset --stream`` clears just one stream's cursor."""
     run_args = [
         "run",
-        "-c",
-        "echo",
+        "-p",
+        "echo_dev",
         "--project-dir",
         str(cli_project),
         "--destination-param",
@@ -564,8 +556,8 @@ def test_state_reset_single_stream(
         [
             "state",
             "reset",
-            "-c",
-            "echo",
+            "-p",
+            "echo_dev",
             "--stream",
             "items",
             "--project-dir",
@@ -576,7 +568,6 @@ def test_state_reset_single_stream(
     )
     assert reset.exit_code == 0, _show(reset)
     assert "items" in reset.output
-    # items state is gone; a re-run re-extracts it.
     after = runner.invoke(cli, run_args)
     assert "9 row(s)" in after.output
 
@@ -584,14 +575,14 @@ def test_state_reset_single_stream(
 def test_state_reset_never_run_is_clean(
     runner: CliRunner, cli_project: Path, warehouse: str
 ) -> None:
-    """``state reset`` on a connector that never ran is a clean no-op."""
+    """``state reset`` on a config that never ran is a clean no-op."""
     result = runner.invoke(
         cli,
         [
             "state",
             "reset",
-            "-c",
-            "echo",
+            "-p",
+            "echo_dev",
             "--project-dir",
             str(cli_project),
             "--destination-param",

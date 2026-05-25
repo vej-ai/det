@@ -1,30 +1,32 @@
 # 06 — Project Anatomy
 
 A det **project** is the directory a user creates to run extract-load
-pipelines. It is modeled directly on a dbt project: a small declarative root
-file, a credentials file kept separate from code, folders of connectors, and a
-disposable working directory. If you know `dbt_project.yml`, `profiles.yml`, and
-`target/`, you already know the shape of this chapter.
+pipelines. It is modeled on a dbt project: a small declarative root file, a
+credentials file kept separate from code, folders of components, and a
+disposable working directory. After stage 8.B, sources, destinations, and
+pipeline *configs* live in their own folders — and a config (not a connector)
+is the runtime unit (chapter 12).
 
 ## The dbt analogy at a glance
 
 | dbt | det | Purpose |
 |---|---|---|
-| `dbt_project.yml` | `det_project.yml` | Project config: name, paths, defaults, vars. Committed. |
-| `~/.dbt/profiles.yml` | `profiles.yml` | Credentials per environment/target. **Not committed.** |
-| `models/` | `connectors/` + `destinations/` | The work the project does. Committed. |
+| `dbt_project.yml` | `det_project.yml` | Project config: name, paths, project-wide vars. Committed. |
+| `~/.dbt/profiles.yml` | `profiles.yml` | Per-destination connection params, per target. **Not committed.** |
+| `models/` | `sources/` + `destinations/` + `configs/` | The work the project does. Committed. |
 | `target/` | `.det/` | Disposable build/cache/log output. Git-ignored. |
-| `dbt run --target prod` | `det run --target prod` | Select an environment. |
+| `dbt run --select my_model` | `det run -p my_pipeline` | Run one pipeline. |
+| `dbt outputs` in `profiles.yml` | top-level destination blocks in `profiles.yml` | Per-environment connection rows. |
 
 ## A complete project tree
 
 ```
 acme_el/
-├── det_project.yml        # project config (the dbt_project.yml analog)
-├── profiles.yml                # credentials per target (NOT committed)
+├── det_project.yml         # project config (the dbt_project.yml analog)
+├── profiles.yml            # per-destination connection params (NOT committed)
 ├── .gitignore
 │
-├── connectors/                 # custom SOURCE connectors (kind: source)
+├── sources/                # custom SOURCE connectors (kind: source)
 │   ├── shiphero/
 │   │   ├── register.yaml
 │   │   ├── source.py
@@ -34,24 +36,28 @@ acme_el/
 │       ├── register.yaml
 │       └── source.py
 │
-├── destinations/               # custom DESTINATION connectors (kind: destination)
+├── destinations/           # custom DESTINATION connectors (kind: destination)
 │   └── snowflake_eu/
 │       ├── register.yaml
 │       └── destination.py
 │
-└── .det/                  # working dir (git-ignored — the target/ analog)
-    ├── manifest.json           # cached, validated catalog of all connectors
+├── configs/                # pipeline configs (one config = one pipeline)
+│   ├── shiphero_dev.yml    # one config per file
+│   ├── shiphero_prod.yml
+│   └── internal.yml        # ...OR many under a `configs:` list per file
+│
+└── .det/                   # working dir (git-ignored — the target/ analog)
+    ├── manifest.json
     ├── logs/
     │   └── run-2026-05-21T09-30-00.log
-    └── cache/                  # per-run scratch (schema introspection, etc.)
+    └── cache/
 ```
 
-`connectors/` and `destinations/` are **conventional folders, not a typed
-distinction** — both hold connector folders, and what makes a connector a source
-or a destination is the `kind:` key in its own `register.yaml` (chapter 03). The
-two folders exist purely so a human can find things; the engine would be just as
-happy with everything under one `connectors/`. Splitting them is the recommended
-default for readability, and `connector_paths` (below) lists both.
+Stage 8.B split the old single `connectors/` directory into **`sources/`** and
+**`destinations/`** (one per kind, no more guessing by `register.yaml` `kind:`),
+and added **`configs/`** — the directory of pipeline configs that bind a source
+to a destination. Configs are the runtime unit: `det run -p <name>` names a
+config, not a connector.
 
 ## `det_project.yml` — the project config
 
@@ -63,23 +69,18 @@ credentials.
 name: acme_el
 version: "1.0.0"
 
-# Where the engine looks for custom connectors. Project-local folders.
-# Order matters only for human grouping; resolution is by connector name.
-connector_paths:
-  - connectors
+# Where the engine looks for project-local components, relative to this file.
+# Project-local folders shadow same-named baked components (chapter 03 §5).
+source_paths:
+  - sources
+destination_paths:
   - destinations
-
-# The destination a source binds to when its register.yaml omits a
-# `destination:` block. Names a connector discoverable on connector_paths
-# or a pre-baked one.
-default_destination: bigquery
-
-# Default target if --target is not passed on the CLI.
-default_target: dev
+config_paths:
+  - configs
 
 # Project-wide variables. Override register.yaml param defaults for every
-# connector in the project. Lowest precedence after the connector's own
-# defaults; see chapter 03 §6.
+# connector in the project. Lower precedence than the active config's
+# `params:` block; higher than register.yaml param defaults. See chapter 03 §6.
 vars:
   start_date: "2025-01-01"
   page_size: 100
@@ -91,138 +92,170 @@ vars:
 |---|---|---|---|---|
 | `name` | string | **Yes** | — | Project identifier. `snake_case`. |
 | `version` | string (semver) | No | `"0.1.0"` | Project version. Surfaced in logs and the manifest. |
-| `connector_paths` | list[string] | No | `["connectors"]` | Directories scanned for custom connector folders, relative to the project root. |
-| `default_destination` | string | No | `null` | Connector `name` used when a source's `register.yaml` has no `destination:` block. |
-| `default_target` | string | No | first target in `profiles.yml` | Which `profiles.yml` target to use when `--target` is omitted. |
+| `source_paths` | list[string] | No | `["sources"]` | Directories scanned for project-local sources. |
+| `destination_paths` | list[string] | No | `["destinations"]` | Directories scanned for project-local destinations. |
+| `config_paths` | list[string] | No | `["configs"]` | Directories scanned for pipeline configs (chapter 12). |
 | `vars` | map[string → scalar] | No | `{}` | Project-wide param overrides applied to every connector. |
 | `working_dir` | string | No | `.det` | Where the engine writes the manifest cache, logs, and scratch. |
 
-Seven keys. Like `register.yaml`, the project file is kept deliberately small —
-anything per-environment belongs in `profiles.yml`, anything per-connector
-belongs in that connector's `register.yaml`.
+> Stage 8.B removed `default_destination` (the source's `register.yaml` no
+> longer declares the destination; a config does) and `default_target` (each
+> destination block in `profiles.yml` carries its own `default_target`). A
+> pre-8.B `connector_paths` key is still parsed as a fallback for `source_paths`
+> and `destination_paths` so older project files don't break, but the canonical
+> form is the split.
 
-## `profiles.yml` — credentials per target
+## `profiles.yml` — per-destination connection params
 
 `profiles.yml` holds everything that *changes between environments* and
-everything *secret*. It is the `~/.dbt/profiles.yml` analog. **It is never
-committed** — it goes in `.gitignore`, and CI/production supply it out of band
-(mounted file, env-templated, or a secret manager).
+everything *secret*. **Never committed** — it goes in `.gitignore`, and
+CI/production supply it out of band (mounted file, env-templated, or a secret
+manager).
 
-A **target** is a named environment: `dev`, `staging`, `prod`. Each target
-defines the credentials for the destinations and sources used in that
-environment.
+Stage 8.B made the file **destination-keyed** (dbt-outputs style). Each
+top-level key is the name of a destination connector; under it sits the
+destination's `default_target` and a `targets:` map of named-environment
+connection params. A parallel top-level `profiles:` block, keyed by target name,
+carries source-secret rows so `${profile.<block>.<key>}` refs still resolve
+under the locked two-resolver-form contract (chapter 03 §2.5).
 
 ```yaml
 # profiles.yml  --  NOT committed to version control
-targets:
 
+# The pre-baked DuckDB destination. `path` is the .duckdb file location.
+duckdb:
+  default_target: dev
+  targets:
+    dev:
+      path: ".det/warehouse.duckdb"
+    prod:
+      path: "/var/data/det/warehouse.duckdb"
+
+# A second destination — illustrative.
+bigquery:
+  default_target: dev
+  targets:
+    dev:
+      project: acme-data-dev
+      location: US
+      credentials: ${env.GOOGLE_APPLICATION_CREDENTIALS}
+    prod:
+      project: acme-data-prod
+      location: US
+      credentials: ${env.GAC_PROD}
+
+# Per-target source-secret blocks. Resolved by ${profile.<block>.<key>}
+# refs in any source's register.yaml.
+profiles:
   dev:
-    # Destination credentials, keyed by destination connector name.
-    destinations:
-      bigquery:
-        project_id: acme-data-dev
-        location: US
-        credentials_file: ~/.config/gcloud/acme-dev-sa.json
-
-    # Per-connector secret/profile blocks. A register.yaml secret ref of
-    # ${profile.shiphero.refresh_token} resolves to the value below.
-    profiles:
-      shiphero:
-        refresh_token: "dev-refresh-token-xxxx"
-
+    shiphero:
+      refresh_token: "dev-refresh-token-xxxx"
+    rest:
+      api_token: ${env.REST_API_TOKEN_DEV}
   prod:
-    destinations:
-      bigquery:
-        project_id: acme-data-prod
-        location: US
-        # Resolve from the environment in prod rather than inlining a path.
-        credentials_file: ${env.GOOGLE_APPLICATION_CREDENTIALS}
-    profiles:
-      shiphero:
-        refresh_token: ${env.SHIPHERO_REFRESH_TOKEN}
+    shiphero:
+      refresh_token: ${env.SHIPHERO_REFRESH_TOKEN}
+    rest:
+      api_token: ${env.REST_API_TOKEN_PROD}
 ```
 
 ### Schema
 
-| Key | Type | Required | Purpose |
-|---|---|---|---|
-| `targets` | map[string → Target] | **Yes** | Named environments. The key is the target name passed to `--target`. |
-| `targets.<t>.destinations` | map[string → map] | No | Destination credentials, keyed by destination connector `name`. The inner map is passed to that destination's `config` (its `params`/secrets). |
-| `targets.<t>.profiles` | map[string → map] | No | Named credential blocks resolved by `${profile.<block>.<key>}` refs in any `register.yaml`. |
+| Top-level key | Type | Purpose |
+|---|---|---|
+| `<destination name>` | mapping with `targets:` (+ optional `default_target:`) | One block per destination connector. The block's `targets.<name>` rows supply the destination's connection params for each named environment. |
+| `profiles` | map[string → map[string → map]] | Per-target source-secret blocks. `profiles.<target>.<block>.<key>` is what `${profile.<block>.<key>}` resolves to (after the engine picks the active target from the config). |
 
 Values may embed `${env.VAR}` so the file itself stays free of literal secrets —
-the recommended pattern for `prod`. This is the crucial separation the dbt model
-buys: a source's `register.yaml` says *"I need a `refresh_token`"* and the
-destination binding says *"write to `bigquery` dataset `shiphero`"* — neither
-ever knows which GCP project or which token a given environment uses. That
-knowledge lives only here, and only here changes between `dev` and `prod`.
+the recommended pattern for `prod`.
 
-> **Why credentials are not in `register.yaml`.** The ShipHero proof
-> `config.json` mixed `project_id` / `dataset_id` (environment) with
-> `cursor_field` / `schema` (contract). det splits them: contract →
-> `register.yaml` (committed, portable), environment → `profiles.yml`
-> (uncommitted, per-target). A connector folder is then identical across every
-> environment it ever runs in.
+## Configs — `configs/<name>.yml`
 
-## Baked and custom connectors coexisting
+A config is a **pipeline**: source + destination + target + params. Chapter 12
+covers configs in depth. The short form:
 
-A project draws connectors from two places, resolved by name (chapter 03 §5):
-
-1. **Custom** — folders under the project's `connector_paths` (`connectors/`,
-   `destinations/`). Authored and version-controlled by the user.
-2. **Pre-baked** — folders shipped inside the installed `det` package
-   (`det/connectors/…`). Maintained by the det project.
-
-They are invoked identically — the caller names a connector and does not care
-where it came from:
-
-```bash
-det run meta_ads  --target prod      # pre-baked: ships in the package
-det run shiphero  --target prod      # custom:   ./connectors/shiphero/
+```yaml
+# configs/shiphero_prod.yml
+name: shiphero_prod
+source: shiphero
+destination: bigquery
+target: prod
+params:
+  page_size: 100
+  start_date: "2025-01-01"
+select:
+  - shipments
+  - orders
 ```
 
-A run's `default_destination: bigquery` typically resolves to the **pre-baked**
-BigQuery destination — most projects never write a destination connector at all
-and only add custom *sources*. The `destinations/` folder in the tree above
-exists only because that project happens to need a custom `snowflake_eu`
-destination.
+Or, many configs grouped in one file under a `configs:` list:
 
-**Project-local wins on a name collision.** To customize a baked connector — fix
-a bug, add a stream, change pagination — copy it into `connectors/<same_name>/`
-and edit. The engine finds the project-local copy first and the baked one is
-shadowed. No fork of the `det` package, no patching: overriding is just a
-folder.
+```yaml
+# configs/shiphero.yml
+configs:
+  - name: shiphero_dev
+    source: shiphero
+    destination: duckdb
+    target: dev
+  - name: shiphero_prod
+    source: shiphero
+    destination: bigquery
+    target: prod
+```
+
+The CLI's primary selector is the config name:
+
+```bash
+det run -p shiphero_prod
+det run --conf shiphero_prod          # --conf is the long-form alias
+det run -p shiphero_dev --target prod # override the config's target
+```
+
+## Baked and custom components coexisting
+
+A project draws each kind of component from two places, resolved by name
+(chapter 03 §5):
+
+1. **Custom** — folders under `source_paths` / `destination_paths`
+   (`sources/`, `destinations/`). Authored and version-controlled by the
+   user.
+2. **Pre-baked** — folders shipped inside the installed `det` package
+   (`det/sources/…`, `det/destinations/…`). Maintained by the det project.
+
+**Project-local wins on a name collision.** To customize a baked component —
+fix a bug, add a stream, change pagination — copy it into
+`sources/<same_name>/` (or `destinations/<same_name>/`) and edit. The engine
+finds the project-local copy first and the baked one is shadowed. No fork of
+the `det` package, no patching: overriding is just a folder.
 
 ## Target selection
 
-The active environment is chosen per invocation:
+The active environment is chosen per invocation, with this precedence
+(highest → lowest):
+
+1. `--target` flag on the CLI / `target_override=` kwarg in the library.
+2. The config's own `target:` field.
+3. `profiles.yml[<destination>].default_target` (the destination's default).
+4. The destination's only target, if it has exactly one.
+5. Otherwise — the run fails with a clear error listing the targets the
+   destination *does* define.
 
 ```bash
-det run shiphero --target prod        # explicit
-det run shiphero                      # uses det_project.yml default_target
+det run -p shiphero_prod                    # uses config's target:
+det run -p shiphero_prod --target staging   # overrides
 ```
-
-```python
-import det
-det.run(connector="shiphero", target="prod")
-```
-
-The resolved target drives the full config layering from chapter 03 §6 —
-`register.yaml` defaults, then `det_project.yml` `vars`, then the target's
-`profiles.yml` blocks, then CLI/`run()` overrides — producing the immutable
-`Config` the connector body receives. Switching `--target` changes credentials
-and environment values without touching a single connector folder.
 
 ## The `.det/` working directory
 
-The disposable build directory — the `target/` analog. Created and owned by the
-engine, **git-ignored**, safe to delete at any time (the next run rebuilds it).
+The disposable build directory — the `target/` analog. Created and owned by
+the engine, **git-ignored**, safe to delete at any time (the next run rebuilds
+it).
 
 | Path | Purpose |
 |---|---|
-| `.det/manifest.json` | Cached, validated catalog of every discovered connector (its `register.yaml` parsed, streams, decorator bindings checked). Rebuilt when a `register.yaml` changes; speeds up repeat runs. |
+| `.det/manifest.json` | Cached, validated catalog of every discovered connector. |
 | `.det/logs/` | Per-run structured log files, timestamped. |
-| `.det/cache/` | Per-run scratch — destination schema introspection, temp artifacts. |
+| `.det/cache/` | Per-run scratch. |
 
 Nothing in `.det/` is a source of truth. Incremental **state** is *not*
 here — it lives in the destination's `_det_state` table (chapter 03 §3.5),
@@ -245,18 +278,14 @@ profiles.yml
 det init acme_el
 ```
 
-Scaffolds the tree above: `det_project.yml` with sensible defaults, a
-`profiles.yml` template with a single `dev` target, empty `connectors/` and
-`destinations/` folders, and the `.gitignore`. From there:
+Scaffolds the tree above: `det_project.yml` with the post-8.B keys,
+`profiles.yml` template (destination-keyed) with a single `duckdb`/`dev`
+target, empty `sources/` and `destinations/` folders, a `configs/` folder
+seeded with one `example.yml` stub, and the `.gitignore`. From there:
 
 ```bash
-det new connector shiphero      # scaffold a custom source folder
-det validate                    # discovery-time validation (chapter 03 §7)
-det run shiphero --target dev   # run it
+det new source shiphero        # scaffold a custom source folder
+det new config shiphero_dev    # scaffold a configs/shiphero_dev.yml stub
+det validate                   # discovery-time validation
+det run -p shiphero_dev        # run it
 ```
-
-> [Open question: should `profiles.yml` live in the project root (visible,
-> easy to template per-repo) or default to `~/.det/profiles.yml` like dbt's
-> home-directory default (one credentials file shared across projects)? Current
-> lean: project-root by default — explicit and CI-friendly — with a
-> `--profiles-dir` flag for teams who prefer the dbt-style shared home file.]

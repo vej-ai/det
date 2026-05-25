@@ -119,4 +119,6 @@ streams:
       cursor_type: timestamp
       initial_value: "1970-01-01T00:00:00+00:00"
 
-# `destination:` omitted — bound by the project default (docs/03 §2.3).
+# As of build stage 8.B, the source's register.yaml no longer carries a
+# `destination:` block. A config (configs/<name>.yml) binds this source to
+# a destination + target (docs/12).

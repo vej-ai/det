@@ -17,7 +17,7 @@ The end-to-end test runs the connector through the real engine
 plus the ``_det_state`` cursor advances. Tests use the project at
 ``tests/fixtures/`` (already a real det project with a default DuckDB
 destination) and rely on the stripe baked connector under
-``det/connectors/stripe/``.
+``det/sources/stripe/``.
 
 Citations:
 
@@ -41,8 +41,8 @@ import duckdb
 import pytest
 
 import det
-from det.connectors.stripe.client import StripeAPIError, StripeClient
-from det.connectors.stripe.pagination import paginate
+from det.sources.stripe.client import StripeAPIError, StripeClient
+from det.sources.stripe.pagination import paginate
 
 # --------------------------------------------------------------------------
 # Stub Stripe server — stdlib HTTPServer on a random port
@@ -320,12 +320,12 @@ def test_pagination_walks_three_pages_with_starting_after(
 
 
 def _make_stripe_project(tmp_path: Path, base_url: str) -> Path:
-    """Write a minimal det project that drives the stripe baked connector.
+    """Write a minimal det project that drives the stripe baked source.
 
-    The project has no project-local connectors — the engine finds `stripe`
+    The project has no project-local sources — the engine finds `stripe`
     under the baked path. It overrides `base_url` via the project-wide
-    ``vars`` block (the precedence layer just below profiles and CLI/run
-    kwargs) so the stripe connector points at our stub server.
+    ``vars`` block so the stripe source points at our stub server. A
+    ``stripe_dev`` config binds stripe → duckdb → dev (docs/12).
     """
     project_root = tmp_path
     (project_root / "det_project.yml").write_text(
@@ -333,9 +333,9 @@ def _make_stripe_project(tmp_path: Path, base_url: str) -> Path:
             f"""\
             name: stripe_test_project
             version: "1.0.0"
-            connector_paths: []
-            default_destination: duckdb
-            default_target: dev
+            source_paths: []
+            destination_paths: [destinations]
+            config_paths: [configs]
             vars:
               base_url: "{base_url}"
               # Fast, deterministic retry timing for tests:
@@ -349,11 +349,22 @@ def _make_stripe_project(tmp_path: Path, base_url: str) -> Path:
     (project_root / "profiles.yml").write_text(
         textwrap.dedent(
             """\
-            targets:
-              dev:
-                destinations:
-                  duckdb:
-                    path: ".det/warehouse.duckdb"
+            duckdb:
+              default_target: dev
+              targets:
+                dev:
+                  path: ".det/warehouse.duckdb"
+            """
+        )
+    )
+    (project_root / "configs").mkdir()
+    (project_root / "configs" / "stripe_dev.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: stripe_dev
+            source: stripe
+            destination: duckdb
+            target: dev
             """
         )
     )
@@ -378,10 +389,9 @@ def test_first_run_no_cursor_omits_created_gte(
     project_root = _make_stripe_project(tmp_path, base_url)
     db_path = str(project_root / "warehouse.duckdb")
     result = det.run(
-        connector="stripe",
-        target="dev",
+        config="stripe_dev",
         project_dir=str(project_root),
-        destination_params={"path": db_path},
+        destination_params_override={"path": db_path},
     )
 
     assert result.status.value == "succeeded", result.error
@@ -431,18 +441,16 @@ def test_second_run_sends_created_gte_from_committed_cursor(
     db_path = str(project_root / "warehouse.duckdb")
 
     first = det.run(
-        connector="stripe",
-        target="dev",
+        config="stripe_dev",
         project_dir=str(project_root),
-        destination_params={"path": db_path},
+        destination_params_override={"path": db_path},
     )
     assert first.status.value == "succeeded", first.error
 
     second = det.run(
-        connector="stripe",
-        target="dev",
+        config="stripe_dev",
         project_dir=str(project_root),
-        destination_params={"path": db_path},
+        destination_params_override={"path": db_path},
     )
     assert second.status.value == "succeeded", second.error
 
@@ -472,11 +480,10 @@ def test_extra_query_params_propagate(
     # config and surfaced to every stream that declares the same param name).
     db_path = str(project_root / "warehouse.duckdb")
     result = det.run(
-        connector="stripe",
-        target="dev",
+        config="stripe_dev",
         project_dir=str(project_root),
-        destination_params={"path": db_path},
-        params={"extra_query_params_json": '{"expand[]": "data.customer"}'},
+        destination_params_override={"path": db_path},
+        params_override={"extra_query_params_json": '{"expand[]": "data.customer"}'},
     )
     assert result.status.value == "succeeded", result.error
 
@@ -538,10 +545,9 @@ def test_end_to_end_lands_rows_and_advances_state(
     project_root = _make_stripe_project(tmp_path, base_url)
     db_path = str(project_root / "warehouse.duckdb")
     result = det.run(
-        connector="stripe",
-        target="dev",
+        config="stripe_dev",
         project_dir=str(project_root),
-        destination_params={"path": db_path},
+        destination_params_override={"path": db_path},
     )
     assert result.status.value == "succeeded", result.error
 
@@ -599,10 +605,9 @@ def test_api_key_never_appears_in_logs(
     db_path = str(project_root / "warehouse.duckdb")
     with caplog.at_level("DEBUG"):
         result = det.run(
-            connector="stripe",
-            target="dev",
+            config="stripe_dev",
             project_dir=str(project_root),
-            destination_params={"path": db_path},
+            destination_params_override={"path": db_path},
         )
 
     assert result.status.value == "succeeded", result.error

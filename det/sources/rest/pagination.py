@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
-from det.connectors.rest.extractors import extract_dotted
+from det.sources.rest.extractors import extract_dotted
 
 __all__ = [
     "CursorPagination",
@@ -203,7 +203,7 @@ class OffsetPagination(PaginationStrategy):
         # Late import to avoid a circular at module-load time (extractors imports
         # nothing from us, but pagination.py is imported by source.py which also
         # imports extractors; keeping this import here costs nothing).
-        from det.connectors.rest.extractors import extract_records
+        from det.sources.rest.extractors import extract_records
 
         try:
             records = extract_records(response_json, list(self.record_path))
@@ -263,7 +263,7 @@ class PagePagination(PaginationStrategy):
         last_params: Mapping[str, Any],
     ) -> dict[str, Any] | None:
         """Advance the page number; stop on a short page."""
-        from det.connectors.rest.extractors import extract_records
+        from det.sources.rest.extractors import extract_records
 
         try:
             records = extract_records(response_json, list(self.record_path))

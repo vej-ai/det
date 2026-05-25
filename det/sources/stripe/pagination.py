@@ -24,7 +24,7 @@ import logging
 from collections.abc import Iterator, Mapping
 from typing import Any
 
-from det.connectors.stripe.client import StripeAPIError, StripeClient
+from det.sources.stripe.client import StripeAPIError, StripeClient
 
 # Stripe's list-page max — every list endpoint shares this. The client's
 # ``page_size`` param caps to this in practice; we do not enforce it here so

@@ -34,7 +34,7 @@ from tests.conftest import load_connector
 # the same way; the test imports it directly via the conftest harness.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FILESYSTEM_CONNECTOR_DIR = (
-    _REPO_ROOT / "det" / "connectors" / "filesystem"
+    _REPO_ROOT / "det" / "sources" / "filesystem"
 )
 
 
@@ -471,9 +471,9 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
 
     import det
 
-    # Project root with this connector visible. The filesystem connector is
-    # baked under det/connectors/, so a project with no local
-    # connectors still finds it via the baked search root.
+    # Project root with this connector visible. The filesystem source is
+    # baked under det/sources/, so a project with no local sources still
+    # finds it via the baked search root.
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "det_project.yml").write_text(
@@ -481,14 +481,30 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
             """\
             name: filesystem_e2e_test
             version: "1.0.0"
-            connector_paths: [connectors]
-            default_destination: duckdb
-            default_target: dev
+            source_paths: [sources]
+            destination_paths: [destinations]
+            config_paths: [configs]
             """
         )
     )
     (project_root / "profiles.yml").write_text(
-        yaml.safe_dump({"dev": {}}, sort_keys=False)
+        yaml.safe_dump(
+            {"duckdb": {"default_target": "dev", "targets": {"dev": {}}}},
+            sort_keys=False,
+        )
+    )
+    # Bind the baked filesystem source to the baked duckdb destination via a
+    # one-config-per-file under configs/.
+    (project_root / "configs").mkdir()
+    (project_root / "configs" / "filesystem_dev.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: filesystem_dev
+            source: filesystem
+            destination: duckdb
+            target: dev
+            """
+        )
     )
 
     # Source data directory + a CSV with 3 rows.
@@ -505,11 +521,10 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
 
     db_path = tmp_path / "warehouse.duckdb"
     result = det.run(
-        connector="filesystem",
-        target="dev",
+        config="filesystem_dev",
         project_dir=str(project_root),
-        params={"path": str(data_dir), "glob": "**/*.csv", "batch_size": 100},
-        destination_params={"path": str(db_path)},
+        params_override={"path": str(data_dir), "glob": "**/*.csv", "batch_size": 100},
+        destination_params_override={"path": str(db_path)},
     )
     assert result.status.value == "succeeded", (
         f"run failed: {result.error!r}"
@@ -548,11 +563,10 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
     # regress (the source re-observes the resume value so the engine writes
     # back a clean datetime, not a stale string — see source.py NOTE).
     result2 = det.run(
-        connector="filesystem",
-        target="dev",
+        config="filesystem_dev",
         project_dir=str(project_root),
-        params={"path": str(data_dir), "glob": "**/*.csv", "batch_size": 100},
-        destination_params={"path": str(db_path)},
+        params_override={"path": str(data_dir), "glob": "**/*.csv", "batch_size": 100},
+        destination_params_override={"path": str(db_path)},
     )
     assert result2.status.value == "succeeded"
     assert result2.stream("files").rows_loaded == 0  # type: ignore[union-attr]
@@ -577,7 +591,7 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
 
 def test_pick_backend_dispatches_on_scheme() -> None:
     """URI scheme → backend type. Bad scheme raises listing the valid set."""
-    from det.connectors.filesystem.backends import (
+    from det.sources.filesystem.backends import (
         GcsBackend,
         LocalBackend,
         S3Backend,
@@ -596,7 +610,7 @@ def test_gcs_backend_missing_dep_raises_with_install_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A missing google-cloud-storage raises ImportError naming ``det[gcs]``."""
-    from det.connectors.filesystem.backends import GcsBackend
+    from det.sources.filesystem.backends import GcsBackend
 
     # Pretend the SDK is not importable — sentinel `None` triggers ImportError
     # in `from google.cloud import storage`.
@@ -611,7 +625,7 @@ def test_s3_backend_missing_dep_raises_with_install_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A missing boto3 raises ImportError naming ``det[s3]``."""
-    from det.connectors.filesystem.backends import S3Backend
+    from det.sources.filesystem.backends import S3Backend
 
     monkeypatch.setitem(sys.modules, "boto3", None)
     backend = S3Backend(bucket="b", prefix="p")
@@ -631,7 +645,7 @@ def test_gcs_backend_lists_files_via_mocked_sdk(
     from datetime import UTC, datetime
     from types import ModuleType, SimpleNamespace
 
-    from det.connectors.filesystem.backends import GcsBackend
+    from det.sources.filesystem.backends import GcsBackend
 
     blob_a = SimpleNamespace(
         name="exports/a.csv",
@@ -686,7 +700,7 @@ def test_s3_backend_lists_files_via_mocked_sdk(
     from datetime import UTC, datetime
     from types import ModuleType
 
-    from det.connectors.filesystem.backends import S3Backend
+    from det.sources.filesystem.backends import S3Backend
 
     pages = [
         {

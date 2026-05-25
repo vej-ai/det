@@ -34,11 +34,11 @@ from det import (
     FieldMode,
     FieldType,
 )
-from det.connectors.postgres import client, source, type_mapping
+from det.sources.postgres import client, source, type_mapping
 
 # Path the engine's discovery uses to find the postgres connector folder.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-POSTGRES_CONNECTOR_DIR = REPO_ROOT / "det" / "connectors" / "postgres"
+POSTGRES_CONNECTOR_DIR = REPO_ROOT / "det" / "sources" / "postgres"
 
 
 # ===========================================================================
@@ -668,19 +668,15 @@ def test_password_does_not_appear_in_rendered_sql(
 
 
 def test_postgres_connector_discovers_and_validates(tmp_path: Path) -> None:
-    """The full discovery flow finds the connector folder and validates it.
-
-    Uses a throwaway project tucked under ``tmp_path`` so the test does not
-    depend on the repo's own ``det_project.yml`` location.
-    """
-    from det.engine.discovery import resolve_connector
+    """The full discovery flow finds the source folder and validates it."""
+    from det.engine.discovery import resolve_source
 
     (tmp_path / "det_project.yml").write_text(
-        "name: test_project\nversion: '1.0.0'\nconnector_paths: [connectors]\n"
+        "name: test_project\nversion: '1.0.0'\nsource_paths: [sources]\n"
     )
-    (tmp_path / "connectors").mkdir()  # empty — forces fallback to baked
+    (tmp_path / "sources").mkdir()  # empty — forces fallback to baked
 
-    loaded = resolve_connector("postgres", tmp_path)
+    loaded = resolve_source("postgres", tmp_path)
     assert loaded.manifest.name == "postgres"
     assert loaded.manifest.kind.value == "source"
     assert {s.name for s in loaded.manifest.streams} == {"users", "events"}
@@ -750,14 +746,18 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     (project_dir / "det_project.yml").write_text(
-        "name: it\nversion: '1.0.0'\nconnector_paths: [connectors]\n"
-        "default_destination: duckdb\ndefault_target: dev\n"
+        "name: it\nversion: '1.0.0'\nsource_paths: [sources]\n"
+        "destination_paths: [destinations]\nconfig_paths: [configs]\n"
     )
     (project_dir / "profiles.yml").write_text(
-        "targets:\n  dev:\n    destinations:\n      duckdb:\n        path: '"
-        f"{tmp_path}/wh.duckdb'\n"
+        "duckdb:\n  default_target: dev\n  targets:\n    dev:\n      path: "
+        f"'{tmp_path}/wh.duckdb'\n"
     )
-    fork = project_dir / "connectors" / "postgres"
+    (project_dir / "configs").mkdir()
+    (project_dir / "configs" / "pg_dev.yml").write_text(
+        "name: pg_dev\nsource: postgres\ndestination: duckdb\ntarget: dev\n"
+    )
+    fork = project_dir / "sources" / "postgres"
     fork.mkdir(parents=True)
     (fork / "register.yaml").write_text(
         "name: postgres\nkind: source\nversion: '1.0.0'\n"
@@ -783,7 +783,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
     )
     (fork / "source.py").write_text(
         "from det import stream\n"
-        "from det.connectors.postgres.source import extract_stream\n\n"
+        "from det.sources.postgres.source import extract_stream\n\n"
         "@stream(name='users')\n"
         "def users(config, cursor, log):\n"
         "    yield from extract_stream(\n"
@@ -802,16 +802,16 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
     }
     # Run 1 — every row lands.
     r1 = det.run(
-        connector="postgres", target="dev", project_dir=str(project_dir),
-        params=overrides,
+        config="pg_dev", project_dir=str(project_dir),
+        params_override=overrides,
     )
     assert r1.status.value == "succeeded", r1.error
     assert (r1.stream("users").rows_loaded if r1.stream("users") else 0) == 100  # type: ignore[union-attr]
 
     # Run 2 — cursor resumes, nothing new to fetch.
     r2 = det.run(
-        connector="postgres", target="dev", project_dir=str(project_dir),
-        params=overrides,
+        config="pg_dev", project_dir=str(project_dir),
+        params_override=overrides,
     )
     assert r2.status.value == "succeeded", r2.error
     assert (r2.stream("users").rows_loaded if r2.stream("users") else 0) == 0  # type: ignore[union-attr]

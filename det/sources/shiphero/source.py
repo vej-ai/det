@@ -41,13 +41,13 @@ from collections.abc import Iterator
 from typing import Any
 
 from det import Batch, Config, Cursor, stream
-from det.connectors.shiphero.client import ShipHeroClient
-from det.connectors.shiphero.pagination import paginate
-from det.connectors.shiphero.queries import (
+from det.sources.shiphero.client import ShipHeroClient
+from det.sources.shiphero.pagination import paginate
+from det.sources.shiphero.queries import (
     STREAM_GRAPHQL_FIELDS,
     STREAM_QUERIES,
 )
-from det.connectors.shiphero.windows import (
+from det.sources.shiphero.windows import (
     compute_start,
     date_windows,
     to_utc_dt,

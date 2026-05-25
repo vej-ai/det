@@ -46,7 +46,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from det import Batch, Config, Cursor, stream
-from det.connectors.postgres.client import (
+from det.sources.postgres.client import (
     close_cursor_sql,
     connect,
     declare_cursor_sql,

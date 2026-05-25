@@ -151,10 +151,9 @@ streams:
       - {name: kit_build,    type: BOOLEAN}
       - {name: warehouse_products, type: JSON}
 
-# Bind to the v1 baked DuckDB destination. See the NOTE at the top of this
-# file for why this differs from docs/03 §2.8's `bigquery` example.
-destination:
-  connector: duckdb
+# As of build stage 8.B, the source's register.yaml no longer carries a
+# `destination:` block. A config (configs/<name>.yml) binds this source to
+# a destination + target (docs/12).
 
 # Advisory schedule — surfaced to whatever orchestrator runs det; the
 # engine itself does not act on it (docs/03 §2.6).

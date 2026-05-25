@@ -1,19 +1,22 @@
-"""Engine tests — discovery, config resolution, the run lifecycle (stage 5).
+"""Engine tests — discovery, config resolution, the run lifecycle (stage 5 + 8.B).
 
-The smoke test (``test_smoke.py``) is the end-to-end executable spec. This file
-tests the engine's *parts* directly:
+The smoke test (``test_smoke.py``) is the end-to-end executable spec. This
+file tests the engine's *parts* directly:
 
-* discovery resolves project-local connectors over baked ones (docs/03 §5);
+* discovery resolves project-local sources/destinations over baked ones
+  (docs/03 §5);
 * config precedence layers merge in the documented order (docs/03 §6);
-* ``--tag`` selection filters discovered connectors (docs/02);
-* discovery-time validation rejects a malformed connector (docs/03 §7);
+* discovery-time validation rejects a malformed source (docs/03 §7);
 * ``--full-refresh`` re-extracts past a committed cursor (docs/03 §3.2);
 * a failing stream does not lose an earlier stream's committed state
   (docs/02 §Commit granularity);
-* secret resolution reads ``${env.X}`` / ``${profile.X.Y}`` (docs/03 §2.5).
+* secret resolution reads ``${env.X}`` / ``${profile.X.Y}`` (docs/03 §2.5)
+  against the post-8.B destination-keyed profiles.yml;
+* the run is driven by a *config* (``echo_dev``) — the stage-8.B runtime unit.
 
 The real ``echo`` fixture + DuckDB destination drive the lifecycle tests;
-discovery/validation tests build throwaway projects in ``tmp_path``.
+discovery/validation tests build throwaway projects in ``tmp_path`` via the
+:func:`_write_project` helper.
 """
 
 from __future__ import annotations
@@ -26,21 +29,23 @@ import pytest
 
 import det
 from det.engine import config as cfg
+from det.engine import configs as cfgs
 from det.engine import discovery as disc
-from det.engine.config import ConfigError
+from det.engine.config import ConfigError, Profiles
 from det.engine.discovery import DiscoveryError
 from det.engine.logger import RedactingFilter, build_logger
 from det.types import (
     Incremental,
     ParamSpec,
     ParamType,
+    PipelineConfig,
     SecretRef,
     StreamDef,
     WriteDisposition,
 )
 
 # The committed test project — tests/fixtures/ holds det_project.yml,
-# profiles.yml and connectors/echo/.
+# profiles.yml, sources/echo/, configs/echo.yml.
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
@@ -52,32 +57,75 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 def _write_project(
     root: Path,
     *,
-    connector_paths: str = "[connectors]",
-    default_destination: str = "duckdb",
     vars_block: str = "",
+    profiles_override: str | None = None,
 ) -> None:
-    """Write a minimal ``det_project.yml`` into ``root``."""
+    """Write a minimal post-8.B ``det_project.yml`` and a profiles file.
+
+    The default profiles.yml carries one DuckDB target (``dev``) with no
+    ``path`` set — engine tests pass ``destination_params_override={"path":
+    ...}`` per call. ``profiles_override`` (raw YAML text) replaces the
+    default profiles.yml entirely when the test needs a different shape.
+    """
     root.mkdir(parents=True, exist_ok=True)
     (root / "det_project.yml").write_text(
         textwrap.dedent(
             f"""\
             name: tmp_project
             version: "1.0.0"
-            connector_paths: {connector_paths}
-            default_destination: {default_destination}
-            default_target: dev
+            source_paths: [sources]
+            destination_paths: [destinations]
+            config_paths: [configs]
             {vars_block}
+            """
+        )
+    )
+    profiles_text = profiles_override if profiles_override is not None else (
+        textwrap.dedent(
+            """\
+            duckdb:
+              default_target: dev
+              targets:
+                dev: {}
+            """
+        )
+    )
+    (root / "profiles.yml").write_text(profiles_text)
+
+
+def _write_config(
+    root: Path,
+    *,
+    name: str,
+    source: str,
+    destination: str = "duckdb",
+    target: str | None = "dev",
+    extra_lines: str = "",
+) -> None:
+    """Write a one-config-per-file under ``root/configs/<name>.yml``.
+
+    Used by every test that needs to drive ``det.run(config=<name>)`` against
+    a tmp_path source the test just authored.
+    """
+    configs_dir = root / "configs"
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    target_line = f"target: {target}\n" if target is not None else ""
+    (configs_dir / f"{name}.yml").write_text(
+        textwrap.dedent(
+            f"""\
+            name: {name}
+            source: {source}
+            destination: {destination}
+            {target_line}{extra_lines}
             """
         )
     )
 
 
-def _write_echo_clone(folder: Path, *, summary: str, tags: str = "[fixture]") -> None:
-    """Write a tiny one-stream source connector folder at ``folder``.
-
-    The ``summary`` differs per clone so a resolution test can prove *which*
-    copy was picked.
-    """
+def _write_source_clone(
+    folder: Path, *, summary: str, tags: str = "[fixture]"
+) -> None:
+    """Write a tiny one-stream source connector folder at ``folder``."""
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "register.yaml").write_text(
         textwrap.dedent(
@@ -93,8 +141,6 @@ def _write_echo_clone(folder: Path, *, summary: str, tags: str = "[fixture]") ->
                 write_disposition: append
                 schema:
                   - {{name: id, type: INTEGER}}
-            destination:
-              connector: duckdb
             """
         )
     )
@@ -114,7 +160,7 @@ def _write_echo_clone(folder: Path, *, summary: str, tags: str = "[fixture]") ->
 
 
 # ==========================================================================
-# Discovery — project root + connector resolution (docs/03 §5)
+# Discovery — project root + source/destination resolution (docs/03 §5)
 # ==========================================================================
 
 
@@ -132,77 +178,68 @@ def test_find_project_root_missing_raises(tmp_path: Path) -> None:
         disc.find_project_root(tmp_path)
 
 
-def test_resolve_connector_project_local(tmp_path: Path) -> None:
-    """A project-local connector folder resolves and imports cleanly."""
+def test_resolve_source_project_local(tmp_path: Path) -> None:
+    """A project-local source folder resolves and imports cleanly."""
     _write_project(tmp_path)
-    _write_echo_clone(tmp_path / "connectors" / "clone", summary="local-copy")
-    loaded = disc.resolve_connector("clone", tmp_path, ["connectors"])
+    _write_source_clone(tmp_path / "sources" / "clone", summary="local-copy")
+    loaded = disc.resolve_source("clone", tmp_path, ["sources"])
     assert loaded.manifest.name == "clone"
     assert loaded.manifest.summary == "local-copy"
     assert "rows" in loaded.registry.stream_names
 
 
-def test_resolve_connector_baked_destination(tmp_path: Path) -> None:
+def test_resolve_destination_baked(tmp_path: Path) -> None:
     """The baked DuckDB destination resolves from det/destinations/."""
     _write_project(tmp_path)
-    loaded = disc.resolve_connector("duckdb", tmp_path, ["connectors"])
+    loaded = disc.resolve_destination("duckdb", tmp_path, ["destinations"])
     assert loaded.manifest.name == "duckdb"
     assert loaded.manifest.kind.value == "destination"
-    # It resolved from the baked package path, not the (empty) project.
     assert "det" in str(loaded.folder)
     assert "destinations" in str(loaded.folder)
 
 
-def test_project_local_shadows_baked(tmp_path: Path) -> None:
-    """A project-local connector named like a baked one wins (docs/03 §5).
-
-    A project-local folder named ``duckdb`` is found before the baked DuckDB
-    destination — proving project-local beats baked on a name collision.
-    """
+def test_project_local_source_shadows_baked(tmp_path: Path) -> None:
+    """A project-local source named like a baked one wins (docs/03 §5)."""
     _write_project(tmp_path)
-    shadow = tmp_path / "connectors" / "duckdb"
-    _write_echo_clone(shadow, summary="shadowing-copy")
-    folder = disc.find_connector_folder("duckdb", tmp_path, ["connectors"])
-    # The project-local folder, NOT the baked det/destinations/duckdb.
+    # Author a project-local source with the same name as a baked source.
+    shadow = tmp_path / "sources" / "filesystem"
+    _write_source_clone(shadow, summary="shadowing-copy")
+    folder = disc.find_source_folder("filesystem", tmp_path, ["sources"])
     assert folder == shadow.resolve()
-    assert "det/destinations" not in str(folder)
 
 
-def test_resolve_connector_unknown_name_raises(tmp_path: Path) -> None:
-    """An unresolvable connector name raises DiscoveryError listing the search."""
+def test_resolve_source_unknown_name_raises(tmp_path: Path) -> None:
+    """An unresolvable source name raises DiscoveryError listing the search."""
     _write_project(tmp_path)
     with pytest.raises(DiscoveryError, match="not found"):
-        disc.resolve_connector("does_not_exist", tmp_path, ["connectors"])
+        disc.resolve_source("does_not_exist", tmp_path, ["sources"])
 
 
-# ==========================================================================
-# Tag selection (docs/02 §Tag-based selection)
-# ==========================================================================
-
-
-def test_connectors_with_tag_selects_matching(tmp_path: Path) -> None:
-    """connectors_with_tag returns exactly the connectors declaring the tag."""
+def test_resolve_destination_unknown_name_raises(tmp_path: Path) -> None:
+    """An unresolvable destination name raises DiscoveryError listing the search."""
     _write_project(tmp_path)
-    _write_echo_clone(
-        tmp_path / "connectors" / "alpha", summary="a", tags="[hourly, fixture]"
-    )
-    # alpha's manifest name is hard-coded "clone"; give beta its own folder but
-    # the same manifest name is fine — tag selection returns manifest NAMEs.
-    beta = tmp_path / "connectors" / "beta"
-    _write_echo_clone(beta, summary="b", tags="[daily]")
-    (beta / "register.yaml").write_text(
-        (beta / "register.yaml").read_text().replace("name: clone", "name: beta")
-    )
-    matched = disc.connectors_with_tag("hourly", tmp_path, ["connectors"])
-    assert "clone" in matched
-    assert "beta" not in matched
+    with pytest.raises(DiscoveryError, match="not found"):
+        disc.resolve_destination("nope", tmp_path, ["destinations"])
 
 
-def test_connectors_with_tag_no_match(tmp_path: Path) -> None:
-    """A tag no connector declares yields an empty selection."""
+def test_resolve_source_rejects_destination(tmp_path: Path) -> None:
+    """resolve_source on a destination's name raises (kind enforcement)."""
     _write_project(tmp_path)
-    _write_echo_clone(tmp_path / "connectors" / "alpha", summary="a", tags="[fixture]")
-    assert disc.connectors_with_tag("nonexistent", tmp_path, ["connectors"]) == []
+    # Plant a `kind: destination` folder under the source path.
+    folder = tmp_path / "sources" / "fake_dest"
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: fake_dest
+            kind: destination
+            version: "1.0.0"
+            """
+        )
+    )
+    (folder / "destination.py").write_text("# no hooks\n")
+    with pytest.raises(DiscoveryError, match="not a source"):
+        disc.resolve_source("fake_dest", tmp_path, ["sources"])
 
 
 # ==========================================================================
@@ -213,9 +250,8 @@ def test_connectors_with_tag_no_match(tmp_path: Path) -> None:
 def test_validation_rejects_orphan_manifest_stream(tmp_path: Path) -> None:
     """A streams[] entry with no matching @stream fails validation (rule 7)."""
     _write_project(tmp_path)
-    folder = tmp_path / "connectors" / "broken"
-    _write_echo_clone(folder, summary="broken")
-    # Declare a second stream in the manifest with no @stream implementing it.
+    folder = tmp_path / "sources" / "broken"
+    _write_source_clone(folder, summary="broken")
     reg = folder / "register.yaml"
     reg.write_text(
         reg.read_text()
@@ -229,15 +265,14 @@ def test_validation_rejects_orphan_manifest_stream(tmp_path: Path) -> None:
         )
     )
     with pytest.raises(DiscoveryError, match="ghost"):
-        disc.resolve_connector("broken", tmp_path, ["connectors"])
+        disc.resolve_source("broken", tmp_path, ["sources"])
 
 
 def test_validation_rejects_orphan_stream_function(tmp_path: Path) -> None:
     """A @stream with no matching streams[] entry fails validation (rule 7)."""
     _write_project(tmp_path)
-    folder = tmp_path / "connectors" / "extra"
-    _write_echo_clone(folder, summary="extra")
-    # Add a @stream the manifest never declares.
+    folder = tmp_path / "sources" / "extra"
+    _write_source_clone(folder, summary="extra")
     src = folder / "source.py"
     src.write_text(
         src.read_text()
@@ -252,15 +287,14 @@ def test_validation_rejects_orphan_stream_function(tmp_path: Path) -> None:
         )
     )
     with pytest.raises(DiscoveryError, match="undeclared"):
-        disc.resolve_connector("extra", tmp_path, ["connectors"])
+        disc.resolve_source("extra", tmp_path, ["sources"])
 
 
 def test_validation_rejects_bad_stream_signature(tmp_path: Path) -> None:
     """A @stream declaring a non-injectable parameter fails discovery (rule 8)."""
     _write_project(tmp_path)
-    folder = tmp_path / "connectors" / "badsig"
-    _write_echo_clone(folder, summary="badsig")
-    # `cusror` is a typo for `cursor` — not an injectable name.
+    folder = tmp_path / "sources" / "badsig"
+    _write_source_clone(folder, summary="badsig")
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
@@ -275,18 +309,18 @@ def test_validation_rejects_bad_stream_signature(tmp_path: Path) -> None:
         )
     )
     with pytest.raises(DiscoveryError, match="import cleanly|cusror"):
-        disc.resolve_connector("badsig", tmp_path, ["connectors"])
+        disc.resolve_source("badsig", tmp_path, ["sources"])
 
 
 def test_validation_rejects_unknown_manifest_key(tmp_path: Path) -> None:
     """An unknown register.yaml key is a hard error (docs/03 §7 step 2)."""
     _write_project(tmp_path)
-    folder = tmp_path / "connectors" / "typo"
-    _write_echo_clone(folder, summary="typo")
+    folder = tmp_path / "sources" / "typo"
+    _write_source_clone(folder, summary="typo")
     reg = folder / "register.yaml"
     reg.write_text(reg.read_text() + "write_dispostion: append\n")
     with pytest.raises(DiscoveryError, match="unknown register.yaml key"):
-        disc.resolve_connector("typo", tmp_path, ["connectors"])
+        disc.resolve_source("typo", tmp_path, ["sources"])
 
 
 # ==========================================================================
@@ -299,7 +333,7 @@ def test_config_precedence_register_default_only() -> None:
     resolved = cfg.resolve_params(
         {"page_size": ParamSpec(type=ParamType.INT, default=50)},
         project_vars={},
-        target_block={},
+        config_params={},
         overrides={},
         connector_name="cfg",
     )
@@ -311,7 +345,7 @@ def test_config_precedence_project_vars_over_default() -> None:
     resolved = cfg.resolve_params(
         {"page_size": ParamSpec(type=ParamType.INT, default=50)},
         project_vars={"page_size": 100},
-        target_block={},
+        config_params={},
         overrides={},
         connector_name="cfg",
     )
@@ -323,8 +357,8 @@ def test_config_precedence_overrides_win() -> None:
     resolved = cfg.resolve_params(
         {"page_size": ParamSpec(type=ParamType.INT, default=50)},
         project_vars={"page_size": 100},
-        target_block={"page_size": 200},
-        overrides={"page_size": "999"},  # string → coerced to int
+        config_params={"page_size": 200},
+        overrides={"page_size": "999"},
         connector_name="cfg",
     )
     assert resolved["page_size"] == 999
@@ -332,12 +366,12 @@ def test_config_precedence_overrides_win() -> None:
 
 
 def test_config_precedence_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SIMPLE_E_PARAM_<NAME> sits above profiles, below run()/CLI overrides."""
+    """SIMPLE_E_PARAM_<NAME> sits above the config's params, below run()/CLI."""
     monkeypatch.setenv("SIMPLE_E_PARAM_PAGE_SIZE", "777")
     resolved = cfg.resolve_params(
         {"page_size": ParamSpec(type=ParamType.INT, default=50)},
         project_vars={"page_size": 100},
-        target_block={"page_size": 200},
+        config_params={"page_size": 200},
         overrides={},
         connector_name="cfg",
     )
@@ -350,7 +384,7 @@ def test_config_required_param_missing_raises() -> None:
         cfg.resolve_params(
             {"token": ParamSpec(type=ParamType.STRING, required=True)},
             project_vars={},
-            target_block={},
+            config_params={},
             overrides={},
             connector_name="cfg",
         )
@@ -362,14 +396,14 @@ def test_config_bad_type_raises() -> None:
         cfg.resolve_params(
             {"page_size": ParamSpec(type=ParamType.INT, default="not-a-number")},
             project_vars={},
-            target_block={},
+            config_params={},
             overrides={},
             connector_name="cfg",
         )
 
 
 # ==========================================================================
-# Secret resolution — ${env.X} / ${profile.X.Y} (docs/03 §2.5)
+# Secret resolution — ${env.X} / ${profile.X.Y} (docs/03 §2.5, docs/06)
 # ==========================================================================
 
 
@@ -377,60 +411,90 @@ def test_secret_resolves_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ${env.X} secret ref resolves to the environment variable's value."""
     monkeypatch.setenv("MY_API_TOKEN", "s3cr3t-value")
     ref = SecretRef(name="api_token", ref="${env.MY_API_TOKEN}")
-    assert cfg.resolve_secret_ref(ref, target_block={}) == "s3cr3t-value"
+    profiles = Profiles(destinations={}, secret_profiles={})
+    assert cfg.resolve_secret_ref(ref, "dev", profiles) == "s3cr3t-value"
 
 
 def test_secret_missing_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ${env.X} ref to an unset variable fails — without leaking a value."""
     monkeypatch.delenv("DEFINITELY_UNSET", raising=False)
     ref = SecretRef(name="api_token", ref="${env.DEFINITELY_UNSET}")
+    profiles = Profiles(destinations={}, secret_profiles={})
     with pytest.raises(ConfigError, match="DEFINITELY_UNSET"):
-        cfg.resolve_secret_ref(ref, target_block={})
+        cfg.resolve_secret_ref(ref, "dev", profiles)
 
 
 def test_secret_resolves_from_profile() -> None:
-    """A ${profile.X.Y} ref reads key Y of the active target's profiles.X block."""
+    """A ${profile.X.Y} ref reads key Y of the active target's profiles.<target>.X block."""
     ref = SecretRef(name="refresh", ref="${profile.shiphero.refresh_token}")
-    target_block = {"profiles": {"shiphero": {"refresh_token": "profile-token"}}}
-    assert cfg.resolve_secret_ref(ref, target_block) == "profile-token"
+    profiles = Profiles(
+        destinations={},
+        secret_profiles={"dev": {"shiphero": {"refresh_token": "profile-token"}}},
+    )
+    assert cfg.resolve_secret_ref(ref, "dev", profiles) == "profile-token"
 
 
 def test_secret_profile_value_nested_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """A profile value that is itself ${env.VAR} resolves one level deeper."""
     monkeypatch.setenv("NESTED_TOKEN", "deep-value")
     ref = SecretRef(name="refresh", ref="${profile.acme.token}")
-    target_block = {"profiles": {"acme": {"token": "${env.NESTED_TOKEN}"}}}
-    assert cfg.resolve_secret_ref(ref, target_block) == "deep-value"
+    profiles = Profiles(
+        destinations={},
+        secret_profiles={"dev": {"acme": {"token": "${env.NESTED_TOKEN}"}}},
+    )
+    assert cfg.resolve_secret_ref(ref, "dev", profiles) == "deep-value"
 
 
 # ==========================================================================
-# Project + profiles parsing (docs/06)
+# Project + profiles parsing (docs/06 post-8.B)
 # ==========================================================================
 
 
 def test_project_config_loads_fixture() -> None:
-    """The committed fixture project parses with its documented keys."""
+    """The committed fixture project parses with its post-8.B keys."""
     project = cfg.ProjectConfig.load(FIXTURES_DIR)
     assert project.name == "det_test_project"
-    assert project.connector_paths == ("connectors",)
-    assert project.default_destination == "duckdb"
-    assert project.default_target == "dev"
+    assert project.source_paths == ("sources",)
+    assert project.destination_paths == ("destinations",)
+    assert project.config_paths == ("configs",)
     assert project.vars["page_size"] == 100
 
 
+def test_profiles_loads_destinations() -> None:
+    """profiles.yml's destination-keyed blocks parse into DestinationTargets."""
+    profiles = Profiles.load(FIXTURES_DIR)
+    assert "duckdb" in profiles.destinations
+    block = profiles.destination("duckdb")
+    assert block.default_target == "dev"
+    assert "dev" in block.targets
+    assert "prod" in block.targets
+
+
+def test_profiles_unknown_destination_raises() -> None:
+    """Looking up a destination block not in the file fails clearly."""
+    profiles = Profiles.load(FIXTURES_DIR)
+    with pytest.raises(ConfigError, match="not found|no block"):
+        profiles.destination("snowflake")
+
+
 def test_profiles_unknown_target_raises() -> None:
-    """Selecting a target profiles.yml does not define fails clearly."""
-    profiles = cfg.Profiles.load(FIXTURES_DIR)
+    """A target undefined for a destination raises a clear error."""
+    profiles = Profiles.load(FIXTURES_DIR)
     with pytest.raises(ConfigError, match="not defined"):
-        profiles.target("staging")
+        profiles.target_params("duckdb", "staging")
 
 
-def test_resolve_target_name_defaults_to_project_default() -> None:
-    """With no explicit target, the project's default_target is used."""
-    project = cfg.ProjectConfig.load(FIXTURES_DIR)
-    profiles = cfg.Profiles.load(FIXTURES_DIR)
-    assert cfg.resolve_target_name(None, project, profiles) == "dev"
-    assert cfg.resolve_target_name("prod", project, profiles) == "prod"
+def test_resolve_target_name_uses_destination_default() -> None:
+    """With no explicit target, the destination's profiles.yml default applies."""
+    profiles = Profiles.load(FIXTURES_DIR)
+    assert cfg.resolve_target_name(None, "duckdb", profiles) == "dev"
+    assert cfg.resolve_target_name("prod", "duckdb", profiles) == "prod"
+
+
+def test_resolve_target_name_falls_back_to_default_when_destination_absent() -> None:
+    """A destination with no profiles block falls back to the synthetic 'default'."""
+    profiles = Profiles(destinations={}, secret_profiles={})
+    assert cfg.resolve_target_name(None, "nonexistent", profiles) == "default"
 
 
 # ==========================================================================
@@ -461,7 +525,7 @@ def test_build_logger_redacts(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # ==========================================================================
-# The run lifecycle — end to end through det.run (docs/02)
+# The run lifecycle — end to end through det.run (docs/02, docs/12)
 # ==========================================================================
 
 
@@ -475,15 +539,15 @@ def _query(db_path: str, sql: str) -> list[tuple]:
 
 
 def test_run_succeeds_and_returns_runresult(duckdb_path: str) -> None:
-    """det.run drives the echo connector and returns a SUCCEEDED RunResult."""
+    """det.run drives the echo_dev config and returns a SUCCEEDED RunResult."""
     result = det.run(
-        connector="echo",
-        target="dev",
+        config="echo_dev",
         project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
     )
     assert result.status.value == "succeeded"
-    assert result.connector == "echo"
+    assert result.config == "echo_dev"
+    assert result.connector == "echo"  # source name
     assert result.destination == "duckdb"
     assert result.target == "dev"
     assert result.rows_loaded == 9
@@ -491,49 +555,40 @@ def test_run_succeeds_and_returns_runresult(duckdb_path: str) -> None:
     assert result.duration_s >= 0
 
 
-def test_run_target_defaults_to_project_default(duckdb_path: str) -> None:
-    """run() with no target uses the project's default_target (docs/06)."""
+def test_run_target_override(duckdb_path: str) -> None:
+    """run(target_override=...) overrides the config's target field."""
     result = det.run(
-        connector="echo",
+        config="echo_dev",
         project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
+        target_override="prod",
+        destination_params_override={"path": duckdb_path},
     )
     assert result.status.value == "succeeded"
-    assert result.target == "dev"
+    assert result.target == "prod"
 
 
 def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
-    """--full-refresh ignores a committed cursor and re-extracts (docs/03 §3.2).
-
-    Run 1 commits the ``items`` cursor at 5. A plain run 2 would resume and
-    yield 0 items; a ``full_refresh`` run 2 ignores the cursor and re-extracts
-    all 5.
-    """
+    """--full-refresh ignores a committed cursor and re-extracts (docs/03 §3.2)."""
     first = det.run(
-        connector="echo",
-        target="dev",
+        config="echo_dev",
         project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
     )
     items_first = first.stream("items")
     assert items_first is not None and items_first.rows_loaded == 5
 
-    # A plain re-run resumes — items yields 0.
     plain = det.run(
-        connector="echo",
-        target="dev",
+        config="echo_dev",
         project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
     )
     items_plain = plain.stream("items")
     assert items_plain is not None and items_plain.rows_loaded == 0
 
-    # A full-refresh re-run ignores the committed cursor — items yields all 5.
     refreshed = det.run(
-        connector="echo",
-        target="dev",
+        config="echo_dev",
         project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
         full_refresh=True,
     )
     items_refreshed = refreshed.stream("items")
@@ -541,13 +596,12 @@ def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
     assert refreshed.full_refresh is True
 
 
-def test_run_select_skips_unselected_streams(duckdb_path: str) -> None:
-    """run(select=...) runs only the named streams; the rest are SKIPPED."""
+def test_run_select_replaces_config_select(duckdb_path: str) -> None:
+    """run(select=...) replaces the config's `select:`; unnamed streams SKIP."""
     result = det.run(
-        connector="echo",
-        target="dev",
+        config="echo_dev",
         project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
         select=("events",),
     )
     events = result.stream("events")
@@ -558,32 +612,25 @@ def test_run_select_skips_unselected_streams(duckdb_path: str) -> None:
 
 
 def test_run_failure_returns_failed_runresult(duckdb_path: str) -> None:
-    """run() never raises — an unknown connector becomes a FAILED RunResult."""
+    """run() never raises — an unknown config becomes a FAILED RunResult."""
     result = det.run(
-        connector="no_such_connector",
-        target="dev",
+        config="no_such_config",
         project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
     )
     assert result.status.value == "failed"
     assert result.error is not None
-    assert isinstance(result.error, DiscoveryError)
-    with pytest.raises(DiscoveryError):
+    assert isinstance(result.error, ConfigError)
+    with pytest.raises(ConfigError):
         result.raise_for_status()
 
 
 def test_run_failing_stream_keeps_prior_stream_state(
     tmp_path: Path, duckdb_path: str
 ) -> None:
-    """A stream failure does not lose an earlier stream's committed state.
-
-    docs/02 §Commit granularity: state commits per stream. This builds a source
-    whose first stream succeeds and whose second stream raises. The run fails,
-    but the first stream's row already committed to ``_det_state`` — proof
-    that per-stream commit survives a later failure and a re-run would resume.
-    """
+    """A stream failure does not lose an earlier stream's committed state."""
     _write_project(tmp_path)
-    folder = tmp_path / "connectors" / "partial"
+    folder = tmp_path / "sources" / "partial"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
         textwrap.dedent(
@@ -603,8 +650,6 @@ def test_run_failing_stream_keeps_prior_stream_state(
                 write_disposition: append
                 schema:
                   - {name: id, type: INTEGER}
-            destination:
-              connector: duckdb
             """
         )
     )
@@ -627,12 +672,12 @@ def test_run_failing_stream_keeps_prior_stream_state(
             """
         )
     )
+    _write_config(tmp_path, name="partial_dev", source="partial")
 
     result = det.run(
-        connector="partial",
-        target="dev",
+        config="partial_dev",
         project_dir=str(tmp_path),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
     )
     assert result.status.value == "failed"
     assert isinstance(result.error, RuntimeError)
@@ -641,22 +686,14 @@ def test_run_failing_stream_keeps_prior_stream_state(
     assert good_result is not None and good_result.status.value == "succeeded"
     assert bad_result is not None and bad_result.status.value == "failed"
 
-    # The crash-safety guarantee: the `good` stream's state committed before
-    # `bad` failed, so its row survives in _det_state.
     state = _query(
         duckdb_path,
         "SELECT stream, rows_total FROM _det_state WHERE connector = 'partial'",
     )
     streams_committed = {row[0]: row[1] for row in state}
     assert streams_committed.get("good") == 2
-    assert "bad" not in streams_committed  # bad failed before its commit_state
+    assert "bad" not in streams_committed
 
-    # The TRANSACTIONAL_LOAD guarantee (docs/05 §5.3): the `bad` stream yielded
-    # one batch — {"id": 3} — which write_batch persisted, then raised. Because
-    # DuckDB declares TRANSACTIONAL_LOAD, that write happened inside the
-    # per-stream transaction; the failure rolled it back. The table exists
-    # (ensure_schema runs outside the transaction) but holds ZERO rows — no
-    # half-written append duplicates for the re-run to trip over.
     bad_rows = _query(duckdb_path, "SELECT COUNT(*) FROM partial_bad")
     assert bad_rows[0][0] == 0
 
@@ -664,16 +701,9 @@ def test_run_failing_stream_keeps_prior_stream_state(
 def test_run_append_stream_rollback_leaves_no_partial_rows(
     tmp_path: Path, duckdb_path: str
 ) -> None:
-    """A crash mid-append rolls back every batch already written this run.
-
-    docs/05 §5.3: this is the guarantee TRANSACTIONAL_LOAD exists for. An
-    ``append`` stream that yields several batches and then fails must leave the
-    table empty — otherwise every crash would duplicate rows on the next run.
-    The connector here yields three batches (6 rows) before raising; all six
-    must be rolled back.
-    """
+    """A crash mid-append rolls back every batch already written this run."""
     _write_project(tmp_path)
-    folder = tmp_path / "connectors" / "crasher"
+    folder = tmp_path / "sources" / "crasher"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
         textwrap.dedent(
@@ -688,8 +718,6 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
                 write_disposition: append
                 schema:
                   - {name: id, type: INTEGER}
-            destination:
-              connector: duckdb
             """
         )
     )
@@ -709,20 +737,18 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
             """
         )
     )
+    _write_config(tmp_path, name="crasher_dev", source="crasher")
 
     result = det.run(
-        connector="crasher",
-        target="dev",
+        config="crasher_dev",
         project_dir=str(tmp_path),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
     )
     assert result.status.value == "failed"
     assert isinstance(result.error, RuntimeError)
 
-    # Every one of the 6 written rows was rolled back — the table is empty.
     landed = _query(duckdb_path, "SELECT COUNT(*) FROM crasher_rows")
     assert landed[0][0] == 0
-    # ...and no cursor/state row was committed for the stream either.
     state = _query(
         duckdb_path,
         "SELECT COUNT(*) FROM _det_state WHERE connector = 'crasher'",
@@ -733,14 +759,9 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
 def test_run_inferred_schema_for_undeclared_stream(
     tmp_path: Path, duckdb_path: str
 ) -> None:
-    """A stream with no declared schema has one inferred from the first batch.
-
-    docs/02 §Normalize: omitting ``schema`` opts into inference. The engine
-    infers columns + types from the first batch and the destination creates the
-    table — the rows still land.
-    """
+    """A stream with no declared schema has one inferred from the first batch."""
     _write_project(tmp_path)
-    folder = tmp_path / "connectors" / "noschema"
+    folder = tmp_path / "sources" / "noschema"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
         textwrap.dedent(
@@ -753,8 +774,6 @@ def test_run_inferred_schema_for_undeclared_stream(
               - name: things
                 table: noschema_things
                 write_disposition: append
-            destination:
-              connector: duckdb
             """
         )
     )
@@ -771,11 +790,11 @@ def test_run_inferred_schema_for_undeclared_stream(
             """
         )
     )
+    _write_config(tmp_path, name="noschema_dev", source="noschema")
     result = det.run(
-        connector="noschema",
-        target="dev",
+        config="noschema_dev",
         project_dir=str(tmp_path),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
     )
     assert result.status.value == "succeeded"
     rows = _query(duckdb_path, "SELECT id, label, ratio, ok FROM noschema_things")
@@ -785,14 +804,9 @@ def test_run_inferred_schema_for_undeclared_stream(
 def test_run_strict_schema_rejects_divergence(
     tmp_path: Path, duckdb_path: str
 ) -> None:
-    """A schema_contract: strict stream fails when its batch carries an extra column.
-
-    Locked decision: ``strict`` fails the run on any schema divergence, before
-    ``ensure_schema``. The stream below declares only ``id`` but yields a record
-    also carrying ``surprise`` — the run must fail.
-    """
+    """A schema_contract: strict stream fails when its batch carries an extra column."""
     _write_project(tmp_path)
-    folder = tmp_path / "connectors" / "strict"
+    folder = tmp_path / "sources" / "strict"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
         textwrap.dedent(
@@ -808,8 +822,6 @@ def test_run_strict_schema_rejects_divergence(
                 schema_contract: strict
                 schema:
                   - {name: id, type: INTEGER}
-            destination:
-              connector: duckdb
             """
         )
     )
@@ -826,37 +838,79 @@ def test_run_strict_schema_rejects_divergence(
             """
         )
     )
+    _write_config(tmp_path, name="strict_dev", source="strict")
     result = det.run(
-        connector="strict",
-        target="dev",
+        config="strict_dev",
         project_dir=str(tmp_path),
-        destination_params={"path": duckdb_path},
+        destination_params_override={"path": duckdb_path},
     )
     assert result.status.value == "failed"
     assert result.error is not None
     assert "strict" in str(result.error).lower()
 
 
-def test_run_default_destination_when_no_binding(
-    tmp_path: Path, duckdb_path: str
+def test_run_rejects_config_pointing_at_destination_as_source(
+    duckdb_path: str, tmp_path: Path
 ) -> None:
-    """A source with no destination binding uses project default_destination."""
-    _write_project(tmp_path, default_destination="duckdb")
-    folder = tmp_path / "connectors" / "nobinding"
+    """A config whose `source:` resolves to a destination fails cleanly."""
+    _write_project(tmp_path)
+    # No source under tmp_path; the config's `source: duckdb` will resolve via
+    # the baked destinations root and be rejected.
+    _write_config(tmp_path, name="bad_dev", source="duckdb")
+    # tmp_path has no destinations/duckdb folder; baked duckdb wins.
+    # Build a destinations dir so resolve_destination succeeds, then the
+    # source side is the one that fails.
+    result = det.run(
+        config="bad_dev",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "failed"
+    assert result.error is not None
+    assert "not a source" in str(result.error) or "not found" in str(result.error)
+
+
+def test_run_incremental_initial_value_seeds_cursor(duckdb_path: str) -> None:
+    """The engine types initial_value per cursor_type when seeding (docs/03 §3.2)."""
+    result = det.run(
+        config="echo_dev",
+        project_dir=str(FIXTURES_DIR),
+        destination_params_override={"path": duckdb_path},
+    )
+    items = result.stream("items")
+    assert items is not None
+    assert items.cursor_before == 0
+    assert items.cursor_after == 5
+    state = _query(
+        duckdb_path,
+        "SELECT cursor_type FROM _det_state "
+        "WHERE connector = 'echo' AND stream = 'items'",
+    )
+    assert state[0][0] == "int"
+
+
+def test_run_legacy_destination_block_tolerated(
+    tmp_path: Path, duckdb_path: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A source still carrying a legacy `destination:` block runs (warn + ignore)."""
+    _write_project(tmp_path)
+    folder = tmp_path / "sources" / "legacy"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
         textwrap.dedent(
             """\
-            name: nobinding
+            name: legacy
             kind: source
             version: "1.0.0"
-            summary: declares no destination binding.
+            summary: still carries an old-style destination binding.
             streams:
               - name: rows
-                table: nobinding_rows
+                table: legacy_rows
                 write_disposition: append
                 schema:
                   - {name: id, type: INTEGER}
+            destination:
+              connector: duckdb
             """
         )
     )
@@ -869,60 +923,25 @@ def test_run_default_destination_when_no_binding(
 
             @stream(name="rows")
             def rows() -> Iterator[Batch]:
-                yield [{"id": 7}]
+                yield [{"id": 1}]
             """
         )
     )
-    result = det.run(
-        connector="nobinding",
-        target="dev",
-        project_dir=str(tmp_path),
-        destination_params={"path": duckdb_path},
-    )
+    _write_config(tmp_path, name="legacy_dev", source="legacy")
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="det.engine"):
+        result = det.run(
+            config="legacy_dev",
+            project_dir=str(tmp_path),
+            destination_params_override={"path": duckdb_path},
+        )
     assert result.status.value == "succeeded"
-    assert result.destination == "duckdb"
+    # The warning was emitted but the run still succeeded.
+    assert any("legacy" in rec.message for rec in caplog.records)
 
 
-def test_run_rejects_running_a_destination(duckdb_path: str) -> None:
-    """Asking run() to run a destination connector fails cleanly."""
-    result = det.run(
-        connector="duckdb",
-        target="dev",
-        project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
-    )
-    assert result.status.value == "failed"
-    assert result.error is not None
-    assert "not a source" in str(result.error)
-
-
-def test_run_incremental_initial_value_seeds_cursor(duckdb_path: str) -> None:
-    """The engine types initial_value per cursor_type when seeding (docs/03 §3.2).
-
-    echo's ``items`` declares ``initial_value: "0"`` with ``cursor_type: int``.
-    On the first run the engine parses ``"0"`` → ``0``, so the stream yields all
-    5 records and the committed cursor is the int 5.
-    """
-    result = det.run(
-        connector="echo",
-        target="dev",
-        project_dir=str(FIXTURES_DIR),
-        destination_params={"path": duckdb_path},
-    )
-    items = result.stream("items")
-    assert items is not None
-    assert items.cursor_before == 0  # initial_value "0" typed to int 0
-    assert items.cursor_after == 5  # observed max
-    state = _query(
-        duckdb_path,
-        "SELECT cursor_type FROM _det_state "
-        "WHERE connector = 'echo' AND stream = 'items'",
-    )
-    assert state[0][0] == "int"
-
-
-# A couple of contract-type sanity checks the engine depends on, so a future
-# types.py change that would break the engine fails here loudly.
+# A couple of contract-type sanity checks the engine depends on.
 
 
 def test_streamdef_is_incremental_flag() -> None:
@@ -936,3 +955,39 @@ def test_streamdef_is_incremental_flag() -> None:
     )
     assert plain.is_incremental is False
     assert inc.is_incremental is True
+
+
+def test_pipeline_config_from_dict_minimal() -> None:
+    """PipelineConfig.from_dict accepts the three required keys."""
+    pc = PipelineConfig.from_dict(
+        {"name": "p", "source": "s", "destination": "d"}
+    )
+    assert pc.name == "p"
+    assert pc.source == "s"
+    assert pc.destination == "d"
+    assert pc.target is None
+    assert pc.params == {}
+    assert pc.select == ()
+
+
+def test_pipeline_config_from_dict_rejects_unknown_key() -> None:
+    """An unknown top-level key in a config is a hard error (typo guard)."""
+    with pytest.raises(ValueError, match="unknown config key"):
+        PipelineConfig.from_dict(
+            {"name": "p", "source": "s", "destination": "d", "tgt": "dev"}
+        )
+
+
+def test_pipeline_config_from_dict_requires_source() -> None:
+    """A config missing `source:` is rejected."""
+    with pytest.raises(ValueError, match="source"):
+        PipelineConfig.from_dict({"name": "p", "destination": "d"})
+
+
+def test_configs_discover_fixtures() -> None:
+    """The committed fixture configs file parses both echo_dev and echo_prod."""
+    configs = cfgs.discover_configs(FIXTURES_DIR, ["configs"])
+    assert set(configs) == {"echo_dev", "echo_prod"}
+    assert configs["echo_dev"].source == "echo"
+    assert configs["echo_dev"].destination == "duckdb"
+    assert configs["echo_dev"].target == "dev"
