@@ -21,6 +21,7 @@ discovery/validation tests build throwaway projects in ``tmp_path`` via the
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from pathlib import Path
 
@@ -35,12 +36,20 @@ from det.engine.config import ConfigError, Profiles
 from det.engine.discovery import DiscoveryError
 from det.engine.logger import RedactingFilter, build_logger
 from det.types import (
+    CursorType,
+    Field,
+    FieldType,
     Incremental,
     ParamSpec,
     ParamType,
+    PartitionConfig,
+    PartitionRange,
+    PartitionType,
     PipelineConfig,
+    Schema,
     SecretRef,
     StreamDef,
+    TimeGranularity,
     WriteDisposition,
 )
 
@@ -995,3 +1004,404 @@ def test_configs_discover_fixtures() -> None:
     assert configs["echo_dev"].source == "echo"
     assert configs["echo_dev"].destination == "duckdb"
     assert configs["echo_dev"].target == "dev"
+
+
+# ==========================================================================
+# Partition resolution — source default vs config override vs auto-default
+# (docs/05 §3.x — _resolve_partition in det.engine.runner)
+# ==========================================================================
+
+
+def _stream_def_for_partition_test(
+    *,
+    partition_by: str | PartitionConfig | None = None,
+    cursor_type: CursorType | None = CursorType.TIMESTAMP,
+    cursor_field: str = "created_date",
+    schema_field_type: FieldType = FieldType.TIMESTAMP,
+) -> tuple[StreamDef, Schema]:
+    """Build a StreamDef + Schema pair tailored for one resolver scenario."""
+    inc = (
+        None
+        if cursor_type is None
+        else Incremental(cursor_field=cursor_field, cursor_type=cursor_type)
+    )
+    schema = Schema(fields=(Field(name=cursor_field, type=schema_field_type),))
+    sd = StreamDef(
+        name="rows",
+        table="rows_table",
+        primary_key=(),
+        write_disposition=WriteDisposition.APPEND,
+        incremental=inc,
+        schema=schema,
+        partition_by=partition_by,
+    )
+    return sd, schema
+
+
+def _empty_pipeline(
+    partition_overrides: dict[str, PartitionConfig] | None = None,
+) -> PipelineConfig:
+    """A throwaway PipelineConfig — only partition_overrides matters here."""
+    return PipelineConfig(
+        name="p",
+        source="src",
+        destination="dst",
+        partition_overrides=partition_overrides or {},
+    )
+
+
+def test_resolve_partition_source_only_short_form_timestamp() -> None:
+    """Source short form on a TIMESTAMP cursor column → TIME+DAY."""
+    from det.engine.runner import _resolve_partition
+
+    sd, schema = _stream_def_for_partition_test(partition_by="created_date")
+    pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc is not None
+    assert pc.type is PartitionType.TIME
+    assert pc.granularity is TimeGranularity.DAY
+    assert pc.field == "created_date"
+
+
+def test_resolve_partition_source_only_long_form_range() -> None:
+    """Source long form (range) on an INT cursor column → honored verbatim."""
+    from det.engine.runner import _resolve_partition
+
+    declared = PartitionConfig(
+        field="created",
+        type=PartitionType.RANGE,
+        range=PartitionRange(start=0, end=100, interval=10),
+    )
+    sd, schema = _stream_def_for_partition_test(
+        partition_by=declared,
+        cursor_type=CursorType.INT,
+        cursor_field="created",
+        schema_field_type=FieldType.INTEGER,
+    )
+    pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc == declared
+
+
+def test_resolve_partition_config_only_overrides_when_source_silent() -> None:
+    """A config override with no source-side declaration is honored."""
+    from det.engine.runner import _resolve_partition
+
+    override = PartitionConfig(
+        field="created",
+        type=PartitionType.RANGE,
+        range=PartitionRange(start=0, end=100, interval=10),
+    )
+    sd, schema = _stream_def_for_partition_test(
+        partition_by=None,
+        cursor_type=CursorType.INT,
+        cursor_field="created",
+        schema_field_type=FieldType.INTEGER,
+    )
+    pc = _resolve_partition(
+        sd,
+        _empty_pipeline({sd.name: override}),
+        schema,
+        logging.getLogger("t"),
+    )
+    assert pc == override
+
+
+def test_resolve_partition_config_wins_over_source() -> None:
+    """When both source and config declare partition_by, the config wins."""
+    from det.engine.runner import _resolve_partition
+
+    declared_source = "created_date"
+    override = PartitionConfig(
+        field="created_date",
+        type=PartitionType.TIME,
+        granularity=TimeGranularity.HOUR,
+    )
+    sd, schema = _stream_def_for_partition_test(partition_by=declared_source)
+    pc = _resolve_partition(
+        sd,
+        _empty_pipeline({sd.name: override}),
+        schema,
+        logging.getLogger("t"),
+    )
+    assert pc == override
+    assert pc.granularity is TimeGranularity.HOUR  # config's HOUR, not source's DAY
+
+
+def test_resolve_partition_auto_default_timestamp_cursor() -> None:
+    """No declaration + incremental timestamp cursor → TIME+DAY on cursor field."""
+    from det.engine.runner import _resolve_partition
+
+    sd, schema = _stream_def_for_partition_test(partition_by=None)
+    pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc is not None
+    assert pc.type is PartitionType.TIME
+    assert pc.granularity is TimeGranularity.DAY
+    assert pc.field == "created_date"
+
+
+def test_resolve_partition_auto_default_date_cursor() -> None:
+    """No declaration + incremental date cursor → TIME+DAY (same as timestamp)."""
+    from det.engine.runner import _resolve_partition
+
+    sd, schema = _stream_def_for_partition_test(
+        partition_by=None,
+        cursor_type=CursorType.DATE,
+        schema_field_type=FieldType.DATE,
+    )
+    pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc is not None
+    assert pc.field == "created_date"
+    assert pc.type is PartitionType.TIME
+
+
+def test_resolve_partition_auto_default_int_cursor_no_partition_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No declaration + int cursor → no partition + a warning naming the long form."""
+    from det.engine.runner import _resolve_partition
+
+    sd, schema = _stream_def_for_partition_test(
+        partition_by=None,
+        cursor_type=CursorType.INT,
+        cursor_field="id",
+        schema_field_type=FieldType.INTEGER,
+    )
+    with caplog.at_level(logging.WARNING):
+        pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc is None
+    # The warning must name the explicit-declaration syntax — type=range/ingestion.
+    warnings = "\n".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "cannot be auto-partitioned" in warnings
+    assert "type=range" in warnings
+    assert "type=ingestion" in warnings
+
+
+def test_resolve_partition_auto_default_string_cursor_no_partition_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No declaration + string cursor → no partition + a warning naming the long form."""
+    from det.engine.runner import _resolve_partition
+
+    sd, schema = _stream_def_for_partition_test(
+        partition_by=None,
+        cursor_type=CursorType.STRING,
+        cursor_field="page_token",
+        schema_field_type=FieldType.STRING,
+    )
+    with caplog.at_level(logging.WARNING):
+        pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc is None
+    assert any("cannot be auto-partitioned" in r.message for r in caplog.records)
+
+
+def test_resolve_partition_non_incremental_stream_no_partition() -> None:
+    """No declaration + no incremental block → no partition, no warning (silent)."""
+    from det.engine.runner import _resolve_partition
+
+    sd, schema = _stream_def_for_partition_test(
+        partition_by=None, cursor_type=None
+    )
+    pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc is None
+
+
+def test_resolve_partition_short_form_on_int_cursor_degrades_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Backward-compat: short-form partition_by on an INT cursor degrades to no partition.
+
+    The pre-stage-8c Stripe sources declare ``partition_by: created`` against
+    an INTEGER ``created`` column with cursor_type=int. Today the destination
+    ignores the field; once BigQuery starts honoring it, naively applying
+    TIME+DAY would crash. The resolver instead degrades to no partition and
+    logs a warning telling the user to switch to the long form.
+    """
+    from det.engine.runner import _resolve_partition
+
+    sd, schema = _stream_def_for_partition_test(
+        partition_by="created",
+        cursor_type=CursorType.INT,
+        cursor_field="created",
+        schema_field_type=FieldType.INTEGER,
+    )
+    with caplog.at_level(logging.WARNING):
+        pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc is None
+    text = "\n".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "ignoring short-form partition_by" in text
+    assert "type: range" in text  # the explicit-declaration suggestion
+
+
+def test_resolve_partition_short_form_on_string_schema_degrades_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Short form on a STRING-typed column (no cursor at all) also degrades."""
+    from det.engine.runner import _resolve_partition
+
+    sd = StreamDef(
+        name="rows",
+        table="rows_table",
+        primary_key=(),
+        write_disposition=WriteDisposition.APPEND,
+        incremental=None,
+        schema=Schema(fields=(Field(name="name", type=FieldType.STRING),)),
+        partition_by="name",
+    )
+    with caplog.at_level(logging.WARNING):
+        pc = _resolve_partition(
+            sd, _empty_pipeline(), sd.schema, logging.getLogger("t")
+        )
+    assert pc is None
+
+
+# ==========================================================================
+# stream_start event includes the resolved partition spec (docs/09 §2)
+# ==========================================================================
+
+
+def test_partition_overrides_unknown_stream_name_fails_run(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """A config with partition_overrides keyed on a typo'd stream name fails the run.
+
+    Silent-ignore would be the trap (the override never fires, the user
+    thinks production is partitioned by their override but isn't). Same
+    "unknown name → list known names" shape as ``load_config``'s typo error.
+    """
+    _write_project(tmp_path)
+    src_dir = tmp_path / "sources" / "tiny"
+    src_dir.mkdir(parents=True)
+    (src_dir / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: tiny
+            kind: source
+            version: "1.0.0"
+            summary: tiny fixture for unknown-stream test
+            tags: [fixture]
+            streams:
+              - name: rows
+                table: tiny_rows
+                write_disposition: append
+                schema:
+                  - {name: id, type: INTEGER}
+            """
+        )
+    )
+    (src_dir / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from collections.abc import Iterator
+            from det import Batch, stream
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1}]
+            """
+        )
+    )
+    (tmp_path / "configs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "configs" / "tiny_dev.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: tiny_dev
+            source: tiny
+            destination: duckdb
+            target: dev
+            partition_overrides:
+              chrages:   # typo — the stream is `rows`, not `chrages`
+                field: x
+                type: time
+                granularity: day
+            """
+        )
+    )
+    result = det.run(
+        config="tiny_dev",
+        project_dir=tmp_path,
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "failed"
+    err = str(result.error)
+    assert "partition_overrides names stream(s)" in err
+    assert "chrages" in err
+    assert "known streams" in err
+    assert "rows" in err  # the actual stream name is listed
+
+
+def test_stream_start_event_carries_partition_when_auto_default_kicks_in(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """The JSONL stream_start event records the resolved partition spec.
+
+    Stands up a tmp_path source whose stream has a timestamp cursor and no
+    declared partition_by; the engine's auto-default should resolve to TIME+
+    DAY on the cursor field, and that resolved spec should land in the
+    ``stream_start`` event. DuckDB ignores partitioning at the table level
+    (NOTE in its ensure_schema), but the engine still resolves and logs the
+    choice so it is visible cross-destination.
+    """
+    import json
+
+    _write_project(tmp_path)
+    src_dir = tmp_path / "sources" / "ts_source"
+    src_dir.mkdir(parents=True)
+    (src_dir / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: ts_source
+            kind: source
+            version: "1.0.0"
+            summary: timestamp-cursor stream for partition auto-default test
+            tags: [fixture]
+            streams:
+              - name: rows
+                table: ts_rows
+                write_disposition: append
+                incremental:
+                  cursor_field: created_at
+                  cursor_type: timestamp
+                schema:
+                  - {name: id,         type: INTEGER, mode: REQUIRED}
+                  - {name: created_at, type: TIMESTAMP, mode: REQUIRED}
+            """
+        )
+    )
+    (src_dir / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from datetime import datetime, UTC
+            from collections.abc import Iterator
+            from det import Batch, stream
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [
+                    {"id": 1, "created_at": datetime(2026, 1, 1, tzinfo=UTC)},
+                    {"id": 2, "created_at": datetime(2026, 1, 2, tzinfo=UTC)},
+                ]
+            """
+        )
+    )
+    _write_config(tmp_path, name="ts_dev", source="ts_source")
+
+    result = det.run(
+        config="ts_dev",
+        project_dir=tmp_path,
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "succeeded", result.error
+    log_path = Path(result.log_path)
+    assert log_path.is_file()
+    events = [
+        json.loads(line) for line in log_path.read_text().splitlines() if line.strip()
+    ]
+    starts = [e for e in events if e["event"] == "stream_start"]
+    assert starts, "expected at least one stream_start event"
+    for ev in starts:
+        assert "partition" in ev, f"stream_start missing partition: {ev}"
+    # The TIMESTAMP-cursor stream MUST carry an auto-default TIME/DAY partition.
+    assert any(
+        ev.get("partition") and "TIME/DAY" in ev["partition"] for ev in starts
+    ), f"got partitions: {[e.get('partition') for e in starts]}"

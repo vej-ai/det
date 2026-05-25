@@ -261,6 +261,19 @@ def ensure_schema(conn: DuckConn, stream: StreamMeta) -> None:
     the per-stream ``strict`` opt-in (a strict stream's schema diff fails the
     run *before* this hook is called), so ``ensure_schema`` itself is always
     additive — it never needs to know the contract.
+
+    # NOTE: ``stream.partition`` is intentionally IGNORED by this hook.
+    # DuckDB has no native table-partitioning concept (the closest is the
+    # ``Hive partitioned`` Parquet writer for ``COPY ... TO`` exports, which
+    # is an export-time concern, not a table-level one). The
+    # :class:`~det.types.PartitionConfig` field is informational on
+    # destinations without native partitioning — silently dropping it here
+    # matches the contract's promise that the field is "ignored by
+    # destinations that lack partitioning" (docs/05 §3.x). The engine still
+    # resolves and logs the chosen partition in the JSONL ``stream_start``
+    # event for cross-destination consistency, so an operator running the
+    # same source against DuckDB and BigQuery sees the SAME stream_start
+    # event shape; only this hook drops it.
     """
     table = stream.table
     full_schema = stream.schema.with_synced_at()

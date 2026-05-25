@@ -23,7 +23,7 @@ The engine emits a fixed, ordered set of events to `.det/logs/<run_id>/run.jsonl
 | Event | When | Key fields |
 |---|---|---|
 | `run_start` | After RESOLVE; the run has bound a source + destination + target | `config`, `source`, `destination`, `target`, `full_refresh` |
-| `stream_start` | Each stream begins (after the engine seeds its cursor) | `stream`, `disposition`, `cursor_before` |
+| `stream_start` | Each stream begins (after the engine seeds its cursor) | `stream`, `disposition`, `cursor_before`, `partition` (the resolved partition spec — `null` when unpartitioned, otherwise the `PartitionConfig.describe()` string like `"created (TIME/DAY)"` — see [05 §3.3](./05-destinations-and-state.md#33-partitioning)) |
 | `batch_loaded` | Each batch persisted via `write_batch` | `stream`, `rows`, `cumulative_rows` |
 | `stream_committed` | Each stream's transaction closed (data + state durably committed) | `stream`, `rows_loaded`, `cursor_after` |
 | `stream_failed` | A stream raised — written before the run unwinds | `stream`, `error_type`, `error_message`, `traceback` |

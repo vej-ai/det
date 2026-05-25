@@ -198,6 +198,43 @@ class ConnectorKind(_StrEnum):
     """Exposes ``@destination`` hooks that *accept* records."""
 
 
+class PartitionType(_StrEnum):
+    """How the destination should physically partition the table — docs/05 §3.x.
+
+    A stream's :attr:`StreamDef.partition_by` resolves to a
+    :class:`PartitionConfig` whose ``type`` is one of these members. Only the
+    BigQuery destination honors partitioning today; destinations without a
+    native partitioning concept (DuckDB) treat the field as informational.
+
+    * ``TIME`` — time-based partitioning on the ``field`` column; the column
+      must be a ``TIMESTAMP`` or ``DATE``. ``granularity`` picks the bucket.
+    * ``RANGE`` — integer-range partitioning on the ``field`` column;
+      requires the ``range`` block (start / end / interval).
+    * ``INGESTION`` — partition by load timestamp (BigQuery's pseudo-column
+      ``_PARTITIONTIME``). ``field`` must be ``None`` — there is no source
+      column to bind. Useful for append-only logs without a natural date
+      column.
+    """
+
+    TIME = "time"
+    RANGE = "range"
+    INGESTION = "ingestion"
+
+
+class TimeGranularity(_StrEnum):
+    """Time-partition bucket size — docs/05 §3.x.
+
+    Members align 1:1 with BigQuery's ``TimePartitioningType`` so the
+    destination's mapping is trivial. ``DAY`` is the default (and BigQuery's
+    own historical default) when a short-form ``partition_by`` is used.
+    """
+
+    HOUR = "hour"
+    DAY = "day"
+    MONTH = "month"
+    YEAR = "year"
+
+
 class SchemaContract(_StrEnum):
     """Per-stream schema-evolution policy — docs/05 §3.2.
 
@@ -239,6 +276,281 @@ class StreamStatus(_StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Partitioning — the resolved per-stream physical-partitioning spec (docs/05 §3.x)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PartitionRange:
+    """An integer-range partition window — docs/05 §3.x.
+
+    Mirrors BigQuery's ``PartitionRange(start, end, interval)``. ``start`` is
+    inclusive, ``end`` exclusive; ``interval`` is the per-bucket span. All
+    three are plain integers — the column is :class:`FieldType.INTEGER` on the
+    destination side.
+
+    Used only when :attr:`PartitionConfig.type` is :attr:`PartitionType.RANGE`.
+    """
+
+    start: int
+    end: int
+    interval: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> PartitionRange:
+        """Build a :class:`PartitionRange` from a parsed YAML mapping.
+
+        Required keys: ``start``, ``end``, ``interval``. Unknown keys are a
+        hard error, mirroring the rest of the contract's discovery rules.
+        """
+        known = {"start", "end", "interval"}
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(
+                f"unknown partition.range key(s): {', '.join(sorted(unknown))}"
+            )
+        for required in ("start", "end", "interval"):
+            if required not in data:
+                raise ValueError(f"partition.range requires a {required!r} key")
+        return cls(
+            start=int(data["start"]),
+            end=int(data["end"]),
+            interval=int(data["interval"]),
+        )
+
+
+@dataclass(frozen=True)
+class PartitionConfig:
+    """Resolved partition specification — docs/05 §3.x.
+
+    Built by the engine from one of three sources, in precedence order:
+
+    1. The active :class:`PipelineConfig`'s ``partition_overrides[stream_name]``
+       (wins on conflict).
+    2. The source stream's :attr:`StreamDef.partition_by` (set in
+       ``register.yaml``).
+    3. The cursor-based auto-default (incremental streams whose cursor is
+       ``timestamp`` or ``date``).
+
+    Passed to the destination via :attr:`StreamMeta.partition`. Only the
+    BigQuery destination honors it today (DuckDB ignores the field — it has
+    no native partitioning; the field is purely informational there).
+
+    # NOTE: today only BigQuery honors this. DuckDB ignores it gracefully.
+    # When a future destination (Snowflake clustering keys, ClickHouse
+    # partition keys, Postgres declarative partitioning) wires this in, it
+    # reads from the same single ``StreamMeta.partition`` field — no contract
+    # change required.
+    """
+
+    field: str | None
+    """The column to partition on. ``None`` is valid *only* for
+    :attr:`PartitionType.INGESTION` (BigQuery binds to the
+    ``_PARTITIONTIME`` pseudo-column instead)."""
+
+    type: PartitionType
+    """How the destination partitions: time / range / ingestion."""
+
+    granularity: TimeGranularity | None = None
+    """Bucket size for :attr:`PartitionType.TIME` (required there, forbidden
+    elsewhere). ``DAY`` is the conventional default."""
+
+    range: PartitionRange | None = None
+    """Range window for :attr:`PartitionType.RANGE` (required there,
+    forbidden elsewhere)."""
+
+    def __post_init__(self) -> None:
+        """Validate the type/field/granularity/range combination — docs/05 §3.x.
+
+        Catches malformed PartitionConfig values at construction time so a bad
+        YAML never reaches the destination hook. The rules:
+
+        * ``type=TIME`` — needs ``granularity``; ``range`` must be absent;
+          ``field`` is required (it names the column to partition on).
+        * ``type=RANGE`` — needs ``range``; ``granularity`` must be absent;
+          ``field`` is required.
+        * ``type=INGESTION`` — ``field`` must be ``None`` (BigQuery binds to
+          the ``_PARTITIONTIME`` pseudo-column); ``granularity`` and ``range``
+          must both be absent. The bucket is implicitly DAY on BigQuery's
+          ingestion-time partitioning.
+        """
+        self.validate()
+
+    def validate(self) -> None:
+        """Validate combinations — see :meth:`__post_init__` for the rules.
+
+        Raises :class:`ValueError` with a message naming the offending key,
+        so a malformed ``register.yaml`` or ``partition_overrides:`` entry
+        fails the run with a clear, actionable diagnostic.
+        """
+        if self.type is PartitionType.TIME:
+            if self.field is None:
+                raise ValueError(
+                    "partition_by type='time' requires a 'field' (column name)"
+                )
+            if self.granularity is None:
+                raise ValueError(
+                    "partition_by type='time' requires a 'granularity' "
+                    "(hour / day / month / year)"
+                )
+            if self.range is not None:
+                raise ValueError(
+                    "partition_by type='time' must not declare a 'range' block"
+                )
+        elif self.type is PartitionType.RANGE:
+            if self.field is None:
+                raise ValueError(
+                    "partition_by type='range' requires a 'field' (column name)"
+                )
+            if self.range is None:
+                raise ValueError(
+                    "partition_by type='range' requires a 'range' block with "
+                    "start / end / interval"
+                )
+            if self.granularity is not None:
+                raise ValueError(
+                    "partition_by type='range' must not declare a 'granularity' "
+                    "(granularity is for type='time' only)"
+                )
+        else:  # PartitionType.INGESTION
+            if self.field is not None:
+                raise ValueError(
+                    "partition_by type='ingestion' must not declare a 'field' "
+                    "(BigQuery binds to the _PARTITIONTIME pseudo-column)"
+                )
+            if self.granularity is not None:
+                raise ValueError(
+                    "partition_by type='ingestion' must not declare a "
+                    "'granularity' (the bucket is implicitly DAY)"
+                )
+            if self.range is not None:
+                raise ValueError(
+                    "partition_by type='ingestion' must not declare a 'range' "
+                    "block"
+                )
+
+    @classmethod
+    def from_short(cls, field: str) -> PartitionConfig:
+        """Short form: a bare column name — defaults to TIME + DAY granularity.
+
+        The historical shape (``partition_by: created_date``). The engine
+        applies this default at resolution time; on a non-time column or a
+        non-time cursor (INT / STRING), the resolver *degrades* the short form
+        to "no partition + warning" rather than erroring — see the resolver's
+        NOTE for the backward-compat reasoning.
+        """
+        return cls(
+            field=field,
+            type=PartitionType.TIME,
+            granularity=TimeGranularity.DAY,
+        )
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | str) -> PartitionConfig:
+        """Parse either the short string form or the long-form dict.
+
+        * Short form — ``data`` is a string column name → :meth:`from_short`.
+        * Long form — ``data`` is a mapping with ``field`` / ``type`` /
+          optional ``granularity`` / optional ``range``.
+
+        Unknown keys at the top level raise :class:`ValueError` so a typo in a
+        ``register.yaml`` or ``partition_overrides:`` entry never silently
+        drops a partition declaration.
+        """
+        if isinstance(data, str):
+            return cls.from_short(data)
+        if not isinstance(data, Mapping):
+            raise ValueError(
+                f"partition_by must be a string (column name) or a mapping; "
+                f"got {type(data).__name__}"
+            )
+        known = {"field", "type", "granularity", "range"}
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(
+                f"unknown partition_by key(s): {', '.join(sorted(unknown))}"
+            )
+        if "type" not in data:
+            raise ValueError(
+                "partition_by mapping requires a 'type' "
+                "(one of: time / range / ingestion)"
+            )
+        ptype = PartitionType.parse(data["type"])
+        field_value = data.get("field")
+        gran_raw = data.get("granularity")
+        granularity: TimeGranularity | None
+        if gran_raw is None:
+            # For TIME, default to DAY (the common case) so a user writing
+            # `type: time` without a granularity gets the convention.
+            granularity = TimeGranularity.DAY if ptype is PartitionType.TIME else None
+        else:
+            granularity = TimeGranularity.parse(gran_raw)
+        range_raw = data.get("range")
+        range_block: PartitionRange | None = None
+        if range_raw is not None:
+            if not isinstance(range_raw, Mapping):
+                raise ValueError(
+                    f"partition_by.range must be a mapping; "
+                    f"got {type(range_raw).__name__}"
+                )
+            range_block = PartitionRange.from_dict(range_raw)
+        return cls(
+            field=None if field_value is None else str(field_value),
+            type=ptype,
+            granularity=granularity,
+            range=range_block,
+        )
+
+    def describe(self) -> str:
+        """One-line human description for logs / error messages.
+
+        Shapes the partition spec into a compact form like
+        ``"created (TIME/DAY)"`` or ``"created (RANGE 0..10000000000/86400)"``
+        or ``"_PARTITIONTIME (INGESTION/DAY)"``. Used by the engine's
+        ``stream_start`` event and by the drift-mismatch error message.
+        """
+        if self.type is PartitionType.TIME:
+            assert self.granularity is not None  # validated
+            return f"{self.field} (TIME/{self.granularity.value.upper()})"
+        if self.type is PartitionType.RANGE:
+            assert self.range is not None  # validated
+            return (
+                f"{self.field} (RANGE {self.range.start}..{self.range.end}"
+                f"/{self.range.interval})"
+            )
+        # INGESTION — field is None
+        return "_PARTITIONTIME (INGESTION/DAY)"
+
+
+def _parse_partition_by(value: Any) -> str | PartitionConfig | None:
+    """Parse a YAML ``partition_by`` value into the typed shape.
+
+    Accepted shapes (docs/05 §3.x):
+
+    * ``None`` — no declaration; the engine may compute an auto-default.
+    * a string — the short form (column name). Stored verbatim; the engine
+      promotes it to a :class:`PartitionConfig` at resolution time with the
+      cursor type in hand (see the resolver's NOTE in :mod:`det.engine.runner`).
+    * a mapping — the long form, parsed by :meth:`PartitionConfig.from_dict`.
+
+    Kept as a module-level helper so :class:`PipelineConfig`'s
+    ``partition_overrides`` parser can reuse the exact same coercion.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, PartitionConfig):
+        return value
+    if isinstance(value, Mapping):
+        return PartitionConfig.from_dict(value)
+    raise ValueError(
+        f"partition_by must be null, a string, or a mapping; "
+        f"got {type(value).__name__}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +809,23 @@ class StreamDef:
     write_disposition: WriteDisposition = WriteDisposition.APPEND
     incremental: Incremental | None = None
     schema: Schema | None = None
-    partition_by: str | None = None
+    partition_by: str | PartitionConfig | None = None
+    """The declared partition spec, either:
+
+    * a bare string column name (short form — defaults to TIME+DAY at
+      resolution time), or
+    * a fully-typed :class:`PartitionConfig` (long form parsed by
+      :meth:`from_dict`), or
+    * ``None`` (no declaration — the engine may compute a cursor-based
+      auto-default at run time).
+
+    # NOTE: kept as ``str | PartitionConfig`` (not auto-promoted to
+    # ``PartitionConfig`` at parse time) so the engine can defer the
+    # short-form interpretation until it has the cursor type + the per-config
+    # override in hand — the cursor info isn't available here, and the engine
+    # *needs* to know whether the field was set as a bare string vs a long-form
+    # config to apply the backward-compat degradation rule (see the resolver's
+    # NOTE in :mod:`det.engine.runner`)."""
     params: Mapping[str, ParamSpec] = field(default_factory=dict)
     schema_contract: SchemaContract = SchemaContract.EVOLVE
 
@@ -577,9 +905,7 @@ class StreamDef:
             ),
             incremental=incremental,
             schema=Schema.from_list(data.get("schema")),
-            partition_by=(
-                None if data.get("partition_by") is None else str(data["partition_by"])
-            ),
+            partition_by=_parse_partition_by(data.get("partition_by")),
             params=params,
             schema_contract=SchemaContract.parse(
                 data.get("schema_contract", SchemaContract.EVOLVE)
@@ -605,23 +931,51 @@ class StreamMeta:
     write_disposition: WriteDisposition
     schema: Schema
     primary_key: tuple[str, ...] = ()
-    partition_by: str | None = None
+    partition: PartitionConfig | None = None
+    """The resolved physical-partition spec for this stream — docs/05 §3.x.
+
+    Built by the engine from (in precedence order) a per-config
+    ``partition_overrides`` entry, the source stream's
+    :attr:`StreamDef.partition_by`, or the cursor-based auto-default; ``None``
+    means "leave the table unpartitioned". Destinations that lack native
+    partitioning (DuckDB) ignore this field — see their ``ensure_schema``
+    NOTE for the rationale."""
     schema_contract: SchemaContract = SchemaContract.EVOLVE
 
     @classmethod
-    def from_stream_def(cls, stream: StreamDef, schema: Schema) -> StreamMeta:
+    def from_stream_def(
+        cls,
+        stream: StreamDef,
+        schema: Schema,
+        *,
+        partition: PartitionConfig | None = None,
+    ) -> StreamMeta:
         """Build a :class:`StreamMeta` from a :class:`StreamDef` plus a resolved schema.
 
         ``schema`` is the engine's resolved schema for the stream — the declared
-        one when present, otherwise the inferred one. Every other field is
-        copied straight from the declaration.
+        one when present, otherwise the inferred one. ``partition`` is the
+        engine-resolved :class:`PartitionConfig` (or ``None``) — the runner
+        computes it from the source declaration, the per-config override and
+        the cursor-based auto-default, then passes it in here so the
+        destination contract sees a single resolved value rather than three
+        sources to reconcile. Every other field is copied straight from the
+        declaration.
+
+        # NOTE: ``partition`` is keyword-only and defaults to ``None`` for two
+        # reasons: (1) older call sites (and tests) that build a
+        # :class:`StreamMeta` directly via this constructor stay source-
+        # compatible — they simply get the "no partition" behavior the
+        # destination already understands; (2) the runner is the single place
+        # that resolves the three precedence layers, so making ``partition``
+        # the runner's job (not this helper's) keeps the resolution logic in
+        # one file.
         """
         return cls(
             table=stream.table,
             write_disposition=stream.write_disposition,
             schema=schema,
             primary_key=stream.primary_key,
-            partition_by=stream.partition_by,
+            partition=partition,
             schema_contract=stream.schema_contract,
         )
 
@@ -1330,6 +1684,16 @@ class PipelineConfig:
     target: str | None = None
     params: Mapping[str, Any] = field(default_factory=dict)
     destination_params: Mapping[str, Any] = field(default_factory=dict)
+    partition_overrides: Mapping[str, PartitionConfig] = field(default_factory=dict)
+    """Per-stream partition declarations that *override* the source's
+    :attr:`StreamDef.partition_by` — docs/05 §3.x, docs/12 §3.
+
+    Keys are stream names; values are :class:`PartitionConfig` objects parsed
+    from either the short string form or the long-form mapping. Same precedence
+    as other per-config overrides: a stream not named here keeps whatever the
+    source's ``register.yaml`` declared (or the cursor-based auto-default if
+    nothing was declared). Lets a pipeline tune the physical layout of a
+    third-party source without forking its connector folder."""
     select: tuple[str, ...] = ()
     schedule: str | None = None
 
@@ -1339,7 +1703,10 @@ class PipelineConfig:
 
         Enforces the required keys (``name``, ``source``, ``destination``) and
         rejects unknown top-level keys (catches typos like ``destintion``).
-        Coerces ``select`` from a string-or-list scalar into a tuple.
+        Coerces ``select`` from a string-or-list scalar into a tuple. The
+        ``partition_overrides:`` block, when present, is parsed per-entry into
+        :class:`PartitionConfig` objects (each entry may itself be the short
+        or the long form — see :meth:`PartitionConfig.from_dict`).
         """
         known = {
             "name",
@@ -1348,6 +1715,7 @@ class PipelineConfig:
             "target",
             "params",
             "destination_params",
+            "partition_overrides",
             "select",
             "schedule",
         }
@@ -1368,6 +1736,31 @@ class PipelineConfig:
                 f"config {data['name']!r}: 'select' must be a string or list of stream names"
             )
 
+        # partition_overrides — per-stream, each value can be the short string
+        # form OR the long-form mapping. We promote everything to
+        # PartitionConfig here so the runner sees a uniform shape; the per-
+        # entry short-form interpretation (TIME+DAY default) lives in
+        # PartitionConfig.from_short. # NOTE: unlike StreamDef.partition_by we
+        # DO promote here — at the config layer we have no cursor info either
+        # way, and a per-config override is an explicit "I know what I want"
+        # decision, so the backward-compat short-form-on-int-cursor
+        # degradation rule does not apply to overrides.
+        partition_overrides_raw = data.get("partition_overrides") or {}
+        if not isinstance(partition_overrides_raw, Mapping):
+            raise ValueError(
+                f"config {data['name']!r}: 'partition_overrides' must be a mapping "
+                f"of stream name → partition spec (string or long form)"
+            )
+        partition_overrides: dict[str, PartitionConfig] = {}
+        for stream_name, raw in partition_overrides_raw.items():
+            try:
+                partition_overrides[str(stream_name)] = PartitionConfig.from_dict(raw)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"config {data['name']!r}: partition_overrides[{stream_name!r}]: "
+                    f"{exc}"
+                ) from exc
+
         target_raw = data.get("target")
         schedule_raw = data.get("schedule")
         return cls(
@@ -1377,6 +1770,7 @@ class PipelineConfig:
             target=None if target_raw is None else str(target_raw),
             params=dict(data.get("params") or {}),
             destination_params=dict(data.get("destination_params") or {}),
+            partition_overrides=partition_overrides,
             select=select,
             schedule=None if schedule_raw is None else str(schedule_raw),
         )

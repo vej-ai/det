@@ -122,6 +122,34 @@ follow the rules in [docs/05 §3.2](../../../docs/05-destinations-and-state.md#3
 The engine enforces the contract; `ensure_schema` itself is always
 additive.
 
+## Partitioning
+
+This destination honors `partition_by` declarations on a stream (or
+`partition_overrides:` in a config — see [docs/05 §3.3](../../../docs/05-destinations-and-state.md#33-partitioning) for the full chain).
+The engine resolves the per-stream declaration + the per-config override +
+the cursor-based auto-default into a single `PartitionConfig` and hands it
+to `ensure_schema`. The destination then sets either:
+
+- `table.time_partitioning = TimePartitioning(type_=DAY|HOUR|..., field=...)`
+  for `type=time` (also for `type=ingestion`, with `field=None` so BigQuery
+  binds the `_PARTITIONTIME` pseudo-column), or
+- `table.range_partitioning = RangePartitioning(field=..., range_=PartitionRange(start, end, interval))`
+  for `type=range`.
+
+The partition spec is **fixed at table-create time**. BigQuery cannot change
+a table's partitioning in place, so any subsequent `ensure_schema` call
+whose resolved `PartitionConfig` does not exactly match the existing
+table's partitioning **raises `PartitionDriftError`** — a clear
+`RuntimeError` subclass whose message names both partition specs and the
+suggested operator action (today: back the table up + drop it + run
+`det state reset -p <config>`; tomorrow: `det state reset --recreate-table`,
+which is wired into the message text now so it stays actionable once
+the flag lands).
+
+For the cursor-based auto-default policy (`timestamp` / `date` →
+`TIME+DAY`; `int` / `string` → unpartitioned + WARNING), see
+[docs/05 §3.3](../../../docs/05-destinations-and-state.md#33-partitioning).
+
 ## Engine tables this destination creates
 
 - `_det_state` — one row per `(connector, stream)` resume point. Eight

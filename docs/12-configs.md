@@ -84,8 +84,34 @@ Unknown top-level keys are a hard error (catches typos like `destintion`).
 | `target` | `profiles.yml[<destination>].default_target` (or the destination's only target if it has just one, else error) | Which row of `profiles.yml[<destination>].targets` supplies the destination's connection params. |
 | `params` | `{}` | Per-pipeline source param overrides — precedence layer 3 (docs/03 §6). |
 | `destination_params` | `{}` | Per-pipeline destination param overrides — layered on top of the destination's `profiles.yml` row. |
+| `partition_overrides` | `{}` | Per-stream physical-partition overrides — wins over the source's `register.yaml` `partition_by` (docs/05 §3.3). |
 | `select` | `[]` (= all streams) | Streams to run. Empty means every stream. |
 | `schedule` | `null` | Advisory cron expression. The engine itself never acts on it (docs/03 §2.6). |
+
+### 3.1 Worked example — `partition_overrides:`
+
+A pipeline that lands Stripe into BigQuery wants `charges` partitioned by an integer-epoch range (Stripe's `created` is an INT cursor) and `invoices` partitioned by the date the engine writes. Neither needs forking the Stripe connector — the override block lives in the config:
+
+```yaml
+# configs/stripe_bq.yml
+name: stripe_bq
+source: stripe
+destination: bigquery
+target: dev
+destination_params:
+  dataset: stripe_data
+partition_overrides:
+  charges:
+    field: created
+    type: range
+    range:
+      start: 1577836800        # 2020-01-01T00:00:00Z
+      end:   1893456000        # 2030-01-01T00:00:00Z
+      interval: 86400          # one day per bucket
+  invoices: created            # short form — TIME+DAY on `created`
+```
+
+`partition_overrides:` is a mapping `{stream_name: partition_spec}`. Each entry accepts both the short string form and the long-form mapping. A stream not named here keeps whatever the source's `register.yaml` declared (or the cursor-based auto-default if nothing was declared — docs/05 §3.3).
 
 ## 4. Target resolution
 

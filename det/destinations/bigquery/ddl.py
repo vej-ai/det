@@ -18,7 +18,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from det.types import Field, FieldMode, FieldType, Schema
+from det.types import (
+    Field,
+    FieldMode,
+    FieldType,
+    PartitionConfig,
+    PartitionRange,
+    PartitionType,
+    Schema,
+    TimeGranularity,
+)
 
 # --------------------------------------------------------------------------
 # Type mapping — docs/05 §3.1
@@ -280,3 +289,159 @@ def merge_sql(
         f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
     )
     return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------
+# Partitioning — convert det's PartitionConfig to BigQuery SDK objects
+# and compare against an existing table's partitioning. docs/05 §3.x.
+# --------------------------------------------------------------------------
+
+# Maps det's TimeGranularity to BigQuery's TimePartitioningType string. The
+# BigQuery SDK accepts these uppercase strings on ``TimePartitioning(type_=…)``;
+# the SDK module also exposes a ``TimePartitioningType.DAY`` enum but the
+# string form is stable across SDK versions and trivially testable.
+_GRANULARITY_TO_BQ: dict[TimeGranularity, str] = {
+    TimeGranularity.HOUR: "HOUR",
+    TimeGranularity.DAY: "DAY",
+    TimeGranularity.MONTH: "MONTH",
+    TimeGranularity.YEAR: "YEAR",
+}
+
+_BQ_TO_GRANULARITY: dict[str, TimeGranularity] = {
+    v: k for k, v in _GRANULARITY_TO_BQ.items()
+}
+
+
+def apply_partitioning_to_table(
+    table: Any, partition: PartitionConfig | None, bq_module: Any
+) -> None:
+    """Mutate a ``bigquery.Table`` to carry the requested partition spec.
+
+    Called by ``ensure_schema`` on the table-creation path. Maps a det
+    :class:`PartitionConfig` onto either ``table.time_partitioning`` (for TIME
+    and INGESTION types) or ``table.range_partitioning`` (for RANGE). A
+    ``None`` partition leaves the table unpartitioned (today's behavior
+    pre-this-stage).
+
+    # NOTE: ``bq_module`` is the lazy-loaded ``google.cloud.bigquery`` module
+    # handed in by the destination — going through the parameter (not a
+    # local import) keeps the test fakes' single monkeypatch on
+    # ``_bigquery_module`` effective from this module too.
+    """
+    if partition is None:
+        return
+    if partition.type is PartitionType.TIME:
+        assert partition.granularity is not None  # validated by PartitionConfig
+        table.time_partitioning = bq_module.TimePartitioning(
+            type_=_GRANULARITY_TO_BQ[partition.granularity],
+            field=partition.field,
+        )
+    elif partition.type is PartitionType.RANGE:
+        assert partition.range is not None  # validated by PartitionConfig
+        table.range_partitioning = bq_module.RangePartitioning(
+            field=partition.field,
+            range_=bq_module.PartitionRange(
+                start=partition.range.start,
+                end=partition.range.end,
+                interval=partition.range.interval,
+            ),
+        )
+    else:  # PartitionType.INGESTION
+        # field=None — BigQuery binds to the _PARTITIONTIME pseudo-column;
+        # bucket is implicitly DAY.
+        table.time_partitioning = bq_module.TimePartitioning(
+            type_="DAY",
+            field=None,
+        )
+
+
+def existing_table_partition(table: Any) -> PartitionConfig | None:
+    """Normalize an existing ``bigquery.Table``'s partition spec to det shape.
+
+    Reads ``table.time_partitioning`` and ``table.range_partitioning`` and
+    returns the equivalent :class:`PartitionConfig` (or ``None`` if the table
+    is unpartitioned). Used by :func:`compare_partition` to structurally
+    compare against the requested spec — string-rendering both sides for the
+    error message, not for the comparison.
+
+    # NOTE: BigQuery does not let one table have BOTH time AND range
+    # partitioning, so we never need to merge them. If a hypothetical table
+    # had both we would prefer time (BigQuery's own historical behavior).
+    """
+    tp = getattr(table, "time_partitioning", None)
+    if tp is not None:
+        # Distinguish INGESTION (field=None) from TIME (field=<column>).
+        bq_type = getattr(tp, "type_", None) or "DAY"
+        field = getattr(tp, "field", None)
+        if field is None:
+            return PartitionConfig(
+                field=None, type=PartitionType.INGESTION
+            )
+        gran = _BQ_TO_GRANULARITY.get(str(bq_type).upper(), TimeGranularity.DAY)
+        return PartitionConfig(
+            field=str(field), type=PartitionType.TIME, granularity=gran
+        )
+    rp = getattr(table, "range_partitioning", None)
+    if rp is not None:
+        field = getattr(rp, "field", None)
+        range_obj = getattr(rp, "range_", None)
+        if range_obj is None:
+            return None  # malformed — treat as unpartitioned
+        return PartitionConfig(
+            field=None if field is None else str(field),
+            type=PartitionType.RANGE,
+            range=PartitionRange(
+                start=int(range_obj.start),
+                end=int(range_obj.end),
+                interval=int(range_obj.interval),
+            ),
+        )
+    return None
+
+
+def compare_partition(
+    existing: Any, requested: PartitionConfig | None
+) -> tuple[str, str | None]:
+    """Compare an existing table's partition against the requested spec.
+
+    Returns ``("match", None)`` when the table is already partitioned exactly
+    the same way (including the "both unpartitioned" case), otherwise
+    ``("mismatch", <error_message>)`` where the message is the
+    drift-suggestion text the destination hands up as an :class:`EngineError`.
+
+    "No partition on existing vs requested partition" is a MISMATCH (the
+    test list spells this out explicitly): BigQuery has no on-the-fly path
+    to add partitioning to an existing table, so silently ignoring the
+    requested spec would let writes drift from intent. The user must drop
+    + recreate, or change the config to declare no partition.
+
+    # NOTE: ``det state reset --recreate-table`` is the user-facing path the
+    # error message suggests, but the ``--recreate-table`` flag does NOT yet
+    # exist on the CLI as of this stage. A future stage should wire it (the
+    # mechanics — DROP TABLE + clear state row — are straightforward); the
+    # message names it now so the error stays actionable once the flag lands
+    # without needing a docs revision. Today's manual equivalent is: back the
+    # table up (``CREATE TABLE bak AS SELECT * ...``), DROP the table, run
+    # ``det state reset -p <config>`` to clear the state row, then re-run.
+    """
+    existing_pc = existing_table_partition(existing)
+    if existing_pc == requested:
+        return ("match", None)
+    existing_desc = (
+        "(unpartitioned)" if existing_pc is None else existing_pc.describe()
+    )
+    requested_desc = (
+        "(unpartitioned)" if requested is None else requested.describe()
+    )
+    table_name = getattr(existing, "table_id", None) or getattr(
+        existing, "reference", "<unknown>"
+    )
+    msg = (
+        f"table {table_name!r} already exists with partitioning={existing_desc}; "
+        f"new config says {requested_desc}. BigQuery cannot change an existing "
+        f"table's partitioning in place. To resolve: either (a) run `det state "
+        f"reset -p <config> --recreate-table` after backing up the table to "
+        f"recreate it with the new partition spec, or (b) change the config to "
+        f"match the existing partition spec."
+    )
+    return ("mismatch", msg)

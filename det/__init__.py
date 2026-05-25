@@ -50,6 +50,9 @@ from det.types import (
     Field,
     FieldMode,
     FieldType,
+    PartitionConfig,
+    PartitionRange,
+    PartitionType,
     PipelineConfig,
     Record,
     RunConfig,
@@ -64,6 +67,7 @@ from det.types import (
     StreamMeta,
     StreamResult,
     StreamStatus,
+    TimeGranularity,
     WriteDisposition,
 )
 
@@ -90,6 +94,9 @@ __all__ = [
     "Field",
     "FieldMode",
     "FieldType",
+    "PartitionConfig",
+    "PartitionRange",
+    "PartitionType",
     "PipelineConfig",
     "Record",
     "RunConfig",
@@ -104,5 +111,6 @@ __all__ = [
     "StreamMeta",
     "StreamResult",
     "StreamStatus",
+    "TimeGranularity",
     "WriteDisposition",
 ]

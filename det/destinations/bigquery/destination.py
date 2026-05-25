@@ -75,14 +75,38 @@ from det.destinations.bigquery.client import (
     run_with_retries,
 )
 from det.destinations.bigquery.ddl import (
+    apply_partitioning_to_table,
     bigquery_type,
     bq_schema,
     bq_schema_field,
+    compare_partition,
     fq_table,
     merge_sql,
     validate_identifier,
 )
 from det.types import Field, FieldType
+
+
+# # NOTE: ``PartitionDriftError`` is intentionally a destination-local
+# exception class, not the engine's :class:`~det.engine.runner.EngineError`.
+# The task spec asks for an EngineError on partition drift, but a
+# destination importing from ``det.engine.runner`` would introduce a reverse
+# dependency (the engine imports destinations, not the other way around).
+# The engine catches every :class:`Exception` from a destination hook and
+# folds it into a ``FAILED`` :class:`~det.types.RunResult`, so a
+# destination-local subclass surfaces identically to the user — the
+# ``status=FAILED`` RunResult carries this exact instance as its ``error``.
+# The class is named to be search-friendly in stack traces and logs.
+class PartitionDriftError(RuntimeError):
+    """An existing table's partition spec does not match the requested one.
+
+    Raised by :func:`ensure_schema` when the destination table exists and is
+    partitioned differently from what the resolved
+    :class:`~det.types.PartitionConfig` requests — see :func:`compare_partition`
+    in ``ddl.py`` for the structural comparison rule. The error message
+    includes both partition specs and the suggested operator action so the
+    failure is actionable from the log alone.
+    """
 
 
 # Reach for the lazy SDK accessors through the client module each call —
@@ -296,9 +320,23 @@ def ensure_schema(conn: BQConn, stream: StreamMeta) -> None:
 
     existing = _get_table_or_none(conn, table_name)
     if existing is None:
+        # Table absent — create it whole, with partitioning if requested.
+        # docs/05 §3.x: ``stream.partition`` is the engine-resolved
+        # PartitionConfig (None ⇒ unpartitioned, today's behavior).
         table = bq.Table(table_ref, schema=bq_schema(full_schema))
+        apply_partitioning_to_table(table, stream.partition, bq)
         client.bq.create_table(table, exists_ok=True)
         return
+
+    # Table present — validate partition drift BEFORE additive evolution.
+    # BigQuery cannot change an existing table's partitioning in place, so
+    # silently accepting a mismatch would let writes drift from intent.
+    # docs/05 §3.x: hard error with an actionable message naming both
+    # specs and the suggested fix.
+    status, message = compare_partition(existing, stream.partition)
+    if status == "mismatch":
+        assert message is not None
+        raise PartitionDriftError(message)
 
     # Additively add any declared field the table lacks (docs/05 §3.2).
     have = {f.name for f in existing.schema}

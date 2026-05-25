@@ -60,6 +60,8 @@ from det.types import (
     CursorType,
     Field,
     FieldType,
+    PartitionConfig,
+    PartitionType,
     PipelineConfig,
     RunConfig,
     RunRecord,
@@ -73,6 +75,7 @@ from det.types import (
     StreamMeta,
     StreamResult,
     StreamStatus,
+    TimeGranularity,
 )
 
 # The destination hooks the engine drives in a non-state-aware run. Tier A
@@ -175,6 +178,199 @@ def _check_strict_schema(stream: StreamDef, declared: Schema, first_batch: Batch
 
 
 # ---------------------------------------------------------------------------
+# Partition resolution — source default vs config override vs auto-default
+# (docs/05 §3.x)
+# ---------------------------------------------------------------------------
+
+# Cursor types that map to a sensible TIME+DAY auto-default. Other cursor
+# types (INT, STRING) cannot be physically time-partitioned, so the auto-
+# default leaves the stream unpartitioned and logs a warning that names the
+# explicit long-form declaration the user should add.
+_TIME_PARTITION_CURSOR_TYPES = frozenset({CursorType.TIMESTAMP, CursorType.DATE})
+
+
+def _resolve_partition(
+    stream_def: StreamDef,
+    pipeline: PipelineConfig,
+    schema: Schema,
+    log: Any,
+) -> PartitionConfig | None:
+    """Resolve a stream's partition spec — docs/05 §3.x.
+
+    Precedence chain (highest → lowest):
+
+    1. ``pipeline.partition_overrides[stream_name]`` — per-config explicit
+       override. Always wins; always honored verbatim. A user adding this
+       block has made an explicit decision.
+    2. ``stream_def.partition_by`` — the source's ``register.yaml``
+       declaration. Either a long-form :class:`PartitionConfig` (honored
+       verbatim) or a short-form string column name (promoted to TIME+DAY,
+       with a backward-compat degradation — see NOTE below).
+    3. Cursor-based auto-default — only for incremental streams whose cursor
+       type is ``timestamp`` or ``date``. Emits an INFO log naming the
+       chosen column. INT / STRING cursors leave the stream unpartitioned
+       and emit a one-line WARNING with the explicit-declaration syntax.
+
+    Returns ``None`` when the stream should not be physically partitioned
+    (full-refresh streams without a declared partition, or an unsupported
+    auto-default case). The destination receives the resolved value via
+    :attr:`StreamMeta.partition`; ``None`` means "no partitioning".
+
+    # NOTE: backward-compat degradation for the short form. The short form
+    # ``partition_by: <column>`` defaults to TIME+DAY at the *type* layer
+    # (``PartitionConfig.from_short``). But several pre-existing sources
+    # (Stripe, ShipHero) declare a short form against a column that is not
+    # a TIMESTAMP/DATE (Stripe's ``created`` is an INTEGER Unix epoch with
+    # cursor_type=int). Today the destination ignores ``partition_by``
+    # entirely, so the short form has been a no-op for those sources. Once
+    # the BigQuery destination starts honoring this field, naively applying
+    # TIME+DAY to an INT column would crash every existing Stripe run.
+    #
+    # The resolver therefore degrades a short-form declaration to "no
+    # partition + WARNING" when the cursor type is INT or STRING (or when
+    # the named column's schema type isn't a TIMESTAMP/DATE). The warning
+    # text is the same as the unsupported-cursor warning — it tells the user
+    # to switch to the long form. Long-form declarations and per-config
+    # overrides are *never* degraded; those are explicit decisions.
+    """
+    # 1. Per-config override wins (always honored verbatim — long form only).
+    if stream_def.name in pipeline.partition_overrides:
+        chosen = pipeline.partition_overrides[stream_def.name]
+        log.info(
+            "stream %r: partition = %s (from pipeline.partition_overrides)",
+            stream_def.name,
+            chosen.describe(),
+        )
+        return chosen
+
+    # 2. Source-declared partition_by from register.yaml.
+    declared = stream_def.partition_by
+    if isinstance(declared, PartitionConfig):
+        log.info(
+            "stream %r: partition = %s (from source register.yaml)",
+            stream_def.name,
+            declared.describe(),
+        )
+        return declared
+    if isinstance(declared, str):
+        # Short form. Check whether TIME+DAY can actually apply to this
+        # column on this destination — see the backward-compat NOTE above.
+        if _short_form_compatible(declared, stream_def, schema):
+            chosen = PartitionConfig.from_short(declared)
+            log.info(
+                "stream %r: partition = %s (from source register.yaml, short form)",
+                stream_def.name,
+                chosen.describe(),
+            )
+            return chosen
+        # Degrade to unpartitioned + a one-line warning naming the long form.
+        log.warning(
+            "stream %r: ignoring short-form partition_by: %r — column is not "
+            "a TIMESTAMP/DATE (cursor type / schema type is incompatible with "
+            "TIME+DAY). To partition this stream, declare the long form: "
+            "partition_by: { field: %s, type: range, range: { start: ..., "
+            "end: ..., interval: ... } }",
+            stream_def.name,
+            declared,
+            declared,
+        )
+        return None
+
+    # 3. No declaration — try the cursor-based auto-default.
+    if not stream_def.is_incremental:
+        # Full-refresh stream with no declaration: no partition, no warning.
+        return None
+    inc = stream_def.incremental
+    assert inc is not None  # guarded by is_incremental
+    if inc.cursor_type in _TIME_PARTITION_CURSOR_TYPES:
+        chosen = PartitionConfig(
+            field=inc.cursor_field,
+            type=PartitionType.TIME,
+            granularity=TimeGranularity.DAY,
+        )
+        log.info(
+            "stream %r: partition = %s (auto-default from %s cursor)",
+            stream_def.name,
+            chosen.describe(),
+            inc.cursor_type.value,
+        )
+        return chosen
+    # INT / STRING cursor — no partition + warning naming the long form.
+    log.warning(
+        "stream %r: %s cursor %r cannot be auto-partitioned; declare "
+        "partition_by: explicitly with type=range or type=ingestion to "
+        "partition this stream",
+        stream_def.name,
+        inc.cursor_type.value,
+        inc.cursor_field,
+    )
+    return None
+
+
+def _validate_partition_overrides_stream_names(
+    pipeline: PipelineConfig, source: disc.LoadedConnector
+) -> None:
+    """Reject a ``partition_overrides:`` block keyed on a non-existent stream.
+
+    Raised here (not in the parser) because the parser does not know which
+    source a config will bind to. Same shape as the codebase's other
+    "unknown name → list known names" errors so the typo is debuggable from
+    the message alone.
+
+    # NOTE: design decision — the strongest long-run answer to "what happens
+    # when partition_overrides names a stream that doesn't exist?" is a hard
+    # error. Silently ignoring would let a typo (``chrages:`` for
+    # ``charges:``) ship to production with the original partition spec
+    # quietly winning, which is exactly the failure mode partition_overrides
+    # exists to prevent. Hard error here matches:
+    #   * StreamDef.__post_init__ rejecting unknown stream keys;
+    #   * PipelineConfig.from_dict rejecting unknown top-level keys;
+    #   * configs.load_config listing known configs on a typo.
+    """
+    if not pipeline.partition_overrides:
+        return
+    known_streams = {s.name for s in source.manifest.streams}
+    unknown = sorted(set(pipeline.partition_overrides) - known_streams)
+    if not unknown:
+        return
+    raise EngineError(
+        f"config {pipeline.name!r}: partition_overrides names stream(s) that "
+        f"do not exist on source {pipeline.source!r}: "
+        f"{', '.join(repr(s) for s in unknown)}; known streams: "
+        f"{', '.join(repr(s) for s in sorted(known_streams)) or '(none)'}"
+    )
+
+
+def _short_form_compatible(
+    column: str, stream_def: StreamDef, schema: Schema
+) -> bool:
+    """Whether a short-form ``partition_by: <column>`` can be TIME+DAY-mapped.
+
+    Used by :func:`_resolve_partition` to apply the backward-compat
+    degradation rule. Two signals are checked:
+
+    * the schema's declared field type for ``column`` — must be TIMESTAMP/DATE;
+    * the stream's incremental cursor_type — if the column IS the cursor
+      field, the cursor type must be TIMESTAMP/DATE too.
+
+    When the schema has no entry for the column (inferred schema, no
+    declaration), we fall back to the cursor signal alone; an inferred
+    timestamp/date works fine.
+    """
+    # Check schema type when declared.
+    field = schema.field(column)
+    if field is not None:
+        if field.type not in (FieldType.TIMESTAMP, FieldType.DATE):
+            return False
+    # Check cursor type if the column IS the cursor field.
+    inc = stream_def.incremental
+    if inc is not None and inc.cursor_field == column:
+        if inc.cursor_type not in _TIME_PARTITION_CURSOR_TYPES:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Destination hook resolution
 # ---------------------------------------------------------------------------
 
@@ -258,6 +454,7 @@ def _run_one_stream(
     hooks: Mapping[str, Callable[..., Any]],
     conn: Any,
     run_config: RunConfig,
+    pipeline: PipelineConfig,
     prior: StateRecord | None,
     log: Any,
     run_log: RunLog | None = None,
@@ -299,14 +496,6 @@ def _run_one_stream(
         available["cursor"] = cursor
     kwargs = compute_injection(registration.func, available)
 
-    if run_log is not None:
-        run_log.emit(
-            "stream_start",
-            stream=stream_def.name,
-            disposition=stream_def.write_disposition.value,
-            cursor_before=cursor_before,
-        )
-
     # -- 5b: NORMALIZE — pull the first batch and resolve the schema --------
     rows_loaded = 0
     rows_extracted = 0
@@ -322,7 +511,24 @@ def _run_one_stream(
     else:
         resolved_schema = stream_def.schema if stream_def.schema is not None else Schema()
 
-    stream_meta = StreamMeta.from_stream_def(stream_def, resolved_schema)
+    # Partition resolution needs the resolved schema (the short-form backward-
+    # compat check inspects the field type), so it lives after schema
+    # resolution and before ensure_schema. The destination's ensure_schema is
+    # the first hook that needs to know the partition spec.
+    partition = _resolve_partition(stream_def, pipeline, resolved_schema, log)
+
+    if run_log is not None:
+        run_log.emit(
+            "stream_start",
+            stream=stream_def.name,
+            disposition=stream_def.write_disposition.value,
+            cursor_before=cursor_before,
+            partition=None if partition is None else partition.describe(),
+        )
+
+    stream_meta = StreamMeta.from_stream_def(
+        stream_def, resolved_schema, partition=partition
+    )
     hooks["ensure_schema"](conn, stream_meta)
 
     # -- 5c/5d: LOAD + COMMIT — inside the per-stream transaction -----------
@@ -587,6 +793,16 @@ def run(
             pipeline.destination, project_root, list(project.destination_paths)
         )
 
+        # Validate that every partition_overrides key names an actual stream
+        # on the resolved source. The parser layer (PipelineConfig.from_dict)
+        # cannot do this — it doesn't know which source the config will bind
+        # to — so the engine does it here, as soon as both sides are known.
+        # A typo'd stream name in partition_overrides is silently ignored
+        # otherwise (the per-stream lookup just never hits), and that is the
+        # "silent drop" pattern the rest of the codebase rejects (unknown
+        # YAML keys are hard errors, unknown configs list known names).
+        _validate_partition_overrides_stream_names(pipeline, source)
+
         # -- Stage 2: RESOLVE -----------------------------------------------
         source_config = cfg.build_source_config(
             source.manifest,
@@ -664,6 +880,7 @@ def run(
                     hooks,
                     conn,
                     run_config,
+                    pipeline,
                     state_by_stream.get(stream_def.name),
                     log,
                     run_log=run_log,

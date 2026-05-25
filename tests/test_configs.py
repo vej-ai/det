@@ -296,3 +296,150 @@ def test_custom_config_paths(tmp_path: Path) -> None:
     )
     found = cfgs.discover_configs(tmp_path, ["pipelines"])
     assert "x" in found
+
+
+# --------------------------------------------------------------------------
+# partition_overrides — per-stream physical-partition overrides (docs/12, docs/05 §3.x)
+# --------------------------------------------------------------------------
+
+
+def test_partition_overrides_short_form_per_stream(tmp_path: Path) -> None:
+    """A short-form (string) per-stream override parses into a PartitionConfig."""
+    from det.types import PartitionConfig, PartitionType, TimeGranularity
+
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: stripe
+            destination: bigquery
+            partition_overrides:
+              invoices: created
+            """
+        )
+    )
+    pc = cfgs.load_config("p", tmp_path)
+    assert "invoices" in pc.partition_overrides
+    inv = pc.partition_overrides["invoices"]
+    assert isinstance(inv, PartitionConfig)
+    assert inv.type is PartitionType.TIME
+    assert inv.granularity is TimeGranularity.DAY
+    assert inv.field == "created"
+
+
+def test_partition_overrides_long_form_range(tmp_path: Path) -> None:
+    """A long-form range entry under partition_overrides parses correctly."""
+    from det.types import PartitionRange, PartitionType
+
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: stripe
+            destination: bigquery
+            partition_overrides:
+              charges:
+                field: created
+                type: range
+                range: {start: 0, end: 10000000000, interval: 86400}
+            """
+        )
+    )
+    pc = cfgs.load_config("p", tmp_path)
+    ch = pc.partition_overrides["charges"]
+    assert ch.type is PartitionType.RANGE
+    assert ch.range == PartitionRange(start=0, end=10_000_000_000, interval=86_400)
+
+
+def test_partition_overrides_mixed_short_and_long(tmp_path: Path) -> None:
+    """A single partition_overrides block accepts both forms simultaneously."""
+    from det.types import PartitionType
+
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: stripe
+            destination: bigquery
+            partition_overrides:
+              invoices: created
+              charges:
+                field: created
+                type: range
+                range: {start: 0, end: 100, interval: 10}
+            """
+        )
+    )
+    pc = cfgs.load_config("p", tmp_path)
+    assert pc.partition_overrides["invoices"].type is PartitionType.TIME
+    assert pc.partition_overrides["charges"].type is PartitionType.RANGE
+
+
+def test_partition_overrides_must_be_mapping(tmp_path: Path) -> None:
+    """A list (not mapping) under partition_overrides fails fast."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: stripe
+            destination: bigquery
+            partition_overrides:
+              - charges
+              - invoices
+            """
+        )
+    )
+    with pytest.raises(ConfigError, match="must be a mapping"):
+        cfgs.load_config("p", tmp_path)
+
+
+def test_partition_overrides_bad_long_form_surfaces_stream_name(tmp_path: Path) -> None:
+    """An invalid long-form entry names the offending stream in the error."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: stripe
+            destination: bigquery
+            partition_overrides:
+              charges:
+                field: created
+                type: range
+                # missing range block — invalid
+            """
+        )
+    )
+    with pytest.raises(ConfigError, match="partition_overrides\\['charges'\\]"):
+        cfgs.load_config("p", tmp_path)
+
+
+def test_partition_overrides_default_is_empty(tmp_path: Path) -> None:
+    """A config without partition_overrides has an empty default mapping."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        "name: p\nsource: s\ndestination: d\n"
+    )
+    pc = cfgs.load_config("p", tmp_path)
+    assert pc.partition_overrides == {}
+
+
+def test_partition_overrides_unknown_top_level_key_still_caught(tmp_path: Path) -> None:
+    """Adding partition_overrides did not allow other typos at the top level."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: s
+            destination: d
+            partition_overides: {}   # typo
+            """
+        )
+    )
+    with pytest.raises(ConfigError, match="unknown config key"):
+        cfgs.load_config("p", tmp_path)

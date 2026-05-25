@@ -172,6 +172,97 @@ This is governed by `Capability.SCHEMA_EVOLUTION`. A destination without it (rar
 
 > [Open question: should additive evolution be opt-in per stream via a `schema_contract: strict|evolve` setting in `register.yaml`? dbt-style strictness argues for `strict` as the default in production. Proposal: default `evolve`, allow `strict` opt-in. Decide before v1 freeze.]
 
+### 3.3 Partitioning
+
+Partitioning is the destination's physical-layout knob. On BigQuery a well-chosen partition cuts the scanned bytes of every query against the table (and therefore the bill) by orders of magnitude; on warehouses without native partitioning (DuckDB) the field is informational and the destination ignores it. det's contract is a single per-stream `partition_by` declaration in `register.yaml`, mirrored by an optional per-pipeline `partition_overrides:` block in a config; the engine resolves the two against the cursor type into a single `PartitionConfig` and hands it to `ensure_schema`.
+
+**Which destinations honor it (today and roadmap):**
+
+| Destination | Honored? | Mapping |
+|---|---|---|
+| BigQuery | Yes | `TIME_PARTITIONING(type, field)` / `RANGE_PARTITIONING(field, range)` |
+| DuckDB | No | Ignored — DuckDB has no native table partitioning |
+| Snowflake (future) | Planned | Clustering keys (v2+) |
+| ClickHouse (future) | Planned | `PARTITION BY` (v2+) |
+
+**Short form** (the existing column-name form):
+
+```yaml
+streams:
+  - name: shipments
+    partition_by: created_date   # defaults to TIME + DAY
+```
+
+**Long form** (new in stage 8c — for `range`, `ingestion`, or non-`day` granularities):
+
+```yaml
+streams:
+  - name: charges
+    partition_by:
+      field: created          # the column; null for ingestion-time
+      type: time              # time | range | ingestion
+      granularity: day        # for time: hour | day | month | year (default: day)
+  - name: events
+    partition_by:
+      field: ts
+      type: range
+      range:
+        start: 0
+        end: 10000000000
+        interval: 86400
+  - name: raw_logs
+    partition_by:
+      type: ingestion         # field omitted — BigQuery binds to _PARTITIONTIME
+```
+
+**Cursor-based auto-default** (when `partition_by` is unset):
+
+| Cursor type | Default |
+|---|---|
+| `timestamp` | `TIME` partitioning on the cursor field by `DAY` |
+| `date` | `TIME` partitioning on the cursor field by `DAY` |
+| `int` | unpartitioned + WARNING — declare `partition_by:` explicitly with `type=range` or `type=ingestion` |
+| `string` | unpartitioned + WARNING — same suggestion |
+
+A full-refresh stream (no `incremental` block) without a declared `partition_by` is left unpartitioned silently — there is no cursor to anchor an auto-default to.
+
+The resolved partition is logged on the run's `stream_start` event (chapter 9) so the choice is observable.
+
+**Per-config overrides — `partition_overrides:`:** a `configs/<name>.yml` may override the source's `partition_by` on a per-stream basis. Same precedence as other per-config layers — the config wins on conflict.
+
+```yaml
+# configs/stripe_bq.yml
+name: stripe_bq
+source: stripe
+destination: bigquery
+target: dev
+partition_overrides:
+  charges:
+    field: created
+    type: range
+    range: {start: 1577836800, end: 1893456000, interval: 86400}
+  invoices: created      # short-form override per stream
+```
+
+The full resolution chain (highest → lowest precedence): `partition_overrides[stream]` → `StreamDef.partition_by` → cursor-based auto-default → `None` (no partition).
+
+**Backward compat for the short form on a non-time column:** several pre-existing sources (Stripe, ShipHero) declare a short-form `partition_by` against a column that is an INTEGER (a Unix epoch under `cursor_type: int`) or otherwise not time-typed. Before stage 8c the destination ignored `partition_by` entirely; once the BigQuery destination starts honoring it, naively mapping the short form to `TIME+DAY` on an INTEGER column would crash every existing run. The engine therefore **degrades** a short-form declaration to "no partition + WARNING" when the column type isn't a `TIMESTAMP` / `DATE` (and emits the explicit-declaration suggestion). Long-form declarations and per-config overrides are *never* degraded — those are explicit decisions.
+
+**Partition drift on existing tables — hard error.** BigQuery cannot change an existing table's partitioning in place. If a config requests a partition spec that does not match the existing table, `ensure_schema` raises with a message naming both specs and the suggested operator action:
+
+```
+table 'charges' already exists with partitioning=created (TIME/DAY); new
+config says created (TIME/HOUR). BigQuery cannot change an existing table's
+partitioning in place. To resolve: either (a) run `det state reset -p
+<config> --recreate-table` after backing up the table to recreate it with
+the new partition spec, or (b) change the config to match the existing
+partition spec.
+```
+
+(The `--recreate-table` flag on `det state reset` is a planned future stage; today's manual equivalent is `CREATE TABLE bak AS SELECT * ...` → `DROP TABLE` → `det state reset -p <config>` → re-run.)
+
+This also fires when the existing table is **unpartitioned** and the config requests a partition (and vice versa): silently ignoring the conflict would let writes drift from intent, so the rule is symmetric.
+
 ---
 
 ## 4. Write dispositions

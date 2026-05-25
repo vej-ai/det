@@ -26,6 +26,9 @@ from det.types import (
     Incremental,
     ParamSpec,
     ParamType,
+    PartitionConfig,
+    PartitionRange,
+    PartitionType,
     Record,
     RunConfig,
     RunResult,
@@ -39,6 +42,7 @@ from det.types import (
     StreamDef,
     StreamResult,
     StreamStatus,
+    TimeGranularity,
     WriteDisposition,
 )
 
@@ -759,3 +763,191 @@ def test_batch_and_record_aliases() -> None:
     batch: Batch = [rec, {"id": "ship_2"}]
     assert isinstance(batch, list)
     assert isinstance(batch[0], dict)
+
+
+# ---------------------------------------------------------------------------
+# PartitionConfig — short / long forms, validation (docs/05 §3.x)
+# ---------------------------------------------------------------------------
+
+
+def test_partition_config_from_short_defaults_to_time_day() -> None:
+    """The short form (column name only) becomes TIME+DAY."""
+    pc = PartitionConfig.from_short("created_date")
+    assert pc.field == "created_date"
+    assert pc.type is PartitionType.TIME
+    assert pc.granularity is TimeGranularity.DAY
+    assert pc.range is None
+
+
+def test_partition_config_from_dict_short_form_string() -> None:
+    """from_dict accepts a bare string as the short form."""
+    pc = PartitionConfig.from_dict("created_date")
+    assert pc == PartitionConfig.from_short("created_date")
+
+
+def test_partition_config_from_dict_long_form_time() -> None:
+    """Long form: field + type=time + granularity."""
+    pc = PartitionConfig.from_dict(
+        {"field": "created", "type": "time", "granularity": "hour"}
+    )
+    assert pc.field == "created"
+    assert pc.type is PartitionType.TIME
+    assert pc.granularity is TimeGranularity.HOUR
+
+
+def test_partition_config_from_dict_long_form_time_default_granularity() -> None:
+    """Long form type=time without granularity defaults to DAY (the convention)."""
+    pc = PartitionConfig.from_dict({"field": "created", "type": "time"})
+    assert pc.granularity is TimeGranularity.DAY
+
+
+def test_partition_config_from_dict_long_form_range() -> None:
+    """Long form: field + type=range + range block."""
+    pc = PartitionConfig.from_dict(
+        {
+            "field": "created",
+            "type": "range",
+            "range": {"start": 0, "end": 10_000_000_000, "interval": 86_400},
+        }
+    )
+    assert pc.type is PartitionType.RANGE
+    assert pc.range == PartitionRange(start=0, end=10_000_000_000, interval=86_400)
+    assert pc.granularity is None
+
+
+def test_partition_config_from_dict_long_form_ingestion() -> None:
+    """Long form: type=ingestion with no field is valid."""
+    pc = PartitionConfig.from_dict({"type": "ingestion"})
+    assert pc.field is None
+    assert pc.type is PartitionType.INGESTION
+
+
+def test_partition_config_rejects_unknown_top_level_key() -> None:
+    """A typo at the top level fails fast — never silently dropped."""
+    with pytest.raises(ValueError, match="unknown partition_by key"):
+        PartitionConfig.from_dict(
+            {"field": "x", "type": "time", "graunlarity": "day"}
+        )
+
+
+def test_partition_config_requires_type() -> None:
+    """A mapping without 'type' fails — there is no sensible default for it."""
+    with pytest.raises(ValueError, match="requires a 'type'"):
+        PartitionConfig.from_dict({"field": "x"})
+
+
+def test_partition_config_time_requires_field() -> None:
+    """type=time without a field is invalid (no pseudo-column for TIME)."""
+    with pytest.raises(ValueError, match="requires a 'field'"):
+        PartitionConfig(field=None, type=PartitionType.TIME, granularity=TimeGranularity.DAY)
+
+
+def test_partition_config_time_forbids_range_block() -> None:
+    """type=time + range block — incompatible combination."""
+    with pytest.raises(ValueError, match="must not declare a 'range'"):
+        PartitionConfig(
+            field="x",
+            type=PartitionType.TIME,
+            granularity=TimeGranularity.DAY,
+            range=PartitionRange(start=0, end=1, interval=1),
+        )
+
+
+def test_partition_config_range_requires_range_block() -> None:
+    """type=range without a range block — missing required configuration."""
+    with pytest.raises(ValueError, match="requires a 'range' block"):
+        PartitionConfig(field="x", type=PartitionType.RANGE)
+
+
+def test_partition_config_range_forbids_granularity() -> None:
+    """type=range + granularity — incompatible combination."""
+    with pytest.raises(ValueError, match="must not declare a 'granularity'"):
+        PartitionConfig(
+            field="x",
+            type=PartitionType.RANGE,
+            granularity=TimeGranularity.DAY,
+            range=PartitionRange(start=0, end=1, interval=1),
+        )
+
+
+def test_partition_config_ingestion_forbids_field() -> None:
+    """type=ingestion with a field — BigQuery binds to _PARTITIONTIME, no column."""
+    with pytest.raises(ValueError, match="must not declare a 'field'"):
+        PartitionConfig(field="x", type=PartitionType.INGESTION)
+
+
+def test_partition_config_ingestion_forbids_granularity_and_range() -> None:
+    """type=ingestion implies DAY bucket; granularity/range must be absent."""
+    with pytest.raises(ValueError, match="must not declare a 'granularity'"):
+        PartitionConfig(
+            field=None,
+            type=PartitionType.INGESTION,
+            granularity=TimeGranularity.HOUR,
+        )
+    with pytest.raises(ValueError, match="must not declare a 'range'"):
+        PartitionConfig(
+            field=None,
+            type=PartitionType.INGESTION,
+            range=PartitionRange(start=0, end=1, interval=1),
+        )
+
+
+def test_partition_range_from_dict_rejects_unknown_key() -> None:
+    """A typo inside the range block is a hard error."""
+    with pytest.raises(ValueError, match="unknown partition.range key"):
+        PartitionRange.from_dict({"start": 0, "end": 1, "interval": 1, "step": 2})
+
+
+def test_partition_range_from_dict_requires_all_three_keys() -> None:
+    """start / end / interval are all required."""
+    with pytest.raises(ValueError, match="requires a 'end'"):
+        PartitionRange.from_dict({"start": 0, "interval": 1})
+
+
+def test_partition_config_describe_shapes() -> None:
+    """describe() renders each PartitionType into a stable, log-friendly form."""
+    time_pc = PartitionConfig(
+        field="created", type=PartitionType.TIME, granularity=TimeGranularity.DAY
+    )
+    assert time_pc.describe() == "created (TIME/DAY)"
+    range_pc = PartitionConfig(
+        field="created",
+        type=PartitionType.RANGE,
+        range=PartitionRange(start=0, end=100, interval=10),
+    )
+    assert range_pc.describe() == "created (RANGE 0..100/10)"
+    ingestion_pc = PartitionConfig(field=None, type=PartitionType.INGESTION)
+    assert ingestion_pc.describe() == "_PARTITIONTIME (INGESTION/DAY)"
+
+
+# ---------------------------------------------------------------------------
+# StreamDef.partition_by accepts short string OR long PartitionConfig
+# ---------------------------------------------------------------------------
+
+
+def test_stream_def_partition_by_short_string_round_trips() -> None:
+    """A YAML short form ``partition_by: created`` stays as a string on the StreamDef."""
+    sd = StreamDef.from_dict({"name": "rows", "partition_by": "created"})
+    assert sd.partition_by == "created"
+
+
+def test_stream_def_partition_by_long_form_parses() -> None:
+    """A YAML long form parses into a PartitionConfig at StreamDef build time."""
+    sd = StreamDef.from_dict(
+        {
+            "name": "rows",
+            "partition_by": {
+                "field": "created",
+                "type": "range",
+                "range": {"start": 0, "end": 100, "interval": 10},
+            },
+        }
+    )
+    assert isinstance(sd.partition_by, PartitionConfig)
+    assert sd.partition_by.type is PartitionType.RANGE
+
+
+def test_stream_def_partition_by_rejects_bad_shape() -> None:
+    """A non-string, non-mapping partition_by (e.g. a list) fails at parse time."""
+    with pytest.raises(ValueError, match="partition_by must be"):
+        StreamDef.from_dict({"name": "rows", "partition_by": [1, 2, 3]})

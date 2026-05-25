@@ -100,7 +100,7 @@ the per-table block in the ShipHero `config.json` proof case.
 | `write_disposition` | enum: `append` \| `merge` \| `replace` | No | `append` | How records land. `merge` = upsert on `primary_key`. `replace` = truncate then load. `append` = insert only. |
 | `incremental` | Incremental block | No | `null` | Cursor-based incremental config. Absence ⇒ full table every run. See below. |
 | `schema` | list[Field] | No | `null` (infer) | Explicit column definitions. See §2.2.1. |
-| `partition_by` | string | No | `null` | Column the destination should physically partition on (e.g. a date column). Destination-dependent; ignored by destinations that lack partitioning. |
+| `partition_by` | string \| mapping | No | `null` | Physical-partition declaration. Short form: a bare column name (`partition_by: created_date`) — defaults to `TIME` partitioning at `DAY` granularity. Long form: a mapping with `field` / `type` (`time` / `range` / `ingestion`) / optional `granularity` / optional `range`. See [05 §3.3](./05-destinations-and-state.md#33-partitioning). A per-pipeline `partition_overrides:` block in a config can override this on a per-stream basis. Honored by BigQuery; ignored by destinations that lack native partitioning (DuckDB). |
 | `params` | map[string → ParamSpec] | No | `{}` | Stream-scoped params, merged over connector-level `params`. |
 
 #### The `incremental` block

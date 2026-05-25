@@ -32,23 +32,37 @@ from det import (
     Field,
     FieldMode,
     FieldType,
+    PartitionConfig,
+    PartitionRange,
+    PartitionType,
     RunRecord,
     RunStatus,
     Schema,
     StateRecord,
     StreamMeta,
     StreamResult,
+    TimeGranularity,
     WriteDisposition,
 )
 from det.destinations.bigquery import client as bq_client_mod
 from det.destinations.bigquery.ddl import (
     bigquery_mode,
     bigquery_type,
+    compare_partition,
+    existing_table_partition,
     fq_table,
     merge_sql,
     quote_identifier,
     validate_identifier,
 )
+
+# # NOTE: ``PartitionDriftError`` itself is intentionally NOT imported here.
+# The connector-folder harness reloads ``destination.py`` under a unique
+# synthetic module name, so the class object that the hooks raise is NOT the
+# same Python object as one imported from the canonical
+# ``det.destinations.bigquery.destination`` module path. Tests check the
+# raised exception via its parent type (``RuntimeError``) and its message
+# substring — both stable across the harness's re-import.
 from tests.conftest import LoadedConnector, load_connector
 
 # --------------------------------------------------------------------------
@@ -230,6 +244,45 @@ class _FakeTable:
         self.project = ref.project
         self.dataset_id = ref.dataset
         self.table_id = ref.table_id
+        # Partition handles — set by apply_partitioning_to_table when the
+        # destination requests one. Either time or range, never both.
+        self.time_partitioning: _FakeTimePartitioning | None = None
+        self.range_partitioning: _FakeRangePartitioning | None = None
+
+
+class _FakeTimePartitioning:
+    """Stand-in for ``bigquery.TimePartitioning``."""
+
+    def __init__(self, type_: str = "DAY", field: str | None = None) -> None:
+        self.type_ = type_
+        self.field = field
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _FakeTimePartitioning):
+            return NotImplemented
+        return self.type_ == other.type_ and self.field == other.field
+
+    def __repr__(self) -> str:
+        return f"_FakeTimePartitioning({self.type_!r}, field={self.field!r})"
+
+
+class _FakePartitionRange:
+    """Stand-in for ``bigquery.PartitionRange``."""
+
+    def __init__(self, start: int, end: int, interval: int) -> None:
+        self.start = start
+        self.end = end
+        self.interval = interval
+
+
+class _FakeRangePartitioning:
+    """Stand-in for ``bigquery.RangePartitioning``."""
+
+    def __init__(
+        self, field: str | None = None, range_: _FakePartitionRange | None = None
+    ) -> None:
+        self.field = field
+        self.range_ = range_
 
 
 class _FakeDataset:
@@ -378,6 +431,13 @@ class _FakeBigQueryModule:
     QueryJobConfig = _FakeQueryJobConfig
     ScalarQueryParameter = _FakeScalarQueryParameter
     SourceFormat = _FakeSourceFormat
+    # Partition SDK objects — added in stage 8c. The destination calls
+    # ``bq.TimePartitioning(...)`` / ``bq.RangePartitioning(...)`` /
+    # ``bq.PartitionRange(...)`` via the lazy module accessor; these fakes
+    # let the unit tests assert on the resulting attributes.
+    TimePartitioning = _FakeTimePartitioning
+    RangePartitioning = _FakeRangePartitioning
+    PartitionRange = _FakePartitionRange
 
 
 @pytest.fixture
@@ -740,6 +800,298 @@ def test_ensure_schema_idempotent_when_table_unchanged(
     hooks["ensure_schema"](conn, _events_meta())  # no raise, no update_table call
 
     assert conn.client.bq.updated_tables == []
+
+
+# --------------------------------------------------------------------------
+# ensure_schema — partitioning (docs/05 §3.x)
+# --------------------------------------------------------------------------
+
+
+def _events_meta_with_partition(partition: PartitionConfig | None) -> StreamMeta:
+    """Same shape as ``_events_meta`` but with a resolved partition spec."""
+    base = _events_meta()
+    return StreamMeta(
+        table=base.table,
+        write_disposition=base.write_disposition,
+        schema=base.schema,
+        primary_key=base.primary_key,
+        partition=partition,
+    )
+
+
+def test_ensure_schema_creates_time_partitioned_table(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """A TIME partition resolves to time_partitioning on the created table."""
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    # field name is from the schema; the BQ create path doesn't care about
+    # the actual FieldType (the partition spec lives on table.time_partitioning).
+    meta = _events_meta_with_partition(
+        PartitionConfig(
+            field="payload",
+            type=PartitionType.TIME,
+            granularity=TimeGranularity.DAY,
+        )
+    )
+    hooks["ensure_schema"](conn, meta)
+
+    created = conn.client.bq.created_tables[0]
+    assert created.time_partitioning is not None
+    assert created.time_partitioning.type_ == "DAY"
+    assert created.time_partitioning.field == "payload"
+    assert created.range_partitioning is None
+
+
+def test_ensure_schema_creates_range_partitioned_table(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """A RANGE partition resolves to range_partitioning on the created table."""
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    meta = _events_meta_with_partition(
+        PartitionConfig(
+            field="id",
+            type=PartitionType.RANGE,
+            range=PartitionRange(start=0, end=100, interval=10),
+        )
+    )
+    hooks["ensure_schema"](conn, meta)
+
+    created = conn.client.bq.created_tables[0]
+    assert created.range_partitioning is not None
+    assert created.range_partitioning.field == "id"
+    assert created.range_partitioning.range_.start == 0
+    assert created.range_partitioning.range_.end == 100
+    assert created.range_partitioning.range_.interval == 10
+    assert created.time_partitioning is None
+
+
+def test_ensure_schema_creates_ingestion_partitioned_table(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """An INGESTION partition resolves to time_partitioning(field=None, DAY)."""
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    meta = _events_meta_with_partition(
+        PartitionConfig(field=None, type=PartitionType.INGESTION)
+    )
+    hooks["ensure_schema"](conn, meta)
+
+    created = conn.client.bq.created_tables[0]
+    assert created.time_partitioning is not None
+    assert created.time_partitioning.type_ == "DAY"
+    assert created.time_partitioning.field is None
+
+
+def test_ensure_schema_unpartitioned_when_partition_none(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """``stream.partition = None`` creates an unpartitioned table (today's behavior)."""
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    hooks["ensure_schema"](conn, _events_meta_with_partition(None))
+
+    created = conn.client.bq.created_tables[0]
+    assert created.time_partitioning is None
+    assert created.range_partitioning is None
+
+
+def test_ensure_schema_existing_table_matching_partition_succeeds(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """Re-running ensure_schema against a table with the same partition succeeds."""
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+    partition = PartitionConfig(
+        field="payload",
+        type=PartitionType.TIME,
+        granularity=TimeGranularity.DAY,
+    )
+    hooks["ensure_schema"](conn, _events_meta_with_partition(partition))
+    # The second call sees the now-existing table — same partition, should succeed.
+    hooks["ensure_schema"](conn, _events_meta_with_partition(partition))
+
+
+def test_ensure_schema_existing_table_mismatched_partition_raises(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """Partition drift raises with a message naming both specs + the fix suggestion."""
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    original = PartitionConfig(
+        field="payload",
+        type=PartitionType.TIME,
+        granularity=TimeGranularity.DAY,
+    )
+    hooks["ensure_schema"](conn, _events_meta_with_partition(original))
+
+    # Now ask for a different granularity — drift.
+    new = PartitionConfig(
+        field="payload",
+        type=PartitionType.TIME,
+        granularity=TimeGranularity.HOUR,
+    )
+    with pytest.raises(RuntimeError) as ei:
+        hooks["ensure_schema"](conn, _events_meta_with_partition(new))
+    msg = str(ei.value)
+    # The message must include the existing spec, the requested spec, and the
+    # actionable resolution suggestion.
+    assert "TIME/DAY" in msg
+    assert "TIME/HOUR" in msg
+    assert "det state reset" in msg
+    assert "BigQuery cannot change an existing table" in msg
+
+
+def test_ensure_schema_existing_unpartitioned_table_vs_requested_partition_raises(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """An unpartitioned existing table + newly-declared partition is also drift."""
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    hooks["ensure_schema"](conn, _events_meta_with_partition(None))
+
+    requested = PartitionConfig(
+        field="payload",
+        type=PartitionType.TIME,
+        granularity=TimeGranularity.DAY,
+    )
+    with pytest.raises(RuntimeError) as ei:
+        hooks["ensure_schema"](conn, _events_meta_with_partition(requested))
+    msg = str(ei.value)
+    assert "(unpartitioned)" in msg
+    assert "TIME/DAY" in msg
+
+
+def test_ensure_schema_existing_partitioned_table_vs_no_partition_raises(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """A partitioned existing table + newly-declared 'no partition' is also drift.
+
+    The user removed the partition declaration — the engine refuses to silently
+    accept the conflict; either restore the declaration or recreate the table.
+    """
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    original = PartitionConfig(
+        field="payload",
+        type=PartitionType.TIME,
+        granularity=TimeGranularity.DAY,
+    )
+    hooks["ensure_schema"](conn, _events_meta_with_partition(original))
+
+    with pytest.raises(RuntimeError) as ei:
+        hooks["ensure_schema"](conn, _events_meta_with_partition(None))
+    msg = str(ei.value)
+    assert "TIME/DAY" in msg
+    assert "(unpartitioned)" in msg
+
+
+# --------------------------------------------------------------------------
+# ddl.compare_partition — unit-tested directly (the drift comparison core)
+# --------------------------------------------------------------------------
+
+
+def test_compare_partition_unpartitioned_vs_unpartitioned_matches() -> None:
+    """An existing table with no partition + no requested partition is a match."""
+
+    fake = _FakeTable(_FakeTableReference(_FakeDatasetReference("p", "d"), "t"))
+    status, msg = compare_partition(fake, None)
+    assert status == "match"
+    assert msg is None
+
+
+def test_existing_table_partition_extracts_time_spec() -> None:
+    """existing_table_partition correctly normalizes a fake's time_partitioning."""
+
+    fake = _FakeTable(_FakeTableReference(_FakeDatasetReference("p", "d"), "t"))
+    fake.time_partitioning = _FakeTimePartitioning(type_="HOUR", field="created")
+    pc = existing_table_partition(fake)
+    assert pc is not None
+    assert pc.type is PartitionType.TIME
+    assert pc.granularity is TimeGranularity.HOUR
+    assert pc.field == "created"
+
+
+def test_existing_table_partition_extracts_range_spec() -> None:
+    """existing_table_partition correctly normalizes a fake's range_partitioning."""
+
+    fake = _FakeTable(_FakeTableReference(_FakeDatasetReference("p", "d"), "t"))
+    fake.range_partitioning = _FakeRangePartitioning(
+        field="id",
+        range_=_FakePartitionRange(start=0, end=100, interval=10),
+    )
+    pc = existing_table_partition(fake)
+    assert pc is not None
+    assert pc.type is PartitionType.RANGE
+    assert pc.field == "id"
+    assert pc.range == PartitionRange(start=0, end=100, interval=10)
+
+
+def test_existing_table_partition_extracts_ingestion_spec() -> None:
+    """existing_table_partition normalizes time_partitioning with field=None to INGESTION."""
+
+    fake = _FakeTable(_FakeTableReference(_FakeDatasetReference("p", "d"), "t"))
+    fake.time_partitioning = _FakeTimePartitioning(type_="DAY", field=None)
+    pc = existing_table_partition(fake)
+    assert pc is not None
+    assert pc.type is PartitionType.INGESTION
+    assert pc.field is None
+
+
+# The ``PartitionDriftError`` class itself is exercised indirectly: every
+# mismatch test above relies on it being a ``RuntimeError`` subclass (the
+# class name is asserted via ``__class__.__name__`` on the raised instance).
+def test_partition_drift_error_class_name(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """The exception raised on partition drift is named ``PartitionDriftError``."""
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    original = PartitionConfig(
+        field="payload",
+        type=PartitionType.TIME,
+        granularity=TimeGranularity.DAY,
+    )
+    hooks["ensure_schema"](conn, _events_meta_with_partition(original))
+
+    new = PartitionConfig(
+        field="payload",
+        type=PartitionType.TIME,
+        granularity=TimeGranularity.HOUR,
+    )
+    try:
+        hooks["ensure_schema"](conn, _events_meta_with_partition(new))
+    except RuntimeError as exc:
+        assert type(exc).__name__ == "PartitionDriftError"
+    else:
+        pytest.fail("expected PartitionDriftError to be raised")
 
 
 # --------------------------------------------------------------------------
@@ -1322,5 +1674,108 @@ def test_integration_round_trip_against_live_bigquery(
             client = bq.Client(project=project)
             client.delete_table(f"{project}.{dataset}.{table}", not_found_ok=True)
         except Exception:  # noqa: BLE001 — cleanup; logged below if it matters
+            pass
+        hooks["close"](conn)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _have_live_creds(), reason="needs live BigQuery (set BIGQUERY_TEST_*)")
+def test_integration_partition_auto_default_and_drift_against_live_bigquery(
+    bigquery_destination: LoadedConnector,
+) -> None:
+    """End-to-end partitioning: create with TIME+DAY, reread the spec, then trigger drift.
+
+    Three phases:
+
+    1. ``ensure_schema`` with a TIME+DAY partition spec → ``get_table().time_partitioning``
+       must show DAY/<field>.
+    2. ``write_batch`` lands rows into the partitioned table.
+    3. ``ensure_schema`` with a DIFFERENT partition spec on the same table →
+       raises ``PartitionDriftError`` (a ``RuntimeError`` subclass) with the
+       expected message shape.
+
+    Only runs when ``BIGQUERY_TEST_PROJECT`` / ``BIGQUERY_TEST_DATASET`` /
+    ``BIGQUERY_TEST_STAGING_BUCKET`` env vars are set. Drops the test
+    table at the end.
+    """
+    project = os.environ["BIGQUERY_TEST_PROJECT"]
+    dataset = os.environ["BIGQUERY_TEST_DATASET"]
+    staging = os.environ["BIGQUERY_TEST_STAGING_BUCKET"]
+    unique = uuid.uuid4().hex[:8]
+    table = f"det_it_part_{unique}"
+
+    hooks = _hooks(bigquery_destination)
+    conn = hooks["open"](
+        Config(
+            params={
+                "project": project,
+                "dataset": dataset,
+                "staging_bucket": staging,
+            }
+        )
+    )
+    try:
+        from datetime import UTC as _UTC  # noqa: PLC0415 — local
+        from datetime import datetime as _dt
+
+        meta = StreamMeta(
+            table=table,
+            write_disposition=WriteDisposition.APPEND,
+            schema=Schema(
+                fields=(
+                    Field(name="id", type=FieldType.INTEGER, mode=FieldMode.REQUIRED),
+                    Field(
+                        name="created_at",
+                        type=FieldType.TIMESTAMP,
+                        mode=FieldMode.REQUIRED,
+                    ),
+                )
+            ),
+            partition=PartitionConfig(
+                field="created_at",
+                type=PartitionType.TIME,
+                granularity=TimeGranularity.DAY,
+            ),
+        )
+        hooks["ensure_schema"](conn, meta)
+        # Re-read the table to verify the partition landed.
+        from google.cloud import bigquery as bq  # noqa: PLC0415 — local
+        client = bq.Client(project=project)
+        table_ref = client.get_table(f"{project}.{dataset}.{table}")
+        assert table_ref.time_partitioning is not None
+        assert str(table_ref.time_partitioning.type_).upper() == "DAY"
+        assert table_ref.time_partitioning.field == "created_at"
+
+        n = hooks["write_batch"](
+            conn,
+            [
+                {"id": 1, "created_at": _dt(2026, 1, 1, tzinfo=_UTC)},
+                {"id": 2, "created_at": _dt(2026, 1, 2, tzinfo=_UTC)},
+            ],
+            meta,
+        )
+        assert n == 2
+
+        # Drift: same table, different partition spec → expect RuntimeError.
+        drift_meta = StreamMeta(
+            table=table,
+            write_disposition=WriteDisposition.APPEND,
+            schema=meta.schema,
+            partition=PartitionConfig(
+                field="created_at",
+                type=PartitionType.TIME,
+                granularity=TimeGranularity.HOUR,
+            ),
+        )
+        with pytest.raises(RuntimeError) as ei:
+            hooks["ensure_schema"](conn, drift_meta)
+        assert "TIME/DAY" in str(ei.value)
+        assert "TIME/HOUR" in str(ei.value)
+    finally:
+        try:
+            from google.cloud import bigquery as bq  # noqa: PLC0415 — local cleanup
+            client = bq.Client(project=project)
+            client.delete_table(f"{project}.{dataset}.{table}", not_found_ok=True)
+        except Exception:  # noqa: BLE001 — cleanup
             pass
         hooks["close"](conn)
