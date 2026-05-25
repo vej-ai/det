@@ -40,10 +40,17 @@ from det import destination, Capability, Config, Batch, StreamMeta, StateRecord
 def capabilities() -> set[Capability]:
     """Declare what this destination can do. Drives engine behavior."""
     return {
-        Capability.STATE,          # Tier A: can store state in itself
-        Capability.MERGE,          # supports upsert write disposition
+        Capability.STATE,             # Tier A: can store state in itself
+        Capability.MERGE,             # supports upsert write disposition
         Capability.SCHEMA_EVOLUTION,  # can ALTER TABLE ADD COLUMN
-        Capability.TRANSACTIONAL_LOAD,  # load + state commit are atomic-ish
+        Capability.RUN_RECORDS,       # hosts the _det_runs audit table
+        # NOTE: TRANSACTIONAL_LOAD is intentionally NOT declared in v1 —
+        # BigQuery's atomic unit is one LOAD / one MERGE, so the engine
+        # gets per-batch atomicity (each batch commits cleanly; the
+        # cursor only advances after all batches of a stream succeed).
+        # The honest design — a buffer-then-MERGE-once alternative would
+        # break the streaming-load promise. A future opt-in
+        # `staged_merge: true` param could change this.
     }
 
 @destination.open
@@ -113,7 +120,7 @@ det ships destinations **inside the `det` package**. They are referenced by shor
 | Destination | How it loads | Tier | v1? |
 |---|---|---|---|
 | **DuckDB** | Local `.duckdb` file; `INSERT` / `INSERT ... ON CONFLICT`. Zero-config dev default. | A | **v1** |
-| **BigQuery** | Batches staged as Parquet to a temp GCS prefix, then `LOAD` job; merge via `MERGE` statement. | A | **v1** |
+| **BigQuery** | Batches staged as Parquet to a temp GCS prefix, then `LOAD` job; `replace` uses `WRITE_TRUNCATE` on the first batch then `WRITE_APPEND`; `merge` loads to a per-batch staging table then runs `MERGE INTO ... ON pk`. Declares 4 of 5 capabilities (no `TRANSACTIONAL_LOAD` — see chapter 05 §5.3 and the destination README). | A | **v1** |
 | **Postgres** | `COPY` into a staging table, then `INSERT`/`MERGE` into target. | A | v2 |
 | **Snowflake** | `PUT` Parquet to internal stage, `COPY INTO`, merge via `MERGE`. | A | v2 |
 | **ClickHouse** | Native protocol batch `INSERT`; merge via `ReplacingMergeTree` + `FINAL` or insert-then-dedup. | A | v2 |
@@ -242,6 +249,46 @@ The non-negotiable rule: **state is committed only after the data load fully suc
 `commit_state` receives **all** stream state records for the run and writes them in a single transaction where the destination supports it (`Capability.TRANSACTIONAL_LOAD`). For `replace`-disposition streams using staging-table swap, the state commit is folded into the same transaction as the swap, so data and cursor flip together.
 
 Crash semantics: if step 3 fails after step 2 succeeded, the run is reported `failed`; the next run re-loads the same window. Safe for `merge`/`replace`, at-least-once for `append`.
+
+> # NOTE: BigQuery in v1 does NOT declare `TRANSACTIONAL_LOAD`. BigQuery has
+> no general `BEGIN`/`COMMIT` spanning multiple jobs — each LOAD / MERGE is
+> the natural atomic unit. det chooses per-batch atomicity (the engine wraps
+> each stream in `nullcontext()`) over a buffer-then-MERGE-once alternative
+> that would break the streaming-load promise. A future opt-in
+> `staged_merge: true` param could change this.
+
+#### BigQuery — the load mechanism in detail
+
+This is non-obvious for someone reading the destination contract for the
+first time. The pre-baked BigQuery destination implements `write_batch`
+per the catalog row above:
+
+1. Serialize the batch to Parquet bytes (in-memory, via `pyarrow`).
+2. Upload to `gs://{staging_bucket}/{staging_prefix}/{run_suffix}/{table}/batch-{uuid}.parquet`
+   (object names use opaque uuids so an HTTP error message never leaks
+   record content; the per-run `run_suffix` keeps concurrent runs apart).
+3. Trigger a BigQuery `LOAD` job from that URI:
+   - `append` → target table, `WRITE_APPEND`.
+   - `replace`, first batch of run → target table, `WRITE_TRUNCATE`;
+     subsequent batches → `WRITE_APPEND` (so a multi-batch replace
+     stream truncates exactly once).
+   - `merge` → a per-batch staging table `{target}__staging_{run_suffix}_{uuid}`,
+     `WRITE_TRUNCATE`; then run `MERGE INTO target USING staging ON pk
+     WHEN MATCHED UPDATE ... WHEN NOT MATCHED INSERT ...`; then drop
+     the staging table in a `finally`.
+4. Wait for job completion with exponential-backoff retry on transient
+   `429 / 500 / 502 / 503 / 504`. A non-retryable 4xx surfaces
+   immediately.
+5. On success: delete the staging Parquet object from GCS.
+   On failure: **leave it in place** for forensics — an operator can
+   inspect the source the failed LOAD pulled from. The MERGE staging
+   *table* is always dropped (success or failure) so a failed run does
+   not leak per-batch tables in BigQuery.
+
+Engine-owned tables on BigQuery: `_det_state` and `_det_runs`, in the
+destination's dataset, prefixed `_det_` so they sort away from user
+tables. Same column names + types as the DuckDB destination so an admin
+/ UI / cross-warehouse tool queries both backends identically.
 
 > [Open question: per-batch ("streaming") state commit for very large backfills, so a crash 90% through doesn't restart from zero. This trades the clean all-or-nothing model for partial progress. Proposal: keep whole-run commit in v1; add opt-in `state_granularity: batch` in v2 for streams that declare a monotonic cursor.]
 

@@ -44,6 +44,11 @@ dev = [
 parquet = ["pyarrow>=15"]
 gcs = ["google-cloud-storage>=2.10"]
 s3 = ["boto3>=1.28"]
+bigquery = [
+    "google-cloud-bigquery>=3.20",
+    "google-cloud-storage>=2.10",
+    "pyarrow>=15",
+]
 
 [project.scripts]
 det = "det.cli:main"

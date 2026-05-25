@@ -222,7 +222,11 @@ def _lazy_import_gcs() -> Any:
     hitting a ``gs://`` path without the extra installed has a one-line fix.
     """
     try:
-        from google.cloud import storage as gcs_storage  # type: ignore[import-not-found]
+        # NOTE: google-cloud-storage is a namespace package without py.typed,
+        # so mypy reports `attr-defined` on `google.cloud.storage` even when
+        # the package is installed. The ImportError branch handles the
+        # genuinely-missing case at runtime.
+        from google.cloud import storage as gcs_storage  # type: ignore[attr-defined]
     except ImportError as exc:  # pragma: no cover — tested via monkeypatch.
         raise ImportError(
             "the filesystem connector needs `google-cloud-storage` to read gs:// URIs; "
