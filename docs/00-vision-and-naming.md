@@ -11,15 +11,17 @@ moves data from a **source** (an API, a database, a file drop) into a
 **destination** (a warehouse, a database, an object store) and nothing more.
 Transformation is somebody else's job — dbt's, specifically.
 
-The mental model is **"dlt meets dbt"**:
+The mental model is **a dbt-shaped extract-load tool**:
 
-- From **dlt**: connectors are ordinary Python — generator functions decorated
-  with `@stream` / `@resource` — and pipeline **state lives in the destination**,
-  not in a control plane.
-- From **dbt**: you work in a **project folder** of plain files, run it with a
-  CLI (`det run`), select work with **tags**, and configure environments
-  with **profiles**. The engine is a pip-installable library; the project is
-  yours and lives in your repo, under version control, reviewable in a PR.
+- **Connectors are ordinary Python** — generator functions decorated with
+  `@stream` / `@resource`. No subclasses to learn, no plugin system to fight.
+- **Pipeline state lives in the destination**, not in a control plane —
+  `_det_state` is a row in your warehouse alongside the data it tracks.
+- **You work in a project folder** of plain files, run it with a CLI
+  (`det run`), select work with **configs**, and configure environments with
+  **profiles** — same shape as a dbt project. The engine is a pip-installable
+  library; the project is yours and lives in your repo, under version control,
+  reviewable in a PR.
 
 det has three faces, and they are equal first-class citizens:
 

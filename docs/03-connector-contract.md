@@ -14,11 +14,11 @@ it produces, where data lands, and what each stream's table/keys/schema look
 like. The Python files are the *implementation*: the actual extract/load logic,
 wrapped in decorators.
 
-This split is the "dlt meets dbt" cut. dbt's `dbt_project.yml` and schema YAML
-declare structure; the `.sql` files carry logic. det does the same. We do
-**not** push request payloads, pagination paths, or query strings into YAML —
-that road leads to Airbyte's config-driven YAML blackbox, which is explicitly
-what det is not.
+This split mirrors dbt: `dbt_project.yml` and schema YAML declare structure;
+the `.sql` files carry logic. det does the same with `register.yaml` and
+`source.py`. We do **not** push request payloads, pagination paths, or query
+strings into YAML — that road leads to the config-driven YAML blackbox, which
+is explicitly what det is not.
 
 A useful litmus test, applied to every `register.yaml` key in this chapter:
 

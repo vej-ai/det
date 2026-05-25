@@ -1,9 +1,9 @@
 """det — a simple, open-source Python extract-load (EL) tool.
 
-det moves data from a **source** into a **destination** and nothing more —
-"dlt meets dbt". Connectors are folders of plain Python; projects are folders
-of plain files run from the ``det`` CLI or the importable ``det``
-library.
+det moves data from a **source** into a **destination** and nothing more.
+Pipelines are configs, connectors are folders of plain Python; projects are
+folders of plain files run from the ``det`` CLI or the importable ``det``
+library. Architectural inspiration is dbt.
 
 This module is the **public API** a connector author imports. After build
 stage 3 it exposes the decorator surface a connector body binds to —

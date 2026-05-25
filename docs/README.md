@@ -1,6 +1,6 @@
 # det — Design Handbook
 
-**det** (short for "data extraction tool") is an open-source, self-hosted Python **extract-load (EL)** tool. The pitch in one line: *dlthub meets dbt* — and explicitly **not Airbyte** (no UI blackbox).
+**det** (short for "data extraction tool") is an open-source, self-hosted Python **extract-load (EL)** tool. The pitch in one line: **a CLI-first, dbt-shaped extract-load tool — pipelines as configs, connectors as folders, no UI blackbox.**
 
 The #1 design principle is **keep it as simple as possible**. The architectural inspiration is **dbt**: a `pip install`, a project folder, `profiles.yml`, and a CLI you `run` and `test`. Connectors — sources *and* destinations alike — are folders of plain Python with a `register.yaml` and decorated functions. Nothing is hidden behind a UI or a server.
 
