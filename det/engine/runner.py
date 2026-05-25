@@ -668,6 +668,97 @@ def _split_error(error: BaseException | None) -> tuple[str | None, str | None]:
 # ---------------------------------------------------------------------------
 
 
+def run_tag(
+    tag: str,
+    *,
+    project_dir: str | Path | None = None,
+    target_override: str | None = None,
+    destination_params_override: Mapping[str, Any] | None = None,
+    full_refresh: bool = False,
+    select: tuple[str, ...] = (),
+) -> list[RunResult]:
+    """Run every config whose ``tags:`` list contains ``tag`` — docs/12 §Tags.
+
+    Multi-run sibling of :func:`run`. The runtime unit is still one config
+    per ``run()``; ``run_tag`` is a thin wrapper that discovers every
+    matching config and drives them sequentially through :func:`run`.
+
+    Semantics:
+
+    * **Selection**: exact string match on the lowercased tag against each
+      config's lowercased :attr:`PipelineConfig.tags`. No glob, no regex —
+      a user wanting "match anything starting with ``hourly_``" writes the
+      tag explicitly. Matching is case-insensitive because the parser
+      normalizes both sides (see :meth:`PipelineConfig.from_dict`).
+    * **Order**: alphabetical by config name. Predictable, stable across
+      runs, independent of filesystem walk order. Reuses
+      :func:`det.cli._discovery.discover_all_configs` which already returns
+      sorted output, so the order matches ``det list --kind config``.
+    * **Continue-on-failure**: each config runs through the same
+      :func:`run` the CLI's ``-p`` path uses (which never raises — it
+      returns a FAILED :class:`RunResult`). A failure in one config does
+      NOT stop the rest. The caller inspects the returned list to decide
+      overall outcome (the CLI exits 1 if any result is FAILED, 0 if all
+      succeeded; 2 if zero configs matched the tag — that's a usage error).
+    * **Uniform args**: ``target_override`` / ``destination_params_override``
+      / ``full_refresh`` / ``select`` apply to EVERY matched config. That
+      is the right semantic for the common case ("run hourly with prod
+      target" should apply prod to every hourly pipeline).
+
+    Returns ``[]`` when no config matches — the caller (usually the CLI)
+    treats that as a usage error. Never raises on a connector or
+    destination failure: each per-config call goes through :func:`run`,
+    which folds exceptions into a FAILED :class:`RunResult`.
+
+    # NOTE: ``params_override`` is intentionally NOT exposed on this
+    # function. A source param override that names ``page_size`` would
+    # silently apply to every config whether or not its source's
+    # ``register.yaml`` declares ``page_size`` — a usability footgun on a
+    # multi-source tag selection. Users that need per-config param
+    # overrides should call ``det run -p <config> --param k=v`` per
+    # invocation; ``--tag`` is for "run them all" sweeps, not for
+    # surgical knob-tweaking.
+
+    # NOTE: ``destination_params_override`` IS exposed even though it has
+    # the same uniform-apply caveat in principle, because the common
+    # tag-sweep destination override is ``path=`` / ``dataset=`` — a knob
+    # the destination connector defines, not the source. When configs
+    # tagged ``hourly`` bind to different destinations, an override that
+    # doesn't apply at one of them is silently dropped by the destination's
+    # own param resolution (unknown destination params raise inside the
+    # destination's ``open`` hook — that failure mode is already covered).
+    # The verification step ``det run --tag test
+    # --destination-param path=/tmp/det_8d_demo.duckdb`` depends on this
+    # threading.
+    """
+    normalized = tag.strip().lower()
+    # Call the engine-layer discoverer directly. Sorting by name lives
+    # here rather than reaching into ``det.cli._discovery.discover_all_configs``
+    # so the engine doesn't depend on a CLI internal — the engine layer is
+    # below the CLI layer, the inverse direction would invert the
+    # dependency graph and force a deferred import to break the cycle.
+    project_root = disc.find_project_root(project_dir)
+    project = cfg.ProjectConfig.load(project_root)
+    discovered = cfgs.discover_configs(project_root, list(project.config_paths))
+    matching = sorted(
+        (pc for pc in discovered.values() if normalized in pc.tags),
+        key=lambda pc: pc.name,
+    )
+
+    results: list[RunResult] = []
+    for pipeline in matching:
+        result = run(
+            pipeline.name,
+            project_dir=project_root,
+            target_override=target_override,
+            destination_params_override=destination_params_override,
+            full_refresh=full_refresh,
+            select=select,
+        )
+        results.append(result)
+    return results
+
+
 def run(
     config: str,
     *,

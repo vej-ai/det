@@ -32,7 +32,7 @@ from __future__ import annotations
 # Imported last: det.engine pulls in det.registry / det.types,
 # which are already bound above — no import cycle. The engine is the library's
 # run entry point (docs/02).
-from det.engine import run
+from det.engine import run, run_tag
 from det.registry import (
     Connector,
     destination,
@@ -78,6 +78,7 @@ __all__ = [
     "__version__",
     # Engine entry point (det.engine) — the library front door
     "run",
+    "run_tag",
     # Decorator API surface (det.registry)
     "stream",
     "resource",

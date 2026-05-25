@@ -155,7 +155,7 @@ sophistication than dlt.
 | **State location** | Destination table | Control plane | Opaque managed | Meltano store (job-keyed) | Destination (cursor read) | **Destination (`_det_state`)** |
 | **Schema inference** | Strong + evolution | Per-connector | Managed | Per-tap | Moderate | Inherit dlt-style inference |
 | **Project convention** | None | DB-backed | SaaS config | `meltano.yml` | Replication YAML | **dbt-style project folder** |
-| **Selection model** | Code | UI toggles | UI toggles | `catalog.json` | YAML wildcards | **Tags + `-c` + wildcards** |
+| **Selection model** | Code | UI toggles | UI toggles | `catalog.json` | YAML wildcards | **Configs + `--tag` selection** |
 | **Invocation** | `pipeline.run()` | Scheduler/UI | Managed schedule | `meltano run` | `sling run -r` | `det run` / `import` |
 | **Open source** | Yes | Yes (+ paid cloud) | No | Yes | Core yes | **Yes** |
 | **Passes the det test** | Mostly | No (YAML logic, blackbox UI) | No (closed SaaS) | Partly (protocol tax) | Mostly (but no authoring) | — (by construction) |
@@ -175,7 +175,7 @@ The influences are not equal. Ranked honestly:
 **dbt — the architectural template. Steal the shape.**
 - ✅ A **project folder** of plain files, under version control.
 - ✅ **CLI verbs** (`det run`), **profiles** for environment config, and a
-  **tag-based selector** (`--tag`, `-c`).
+  **tag-based selector** (`--tag` on pipeline configs — chapter 12).
 - ✅ The **core/library/project triad**: engine = `dbt-core`, project = a dbt
   project. (Detailed in File 02.)
 

@@ -1405,3 +1405,211 @@ def test_stream_start_event_carries_partition_when_auto_default_kicks_in(
     assert any(
         ev.get("partition") and "TIME/DAY" in ev["partition"] for ev in starts
     ), f"got partitions: {[e.get('partition') for e in starts]}"
+
+
+# ==========================================================================
+# det.run_tag — multi-config tag-based runs (stage 8d)
+# ==========================================================================
+
+
+def _write_tagged_source(
+    tmp_path: Path, *, name: str, ok: bool = True, row_id: int = 1
+) -> None:
+    """Author a minimal one-stream source connector folder under ``sources/<name>/``.
+
+    ``ok=False`` produces a source that raises mid-stream, so the test can
+    prove ``run_tag`` continues past per-config failures.
+    """
+    folder = tmp_path / "sources" / name
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            f"""\
+            name: {name}
+            kind: source
+            version: "1.0.0"
+            summary: fixture for run_tag tests.
+            streams:
+              - name: rows
+                table: {name}_rows
+                write_disposition: append
+                schema:
+                  - {{name: id, type: INTEGER}}
+            """
+        )
+    )
+    body = (
+        f"yield [{{'id': {row_id}}}]"
+        if ok
+        else "yield [{'id': 1}]\n                raise RuntimeError('boom')"
+    )
+    (folder / "source.py").write_text(
+        textwrap.dedent(
+            f"""\
+            from det import Batch, stream
+            from collections.abc import Iterator
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                {body}
+            """
+        )
+    )
+
+
+def _write_tagged_config(
+    tmp_path: Path,
+    *,
+    name: str,
+    source: str,
+    tags: list[str],
+    target: str = "dev",
+) -> None:
+    """Write a one-config YAML carrying a ``tags:`` block — stage 8d fixture."""
+    configs_dir = tmp_path / "configs"
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    tags_yaml = "[" + ", ".join(tags) + "]"
+    (configs_dir / f"{name}.yml").write_text(
+        textwrap.dedent(
+            f"""\
+            name: {name}
+            source: {source}
+            destination: duckdb
+            target: {target}
+            tags: {tags_yaml}
+            """
+        )
+    )
+
+
+def test_run_tag_runs_every_matching_config(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """run_tag returns one RunResult per matched config; all succeed here."""
+    _write_project(tmp_path)
+    _write_tagged_source(tmp_path, name="alpha")
+    _write_tagged_source(tmp_path, name="beta")
+    _write_tagged_source(tmp_path, name="gamma")
+    _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["hourly"])
+    _write_tagged_config(tmp_path, name="beta_dev", source="beta", tags=["hourly"])
+    # gamma is daily — not tagged 'hourly', should NOT run
+    _write_tagged_config(tmp_path, name="gamma_dev", source="gamma", tags=["daily"])
+
+    results = det.run_tag(
+        "hourly",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert len(results) == 2
+    names = [r.config for r in results]
+    # Order is alphabetical by config name (run_tag contract).
+    assert names == ["alpha_dev", "beta_dev"]
+    assert all(r.status.value == "succeeded" for r in results)
+
+
+def test_run_tag_zero_matches_returns_empty_list(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """run_tag with no matching configs returns an empty list (no error)."""
+    _write_project(tmp_path)
+    _write_tagged_source(tmp_path, name="alpha")
+    _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["hourly"])
+
+    results = det.run_tag(
+        "no_such_tag",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert results == []
+
+
+def test_run_tag_continues_past_failure(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """A failing config does NOT stop the rest — the run list spans both."""
+    _write_project(tmp_path)
+    _write_tagged_source(tmp_path, name="alpha")          # succeeds
+    _write_tagged_source(tmp_path, name="boom", ok=False)  # raises mid-stream
+    _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["test"])
+    _write_tagged_config(tmp_path, name="boom_dev", source="boom", tags=["test"])
+
+    results = det.run_tag(
+        "test",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert len(results) == 2
+    by_name = {r.config: r for r in results}
+    # alpha_dev sorts before boom_dev alphabetically.
+    assert list(by_name) == ["alpha_dev", "boom_dev"]
+    assert by_name["alpha_dev"].status.value == "succeeded"
+    assert by_name["boom_dev"].status.value == "failed"
+    assert by_name["boom_dev"].error is not None
+
+
+def test_run_tag_case_insensitive_match(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """`run_tag("Hourly")` matches a config whose tags include `hourly`."""
+    _write_project(tmp_path)
+    _write_tagged_source(tmp_path, name="alpha")
+    _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["hourly"])
+
+    results = det.run_tag(
+        "Hourly",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert len(results) == 1
+    assert results[0].config == "alpha_dev"
+
+
+def test_run_tag_target_override_applies_to_every_config(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """target_override is applied uniformly to every matched config."""
+    _write_project(
+        tmp_path,
+        profiles_override=textwrap.dedent(
+            """\
+            duckdb:
+              default_target: dev
+              targets:
+                dev: {}
+                staging: {}
+            """
+        ),
+    )
+    _write_tagged_source(tmp_path, name="alpha")
+    _write_tagged_source(tmp_path, name="beta")
+    _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["hourly"])
+    _write_tagged_config(tmp_path, name="beta_dev", source="beta", tags=["hourly"])
+
+    results = det.run_tag(
+        "hourly",
+        project_dir=str(tmp_path),
+        target_override="staging",
+        destination_params_override={"path": duckdb_path},
+    )
+    assert len(results) == 2
+    assert all(r.target == "staging" for r in results)
+
+
+def test_run_tag_alphabetical_order_three_configs(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """Configs run in alphabetical order regardless of file/discovery order."""
+    _write_project(tmp_path)
+    for name in ("zebra", "apple", "mango"):
+        _write_tagged_source(tmp_path, name=name)
+        _write_tagged_config(
+            tmp_path, name=f"{name}_run", source=name, tags=["everything"]
+        )
+
+    results = det.run_tag(
+        "everything",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert [r.config for r in results] == ["apple_run", "mango_run", "zebra_run"]

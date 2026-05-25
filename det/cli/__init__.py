@@ -46,7 +46,11 @@ from det.cli._discovery import (
     discover_all_destinations,
     discover_all_sources,
 )
-from det.cli._format import print_run_result, render_table
+from det.cli._format import (
+    print_multi_run_summary,
+    print_run_result,
+    render_table,
+)
 from det.cli._runs import get_run as runs_get
 from det.cli._runs import list_runs as runs_list
 from det.cli._runs import read_log_lines
@@ -134,9 +138,18 @@ def cli() -> None:
     "-p",
     "--conf",
     "config",
-    required=True,
+    default=None,
     metavar="CONFIG",
-    help="Run the pipeline config of this name (under configs/).",
+    help="Run the pipeline config of this name (under configs/). "
+    "Mutually exclusive with --tag.",
+)
+@click.option(
+    "--tag",
+    "tag",
+    default=None,
+    metavar="TAG",
+    help="Run every pipeline config whose tags: list includes this tag. "
+    "Sequential, continue-on-failure. Mutually exclusive with -p/--conf.",
 )
 @click.option(
     "--target",
@@ -168,7 +181,8 @@ def cli() -> None:
     "params",
     multiple=True,
     metavar="KEY=VALUE",
-    help="Override a source param for this run. Repeatable.",
+    help="Override a source param for this run. Repeatable. "
+    "Not supported with --tag (use -p for per-config overrides).",
 )
 @click.option(
     "--destination-param",
@@ -178,7 +192,8 @@ def cli() -> None:
     help="Override a destination config value for this run. Repeatable.",
 )
 def run(
-    config: str,
+    config: str | None,
+    tag: str | None,
     target: str | None,
     select: tuple[str, ...],
     full_refresh: bool,
@@ -191,15 +206,70 @@ def run(
     Runs synchronously: it blocks until the run finishes, then exits. This is
     the "wait until it succeeds" contract orchestrators depend on.
 
+    Exactly one of ``-p/--conf`` or ``--tag`` must be given. ``--tag``
+    runs every config whose ``tags:`` list contains the tag, sequentially
+    in alphabetical name order, continuing past per-config failures.
+
     Exit codes:
 
     \b
-      0  the run succeeded.
-      1  the run failed (config/discovery error or load error).
+      0  every run succeeded.
+      1  at least one run failed (config/discovery error or load error).
+      2  CLI usage error (no selector, both selectors, no matching configs,
+         or --param combined with --tag).
     """
-    src_overrides = _parse_kv("param", params)
-    dest_overrides = _parse_kv("destination-param", destination_params)
+    # Mutual exclusion + required-one — hand-rolled per docs/02 §Pipeline
+    # selection (stage 8d). Hand-rolling keeps the click option set vanilla
+    # and the error message close to the call site.
+    if config is not None and tag is not None:
+        _fail("-p/--conf and --tag are mutually exclusive", code=2)
+        return  # unreachable
+    if config is None and tag is None:
+        _fail("exactly one of -p/--conf or --tag is required", code=2)
+        return  # unreachable
+
     selected = _split_select(select)
+    dest_overrides = _parse_kv("destination-param", destination_params)
+
+    if tag is not None:
+        # --tag path. --param is not supported (see run_tag NOTE) — flag
+        # the misuse with a clean exit-2 instead of silently dropping the
+        # overrides.
+        if params:
+            _fail(
+                "--param is not supported with --tag (a source param would "
+                "apply to every matched config silently); use `det run -p "
+                "<config> --param k=v` per config instead",
+                code=2,
+            )
+            return  # unreachable
+
+        results = det.run_tag(
+            tag,
+            project_dir=project_dir,
+            target_override=target,
+            destination_params_override=dest_overrides or None,
+            full_refresh=full_refresh,
+            select=selected,
+        )
+        if not results:
+            _fail(f"no configs match tag {tag!r}", code=2)
+            return  # unreachable
+
+        # Per-config rendering first (same shape as single-run output), then
+        # the multi-run rollup so the at-a-glance summary is the last thing.
+        for index, result in enumerate(results):
+            if index:
+                click.echo()
+            print_run_result(result)
+        print_multi_run_summary(tag, results)
+
+        any_failed = any(r.status is not RunStatus.SUCCEEDED for r in results)
+        raise SystemExit(1 if any_failed else 0)
+
+    # -p path — the single-config invocation that's existed since stage 8.B.
+    assert config is not None  # validated above
+    src_overrides = _parse_kv("param", params)
 
     # det.run() never raises — it returns a FAILED RunResult.
     result = det.run(
@@ -228,17 +298,44 @@ def run(
     help="Restrict the listing to one kind (default: list all three).",
 )
 @click.option(
+    "--tag",
+    "tag",
+    default=None,
+    metavar="TAG",
+    help="Filter the listing to components carrying this tag. One tag "
+    "namespace across sources, destinations, and configs (a config's "
+    "tags: drives `det run --tag`; source/destination tags are catalog "
+    "metadata only).",
+)
+@click.option(
     "--project-dir",
     "project_dir",
     type=click.Path(file_okay=False, path_type=Path),
     help="Project root. Defaults to the current directory.",
 )
-def list_components(kind: str | None, project_dir: Path | None) -> None:
+def list_components(
+    kind: str | None, tag: str | None, project_dir: Path | None
+) -> None:
     """List discoverable sources, destinations, and configs — docs/03 §5, docs/12.
 
     Reads each ``register.yaml`` / config file via discovery; runs nothing.
     Project-local connectors shadow same-named baked ones (docs/03 §5).
+
+    ``--tag <tag>`` filters each section to components whose ``tags:`` list
+    contains the tag. Sources and destinations match against their
+    ``register.yaml`` ``tags:`` (catalog metadata — "what this connector
+    IS"); configs match against their config ``tags:`` (the same field
+    ``det run --tag`` selects on). A section with no matches still shows
+    its header with a "(no … match tag 'X')" placeholder so the user can
+    see what was searched.
     """
+    # Normalize the filter tag once. The connector parser keeps source/
+    # destination tags verbatim (no normalization at parse time — that's
+    # pre-stage-8d behavior), so case-fold both sides at compare time.
+    # Config tags ARE normalized at parse time
+    # (PipelineConfig.from_dict) — comparing the lowercased filter to
+    # those is exact-match.
+    tag_filter = tag.strip().lower() if tag is not None else None
     try:
         project_root = disc.find_project_root(project_dir)
         project = cfg.ProjectConfig.load(project_root)
@@ -258,6 +355,11 @@ def list_components(kind: str | None, project_dir: Path | None) -> None:
         except _FRIENDLY_ERRORS as exc:
             _fail(str(exc), code=2)
             return
+        if tag_filter is not None:
+            sources = [
+                s for s in sources
+                if any(t.lower() == tag_filter for t in s.manifest.tags)
+            ]
         src_rows: list[list[str]] = []
         for s in sources:
             stream_names = ", ".join(x.name for x in s.manifest.streams) or "-"
@@ -276,6 +378,10 @@ def list_components(kind: str | None, project_dir: Path | None) -> None:
                     ["NAME", "ORIGIN", "#STREAMS", "STREAMS", "TAGS"], src_rows
                 ))
             )
+        elif tag_filter is not None:
+            sections.append(
+                ("SOURCES", f"(no sources match tag {tag_filter!r})")
+            )
         else:
             sections.append(("SOURCES", "(no sources found)"))
 
@@ -287,6 +393,11 @@ def list_components(kind: str | None, project_dir: Path | None) -> None:
         except _FRIENDLY_ERRORS as exc:
             _fail(str(exc), code=2)
             return
+        if tag_filter is not None:
+            destinations = [
+                d for d in destinations
+                if any(t.lower() == tag_filter for t in d.manifest.tags)
+            ]
         dst_rows: list[list[str]] = []
         for d in destinations:
             dst_rows.append(
@@ -300,6 +411,10 @@ def list_components(kind: str | None, project_dir: Path | None) -> None:
             sections.append(
                 ("DESTINATIONS", render_table(["NAME", "ORIGIN", "TAGS"], dst_rows))
             )
+        elif tag_filter is not None:
+            sections.append(
+                ("DESTINATIONS", f"(no destinations match tag {tag_filter!r})")
+            )
         else:
             sections.append(("DESTINATIONS", "(no destinations found)"))
 
@@ -309,6 +424,11 @@ def list_components(kind: str | None, project_dir: Path | None) -> None:
         except _FRIENDLY_ERRORS as exc:
             _fail(str(exc), code=2)
             return
+        if tag_filter is not None:
+            # Config tags are already lowercased at parse time
+            # (PipelineConfig.from_dict) — exact-match against the
+            # lowercased filter.
+            configs = [c for c in configs if tag_filter in c.tags]
         cfg_rows: list[list[str]] = []
         for c in configs:
             cfg_rows.append(
@@ -318,13 +438,19 @@ def list_components(kind: str | None, project_dir: Path | None) -> None:
                     c.destination,
                     c.target or "-",
                     ", ".join(c.select) or "(all)",
+                    ", ".join(c.tags) or "-",
                 ]
             )
         if cfg_rows:
             sections.append(
                 ("CONFIGS", render_table(
-                    ["NAME", "SOURCE", "DESTINATION", "TARGET", "SELECT"], cfg_rows
+                    ["NAME", "SOURCE", "DESTINATION", "TARGET", "SELECT", "TAGS"],
+                    cfg_rows,
                 ))
+            )
+        elif tag_filter is not None:
+            sections.append(
+                ("CONFIGS", f"(no configs match tag {tag_filter!r})")
             )
         else:
             sections.append(("CONFIGS", "(no configs found)"))

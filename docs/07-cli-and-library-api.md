@@ -62,12 +62,25 @@ Each subcommand writes a stub the user edits. A scaffolded source's
 the full `@destination` hook stub set; a scaffolded config binds a
 placeholder source to the baked `duckdb` destination.
 
-### `det list [--kind {source|destination|config}]` — discover what exists
+### `det list [--kind {source|destination|config}] [--tag <tag>]` — discover what exists
 
 ```bash
 det list                       # sources, destinations, configs (all three)
 det list --kind config         # just configs
+det list --tag hourly          # filter every section by tag
+det list --kind config --tag hourly
 ```
+
+`--tag` filters each section (sources, destinations, configs) by its
+own `tags:` field. One tag namespace per project, naturally partitioned:
+running `det list --tag warehouse` typically shows destinations only
+(those are warehouses); running `det list --tag hourly` typically shows
+configs only (no source/destination would carry an operational schedule
+tag). A section with no matches still shows its header with a `(no <kind>
+match tag '<tag>')` placeholder so the user sees what was searched.
+
+The CONFIGS table additionally carries a `TAGS` column (the config's own
+`tags:` list — the field `det run --tag` selects on).
 
 Output is grouped under three section headers:
 
@@ -105,17 +118,66 @@ det run -p stripe_prod --target staging           # override the config's target
 det run -p stripe_prod --full-refresh             # ignore state, reload
 det run -p stripe_prod --param page_size=500      # override a source param
 det run -p stripe_prod --destination-param dataset=raw   # override a dest param
+det run --tag hourly                              # run every config tagged 'hourly'
 ```
+
+Exactly one of `-p/--conf` or `--tag` must be supplied — they are mutually
+exclusive. The `--tag` form runs every pipeline config whose `tags:` list
+contains the tag, sequentially in alphabetical name order, **continuing
+past per-config failures**. See [§ `det run --tag`](#det-run--tag-tag-multi-config-by-tag) below.
 
 | Flag | Purpose |
 |---|---|
-| `-p, --conf <name>` | **Required.** The pipeline config to run (under `configs/`). |
+| `-p, --conf <name>` | The pipeline config to run (under `configs/`). Mutually exclusive with `--tag`. |
+| `--tag <tag>` | Run every config whose `tags:` list contains this tag. Mutually exclusive with `-p`. |
 | `--target <name>` | Override the config's `target:`. Falls back to `profiles.yml[<destination>].default_target`. |
 | `--select <stream>` | **Replace** (not union) the config's `select:`. Repeatable / comma-separated. |
 | `--full-refresh` | Discard state for the selected streams; reload from the beginning. |
-| `--param k=v` | Override a source param. Repeatable. Top precedence (chapter 03 §6). |
+| `--param k=v` | Override a source param. Repeatable. Top precedence (chapter 03 §6). Not supported with `--tag`. |
 | `--destination-param k=v` | Override a destination param. Repeatable. Top precedence (chapter 12 §5). |
 | `--project-dir <dir>` | Project root (or any dir under it). Defaults to CWD. |
+
+#### `det run --tag <tag>` — multi-config by tag
+
+```bash
+det run --tag hourly                                       # all configs tagged hourly
+det run --tag hourly --target staging                      # uniform target
+det run --tag hourly --destination-param path=/tmp/x.duckdb
+```
+
+Behavior:
+
+* **Selection** — every config whose `tags:` list contains the tag.
+  Case-insensitive (tags are lowercased at parse time and at match time).
+  Selection is exact-match — no glob, no regex.
+* **Order** — alphabetical by config name; reuses `det list --kind
+  config` ordering for predictability.
+* **Continue-on-failure** — a per-config failure does NOT stop the rest.
+  Each config goes through the same `run()` path the `-p` form uses, which
+  folds exceptions into a `FAILED` `RunResult`.
+* **Uniform args** — `--target`, `--destination-param`, `--full-refresh`,
+  `--select` apply to **every** matched config. `--param` is rejected with
+  `--tag` because a source param override on a multi-source sweep would
+  silently apply to configs whose source doesn't declare it (use `det run
+  -p <config> --param k=v` per config when you need that).
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | Every matched run succeeded. |
+| `1` | At least one matched run failed. |
+| `2` | No config matched the tag (usage error). Also: `-p` + `--tag` together, or `--param` + `--tag`. |
+
+Summary output (printed after the per-config tables):
+
+```
+TAG hourly: ran 3 config(s), 2 succeeded, 1 failed in 12.4s
+CONFIG              STATUS     ROWS   DURATION  ERROR
+shiphero_hourly     succeeded  1234   3.2s      -
+stripe_hourly       succeeded  567    2.1s      -
+zendesk_hourly      failed     0      7.1s      ConnectionError: ...
+```
 
 Example run output:
 
@@ -242,6 +304,35 @@ for s in result.streams:
 if result.status.value == "failed":
     raise result.error      # or call result.raise_for_status()
 ```
+
+For a tag-based multi-run, use `det.run_tag(...)`:
+
+```python
+import det
+
+# Returns a list[RunResult] — one per matched config, in alphabetical name order.
+# Continue-on-failure: a per-config failure does NOT stop the rest.
+results = det.run_tag(
+    "hourly",
+    project_dir="./my_pipelines",
+    target_override="prod",                        # uniform across every matched config
+    destination_params_override={"path": "/tmp/x.duckdb"},  # uniform
+    full_refresh=False,
+    select=("charges",),                           # uniform — replaces config.select
+)
+
+# Caller decides overall outcome — det.run_tag returns the list, never raises.
+if not results:
+    raise SystemExit(f"no configs matched the tag")
+if any(r.status.value == "failed" for r in results):
+    for r in results:
+        if r.error is not None:
+            print(f"{r.config}: {type(r.error).__name__}: {r.error}")
+```
+
+`det.run_tag` does NOT accept `params_override` — a source param override
+on a multi-source sweep would silently apply to configs whose source
+doesn't declare it. For per-config knobs, call `det.run(...)` per name.
 
 ### 4.1 The `RunResult` object
 

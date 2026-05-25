@@ -443,3 +443,138 @@ def test_partition_overrides_unknown_top_level_key_still_caught(tmp_path: Path) 
     )
     with pytest.raises(ConfigError, match="unknown config key"):
         cfgs.load_config("p", tmp_path)
+
+
+# --------------------------------------------------------------------------
+# Tags — bare list of strings on a config (stage 8d)
+# --------------------------------------------------------------------------
+
+
+def test_tags_default_is_empty_tuple(tmp_path: Path) -> None:
+    """A config without `tags:` has an empty tags tuple."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        "name: p\nsource: s\ndestination: d\n"
+    )
+    pc = cfgs.load_config("p", tmp_path)
+    assert pc.tags == ()
+
+
+def test_tags_parses_list_of_strings(tmp_path: Path) -> None:
+    """A `tags: [a, b, c]` block becomes a tuple of strings."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: s
+            destination: d
+            tags: [hourly, acme, production]
+            """
+        )
+    )
+    pc = cfgs.load_config("p", tmp_path)
+    assert pc.tags == ("hourly", "acme", "production")
+
+
+def test_tags_normalized_lowercase(tmp_path: Path) -> None:
+    """Tags are lowercased at parse time to avoid `Hourly` vs `hourly` footguns."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: s
+            destination: d
+            tags: [Hourly, PROD]
+            """
+        )
+    )
+    pc = cfgs.load_config("p", tmp_path)
+    assert pc.tags == ("hourly", "prod")
+
+
+def test_tags_deduplicated_preserving_order(tmp_path: Path) -> None:
+    """Duplicate tags are silently dedup'd; first-seen order is preserved."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: s
+            destination: d
+            tags: [hourly, hourly, prod, hourly]
+            """
+        )
+    )
+    pc = cfgs.load_config("p", tmp_path)
+    assert pc.tags == ("hourly", "prod")
+
+
+def test_tags_bare_string_is_rejected(tmp_path: Path) -> None:
+    """`tags: hourly` (bare string) is a hard error — matches dbt's behavior."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: s
+            destination: d
+            tags: hourly
+            """
+        )
+    )
+    with pytest.raises(ConfigError, match="'tags' must be a list"):
+        cfgs.load_config("p", tmp_path)
+
+
+def test_tags_non_list_non_string_rejected(tmp_path: Path) -> None:
+    """`tags:` declared as a mapping is also a hard error."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: s
+            destination: d
+            tags: {a: 1}
+            """
+        )
+    )
+    with pytest.raises(ConfigError, match="'tags' must be a list"):
+        cfgs.load_config("p", tmp_path)
+
+
+def test_tags_empty_entry_rejected(tmp_path: Path) -> None:
+    """`tags: ['']` (an empty-string entry) is rejected."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: s
+            destination: d
+            tags: ['']
+            """
+        )
+    )
+    with pytest.raises(ConfigError, match="non-empty"):
+        cfgs.load_config("p", tmp_path)
+
+
+def test_tags_unknown_top_level_key_still_caught(tmp_path: Path) -> None:
+    """Adding `tags` did not allow other typos at the top level."""
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "p.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: p
+            source: s
+            destination: d
+            tags: [hourly]
+            tgs: [extra]   # typo
+            """
+        )
+    )
+    with pytest.raises(ConfigError, match="unknown config key"):
+        cfgs.load_config("p", tmp_path)

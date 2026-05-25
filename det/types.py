@@ -1676,6 +1676,22 @@ class PipelineConfig:
       *replaces* (not unions) this list (docs/07).
     * ``schedule`` — advisory cron expression for an external scheduler;
       the engine itself never acts on it (docs/03 §2.6).
+    * ``tags`` — a bare list of strings used by ``det run --tag <tag>`` to
+      select every config that carries the tag (and by ``det list --tag``
+      to filter the catalog). Shape mirrors dbt's model ``tags:``. Tags are
+      normalized to lowercase at parse time and deduplicated. Empty by
+      default; selection is by exact match (no glob/regex). Config tags are
+      distinct from the ``tags:`` declared on a source/destination's
+      ``register.yaml`` — those remain *catalog* metadata used by
+      ``det list``, never by ``det run --tag``. Clean separation: source/
+      destination tags = "what this connector IS"; config tags = "how/when
+      to run this pipeline".
+
+    # NOTE: ``tags`` is appended after ``schedule`` (the original tail) so
+    # frozen positional callers in tests / older code that built a
+    # ``PipelineConfig(...)`` without keyword args keep working. All
+    # tail-field positional callers were already keyword-style (see
+    # ``test_engine.py::_empty_pipeline``), so this is a defensive measure.
     """
 
     name: str
@@ -1696,6 +1712,15 @@ class PipelineConfig:
     third-party source without forking its connector folder."""
     select: tuple[str, ...] = ()
     schedule: str | None = None
+    tags: tuple[str, ...] = ()
+    """Free-form labels used by ``det run --tag <tag>`` to select every config
+    that carries the tag (and by ``det list --tag`` for catalog filtering).
+
+    Normalized to lowercase + deduplicated at parse time (see
+    :meth:`from_dict`). Selection is by exact string match — no glob/regex.
+    Empty tuple by default. Distinct from the ``tags:`` declared on a
+    source/destination's ``register.yaml`` (those are *catalog* metadata
+    that ``det run --tag`` deliberately ignores)."""
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> PipelineConfig:
@@ -1718,6 +1743,7 @@ class PipelineConfig:
             "partition_overrides",
             "select",
             "schedule",
+            "tags",
         }
         unknown = set(data) - known
         if unknown:
@@ -1761,6 +1787,43 @@ class PipelineConfig:
                     f"{exc}"
                 ) from exc
 
+        # tags — bare list of strings, mirroring dbt's model `tags:`. A bare
+        # string (`tags: hourly`) is REJECTED with a clear error so the
+        # author writes `tags: [hourly]` explicitly — matches dbt's behavior
+        # and is the strongest long-run answer (silent string-to-list
+        # promotion would mask the intent at the YAML layer where the most
+        # eyes are). Tags are normalized to lowercase to avoid `Hourly` vs
+        # `hourly` footguns at `--tag` matching time, then deduplicated
+        # while preserving first-seen order so `tags: [hourly, hourly]`
+        # parses to `("hourly",)` instead of erroring.
+        tags_raw = data.get("tags") or []
+        if isinstance(tags_raw, str):
+            raise ValueError(
+                f"config {data['name']!r}: 'tags' must be a list of strings "
+                f"(got the bare string {tags_raw!r}); write `tags: [{tags_raw}]`"
+            )
+        if not isinstance(tags_raw, (list, tuple)):
+            raise ValueError(
+                f"config {data['name']!r}: 'tags' must be a list of strings"
+            )
+        seen: set[str] = set()
+        tags_list: list[str] = []
+        for raw_tag in tags_raw:
+            tag = str(raw_tag).strip().lower()
+            if not tag:
+                # A bare empty string would silently match an empty CLI
+                # `--tag ""` filter — reject so the YAML's intent stays
+                # explicit. # NOTE: matches the rest of the codebase's
+                # "unknown / malformed YAML is a hard error" stance.
+                raise ValueError(
+                    f"config {data['name']!r}: 'tags' entries must be "
+                    f"non-empty strings"
+                )
+            if tag in seen:
+                continue
+            seen.add(tag)
+            tags_list.append(tag)
+
         target_raw = data.get("target")
         schedule_raw = data.get("schedule")
         return cls(
@@ -1773,4 +1836,5 @@ class PipelineConfig:
             partition_overrides=partition_overrides,
             select=select,
             schedule=None if schedule_raw is None else str(schedule_raw),
+            tags=tuple(tags_list),
         )

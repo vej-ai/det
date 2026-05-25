@@ -87,6 +87,7 @@ Unknown top-level keys are a hard error (catches typos like `destintion`).
 | `partition_overrides` | `{}` | Per-stream physical-partition overrides — wins over the source's `register.yaml` `partition_by` (docs/05 §3.3). |
 | `select` | `[]` (= all streams) | Streams to run. Empty means every stream. |
 | `schedule` | `null` | Advisory cron expression. The engine itself never acts on it (docs/03 §2.6). |
+| `tags` | `[]` | Bare list of strings used by `det run --tag <tag>` to select every matching config (and by `det list --tag` for catalog filtering). Lowercased + deduplicated at parse time (see §3.2). |
 
 ### 3.1 Worked example — `partition_overrides:`
 
@@ -112,6 +113,53 @@ partition_overrides:
 ```
 
 `partition_overrides:` is a mapping `{stream_name: partition_spec}`. Each entry accepts both the short string form and the long-form mapping. A stream not named here keeps whatever the source's `register.yaml` declared (or the cursor-based auto-default if nothing was declared — docs/05 §3.3).
+
+### 3.2 Tag-based multi-run — `tags:` + `det run --tag`
+
+A config carries an optional `tags:` field — a bare list of strings, shape-equivalent to dbt's model `tags:`. `det run --tag <tag>` then runs every config whose `tags:` list contains that tag.
+
+```yaml
+# configs/hourly.yml
+configs:
+  - name: shiphero_hourly
+    source: shiphero
+    destination: bigquery
+    target: prod
+    tags: [hourly, ops]
+  - name: stripe_hourly
+    source: stripe
+    destination: bigquery
+    target: prod
+    tags: [hourly, finance]
+  - name: zendesk_hourly
+    source: zendesk
+    destination: bigquery
+    target: prod
+    tags: [hourly, support]
+```
+
+```
+$ det run --tag hourly
+... (per-config output for each of the three) ...
+
+TAG hourly: ran 3 config(s), 3 succeeded, 0 failed in 12.4s
+CONFIG            STATUS     ROWS   DURATION  ERROR
+shiphero_hourly   succeeded  1234   3.2s      -
+stripe_hourly     succeeded  567    2.1s      -
+zendesk_hourly    succeeded  890    7.1s      -
+```
+
+Semantics:
+
+* **Order** — alphabetical by config name (predictable, stable across runs).
+* **Continue-on-failure** — a per-config failure does NOT stop the rest. The CLI exits `1` if any run failed, `0` if all succeeded.
+* **Zero matches** — exit `2` with a `no configs match tag '<tag>'` message (usage error).
+* **Mutual exclusion** — `-p/--conf` and `--tag` cannot be combined; exactly one selector per invocation.
+* **Uniform args** — `--target`, `--destination-param`, `--full-refresh`, `--select` all apply to every matched config. `--param` is NOT supported with `--tag` (a source param override would silently apply to every config whether or not its source declares it; use `det run -p <config> --param k=v` for per-config knobs).
+
+Tags are normalized to lowercase at parse time and deduplicated, so `tags: [Hourly, hourly]` parses to `("hourly",)` and `--tag Hourly` matches `tags: [hourly]`. Selection is by exact match (no glob/regex).
+
+Tags on a source's or destination's `register.yaml` are a separate namespace — they describe what the connector IS (catalog metadata for `det list --tag`); they never drive `det run --tag`, which is strictly about configs.
 
 ## 4. Target resolution
 

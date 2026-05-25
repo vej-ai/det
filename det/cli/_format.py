@@ -119,3 +119,62 @@ def print_run_result(result: RunResult) -> None:
         click.echo(
             click.style(f"  error: {type(err).__name__}: {err}", fg="red"), err=True
         )
+
+
+def print_multi_run_summary(tag: str, results: list[RunResult]) -> None:
+    """Print a one-table summary of a ``det run --tag`` multi-run — stage 8d.
+
+    Header line names the tag and totals; then one row per RunResult with
+    its config name, status (colored), rows loaded, duration, and a short
+    error string when failed (empty cell otherwise). Order mirrors the
+    list ``run_tag`` returned — alphabetical by config name. The summary
+    is *additive*: each individual run already printed its own per-stream
+    table via :func:`print_run_result`, so this is the final at-a-glance
+    rollup.
+
+    # NOTE: design decision — for a failed run we render the error as
+    # ``<ExcType>: <truncated message>`` rather than the full traceback,
+    # matching :class:`~det.types.RunResult.to_dict`. The full traceback
+    # lives in the per-run JSONL log (docs/09 §3.2); the summary row is
+    # the queryability surface, the JSONL is the forensics surface.
+    """
+    succeeded = sum(1 for r in results if r.status is RunStatus.SUCCEEDED)
+    failed = sum(1 for r in results if r.status is RunStatus.FAILED)
+    total_duration = sum(r.duration_s for r in results)
+    click.echo()
+    click.echo(
+        click.style(
+            f"TAG {tag}: ran {len(results)} config(s), "
+            f"{succeeded} succeeded, {failed} failed in {total_duration:.1f}s",
+            bold=True,
+        )
+    )
+
+    rows: list[list[str]] = []
+    for r in results:
+        color = "green" if r.status is RunStatus.SUCCEEDED else "red"
+        status_cell = click.style(r.status.value, fg=color)
+        if r.error is None:
+            error_cell = "-"
+        else:
+            err = r.error
+            msg = str(err)
+            # One-liner: collapse newlines and trim very long messages.
+            msg = msg.replace("\n", " ").strip()
+            if len(msg) > 80:
+                msg = msg[:77] + "..."
+            error_cell = f"{type(err).__name__}: {msg}"
+        rows.append(
+            [
+                r.config,
+                status_cell,
+                str(r.rows_loaded),
+                f"{r.duration_s:.1f}s",
+                error_cell,
+            ]
+        )
+    click.echo(
+        render_table(
+            ["CONFIG", "STATUS", "ROWS", "DURATION", "ERROR"], rows
+        )
+    )

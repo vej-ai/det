@@ -210,6 +210,221 @@ def test_run_requires_config(runner: CliRunner, cli_project: Path) -> None:
 
 
 # ==========================================================================
+# run --tag (stage 8d)
+# ==========================================================================
+
+
+def test_run_tag_succeeds_shows_summary(
+    runner: CliRunner, cli_project: Path, warehouse: str
+) -> None:
+    """``run --tag test`` runs both fixture configs + prints the multi-run summary."""
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--tag",
+            "test",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 0, _show(result)
+    out = result.output
+    # Both configs ran (their per-run output + the rollup mentions them).
+    assert "echo_dev" in out
+    assert "echo_prod" in out
+    # The multi-run summary header carries the tag and the totals.
+    assert "TAG test:" in out
+    assert "2 config(s)" in out
+    assert "2 succeeded" in out
+    # Per-config status row in the summary table.
+    assert "succeeded" in out
+
+
+def test_run_tag_zero_matches_exits_2(
+    runner: CliRunner, cli_project: Path, warehouse: str
+) -> None:
+    """``run --tag <unmatched>`` exits 2 with a clear "no configs match" message."""
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--tag",
+            "no_such_tag_anywhere",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 2, _show(result)
+    assert "no configs match tag" in result.output
+
+
+def test_run_tag_failure_exits_1_with_summary(
+    runner: CliRunner, tmp_path: Path, warehouse: str
+) -> None:
+    """A failure among successes exits 1 and the summary names the failed config."""
+    # Build a tmp project with two tagged configs — one ok, one that raises.
+    (tmp_path / "det_project.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: tag_fail_proj
+            version: "1.0.0"
+            source_paths: [sources]
+            destination_paths: [destinations]
+            config_paths: [configs]
+            """
+        )
+    )
+    (tmp_path / "profiles.yml").write_text(
+        "duckdb:\n  default_target: dev\n  targets:\n    dev: {}\n"
+    )
+    # Good source.
+    good = tmp_path / "sources" / "good"
+    good.mkdir(parents=True)
+    (good / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: good
+            kind: source
+            version: "1.0.0"
+            streams:
+              - name: rows
+                table: good_rows
+                schema: [{name: id, type: INTEGER}]
+            """
+        )
+    )
+    (good / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from det import Batch, stream
+            from collections.abc import Iterator
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1}]
+            """
+        )
+    )
+    # Bad source.
+    bad = tmp_path / "sources" / "bad"
+    bad.mkdir(parents=True)
+    (bad / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: bad
+            kind: source
+            version: "1.0.0"
+            streams:
+              - name: rows
+                table: bad_rows
+                schema: [{name: id, type: INTEGER}]
+            """
+        )
+    )
+    (bad / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from det import Batch, stream
+            from collections.abc import Iterator
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1}]
+                raise RuntimeError("boom")
+            """
+        )
+    )
+    configs_dir = tmp_path / "configs"
+    configs_dir.mkdir()
+    (configs_dir / "configs.yml").write_text(
+        textwrap.dedent(
+            """\
+            configs:
+              - name: good_run
+                source: good
+                destination: duckdb
+                target: dev
+                tags: [mixed]
+              - name: bad_run
+                source: bad
+                destination: duckdb
+                target: dev
+                tags: [mixed]
+            """
+        )
+    )
+
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--tag",
+            "mixed",
+            "--project-dir",
+            str(tmp_path),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 1, _show(result)
+    out = result.output
+    assert "TAG mixed:" in out
+    assert "1 succeeded" in out
+    assert "1 failed" in out
+    assert "bad_run" in out
+    assert "good_run" in out
+
+
+def test_run_tag_and_conf_mutually_exclusive(
+    runner: CliRunner, cli_project: Path, warehouse: str
+) -> None:
+    """Both -p and --tag → usage error (exit 2)."""
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "-p",
+            "echo_dev",
+            "--tag",
+            "test",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 2, _show(result)
+    assert "mutually exclusive" in result.output
+
+
+def test_run_tag_param_combo_rejected(
+    runner: CliRunner, cli_project: Path, warehouse: str
+) -> None:
+    """--param with --tag is a usage error (silent-apply footgun)."""
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--tag",
+            "test",
+            "--param",
+            "page_size=100",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 2, _show(result)
+    assert "--param is not supported with --tag" in result.output
+
+
+# ==========================================================================
 # list
 # ==========================================================================
 
@@ -255,6 +470,53 @@ def test_list_kind_config(runner: CliRunner, cli_project: Path) -> None:
     assert result.exit_code == 0, _show(result)
     assert "CONFIGS" in result.output
     assert "echo_dev" in result.output
+
+
+def test_list_tag_filters_configs(
+    runner: CliRunner, cli_project: Path
+) -> None:
+    """``list --tag hourly`` shows only the configs tagged hourly (echo_dev only)."""
+    result = runner.invoke(
+        cli,
+        ["list", "--tag", "hourly", "--project-dir", str(cli_project)],
+    )
+    assert result.exit_code == 0, _show(result)
+    out = result.output
+    # echo_dev is tagged [test, hourly] in the fixture; echo_prod is [test, daily].
+    assert "echo_dev" in out
+    assert "echo_prod" not in out
+
+
+def test_list_tag_no_match_per_section_placeholders(
+    runner: CliRunner, cli_project: Path
+) -> None:
+    """``list --tag <unmatched>`` shows the per-section "no match" placeholder."""
+    result = runner.invoke(
+        cli,
+        ["list", "--tag", "no_such_tag_anywhere", "--project-dir", str(cli_project)],
+    )
+    assert result.exit_code == 0, _show(result)
+    out = result.output
+    # Each section still appears, but with the per-section placeholder.
+    assert "SOURCES" in out
+    assert "DESTINATIONS" in out
+    assert "CONFIGS" in out
+    assert "no sources match tag" in out
+    assert "no destinations match tag" in out
+    assert "no configs match tag" in out
+
+
+def test_list_shows_tags_column_for_configs(
+    runner: CliRunner, cli_project: Path
+) -> None:
+    """The CONFIGS table now carries a TAGS column with each config's tags."""
+    result = runner.invoke(
+        cli, ["list", "--kind", "config", "--project-dir", str(cli_project)]
+    )
+    assert result.exit_code == 0, _show(result)
+    out = result.output
+    assert "TAGS" in out
+    assert "hourly" in out and "daily" in out
 
 
 # ==========================================================================

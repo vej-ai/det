@@ -5,13 +5,18 @@
 # profiles block; per-test overrides come in via run(destination_params_override=…).
 # The `echo_prod` config exists so tests can prove a different config name
 # routes the same source through a different target.
+#
+# Both configs carry tags so `det run --tag <tag>` / `det list --tag <tag>`
+# tests have a fixture to bite on (stage 8d).
 configs:
   - name: echo_dev
     source: echo
     destination: duckdb
     target: dev
+    tags: [test, hourly]
 
   - name: echo_prod
     source: echo
     destination: duckdb
     target: prod
+    tags: [test, daily]

@@ -37,7 +37,7 @@ three things, and keeping them distinct keeps the system simple.
 |---|---|---|
 | **Engine** | `dbt-core` internals | Discovery, config resolution, the run lifecycle, state, the run record. |
 | **Library** | importable `dbt` | `from det import run` — programmatic entry, equal to the CLI. |
-| **CLI** | the `dbt` binary | `det run -c <name>` / `--tag <tag>`. A thin shell over the library. |
+| **CLI** | the `dbt` binary | `det run -p <config>` / `--tag <tag>`. A thin shell over the library. |
 | **Baked connectors** | dbt's built-in macros | Connector folders shipped *inside* `det`. |
 | **Project** | a dbt project | User-owned folder: `det_project.yml`, `profiles.yml`, `connectors/`. |
 
@@ -179,24 +179,46 @@ generators; both are pulled the same way. (Their full contract — signature,
 `register.yaml` declaration, the class escape hatch — is owned by the connector
 handbook.)
 
-## Pipeline selection — by config name (post-8.B)
+## Pipeline selection — by config name or config tag (post-8d)
 
-det selects work by **pipeline config name** (chapter 12):
+det selects work by **pipeline config**:
 
 - `det run -p shiphero_prod` — run one pipeline by its config name.
 - `det run --conf shiphero_prod` — same, long-form alias.
+- `det run --tag hourly` — run every pipeline config whose `tags:` list
+  includes `hourly`. Sequential, in alphabetical config-name order.
 
-> # NOTE: pre-8.B det supported `-c <connector>` and `--tag <tag>`
-> selection. Stage 8.B removed both. A connector alone is not a complete
-> runtime unit (no destination, no target); a config is. The `tags` key on a
-> source's `register.yaml` is still parsed (it appears in `det list`), but
-> no longer drives selection — a project author groups pipelines by writing
-> multiple configs.
+`-p/--conf` and `--tag` are mutually exclusive — exactly one selector per
+invocation. Multi-config runs are **continue-on-failure**: a failure in one
+config does not stop the rest. The CLI exits `1` if any run failed, `0` if
+all succeeded, `2` if no config matched the tag (usage error).
 
-Tags are still declared in each connector's `register.yaml` and resolved at the
-**discover** stage into a concrete connector set before anything runs. Selection
-is purely a *filter over discovered connectors* — it adds no runtime concept,
-which is why it passes the det test.
+Tags live on **configs**, not on connectors. The shape mirrors dbt's model
+`tags:` — a bare list of strings on each config file:
+
+```yaml
+# configs/shiphero_prod.yml
+name: shiphero_prod
+source: shiphero
+destination: bigquery
+target: prod
+tags: [hourly, production]
+```
+
+Tags are normalized to lowercase at parse time and deduplicated; selection
+is by exact match (no glob/regex). The library equivalent is
+`det.run_tag(tag, ...)` — returns a `list[RunResult]` so the caller decides
+overall outcome.
+
+> # NOTE: pre-8.B det supported `-c <connector>` and `--tag <tag>` on
+> connectors. Stage 8.B removed both because a connector alone is not a
+> complete runtime unit (no destination, no target). Stage 8d brought
+> `--tag` back, but on **configs** — the runtime unit — instead of on
+> connectors. The `tags:` key on a source/destination's `register.yaml`
+> is still parsed (it shows up in `det list` and `det list --tag` for
+> catalog filtering) but it does NOT drive `det run --tag`. Clean
+> separation: source/destination tags = "what this connector IS"; config
+> tags = "how/when to run this pipeline".
 
 ## Destination capability tiers
 
