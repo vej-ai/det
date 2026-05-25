@@ -93,16 +93,17 @@ class _StrEnum(StrEnum):
 
 
 class Capability(Enum):
-    """A capability a destination connector declares — docs/05 §1.
+    """A capability a destination connector declares — docs/05 §1, docs/09 §4.
 
     The set returned by ``@destination.capabilities`` fixes the destination's
     capability tier at init time and drives engine behavior (whether ``merge``
     is allowed, whether the destination hosts its own state table, etc.).
 
-    # NOTE: docs/05 §1 enumerates exactly these four members. ``STATE`` absent
-    # ⇒ Tier B (object storage) ⇒ the engine routes state to a companion
-    # StateBackend. The handbook's "..." after the list is illustrative; no
-    # fifth member is specified, so we define exactly four.
+    # NOTE: docs/05 §1 originally enumerated four members. Stage 8a added
+    # ``RUN_RECORDS`` (docs/09 §4) to gate the ``_det_runs`` audit table
+    # without a contract break — destinations without it remain valid and
+    # still produce the per-run JSONL log. The enum is now the source of
+    # truth; docs/05 §1 follows it.
     """
 
     STATE = "state"
@@ -113,6 +114,15 @@ class Capability(Enum):
     """Destination can ``ALTER TABLE ADD COLUMN`` for additive evolution."""
     TRANSACTIONAL_LOAD = "transactional_load"
     """Destination can make a batch load + state commit atomic-ish."""
+    RUN_RECORDS = "run_records"
+    """Destination can host the ``_det_runs`` audit table itself (docs/09 §4).
+
+    A destination that declares this capability MUST implement
+    ``@destination.write_run_record`` — the engine calls it once per run, after
+    streams finish and before ``close``, with a fully-built :class:`RunRecord`.
+    Without this capability the engine still writes the per-run JSONL log file
+    but skips the destination-side audit row.
+    """
 
 
 class WriteDisposition(_StrEnum):
@@ -1208,6 +1218,65 @@ class RunResult:
                 else f"{type(self.error).__name__}: {self.error}"
             ),
         }
+
+
+# ---------------------------------------------------------------------------
+# RunRecord — the persistence-layer twin of RunResult (docs/09 §4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """One row in ``_det_runs`` — the queryable audit record of one run.
+
+    docs/09 §4: where :class:`RunResult` is the in-memory shape the library
+    returns and the JSONL file is the *narrative*, ``RunRecord`` is the
+    *receipt* — the destination-persisted summary one row of ``_det_runs``
+    carries. The engine builds one from the completed :class:`RunResult`
+    and hands it to ``@destination.write_run_record``.
+
+    # NOTE: ``traceback`` is intentionally **not** a field. A full traceback is
+    # often huge, frequently embeds filesystem paths and identifiers, and would
+    # bloat every ``_det_runs`` row in a way that confounds SQL drill-down.
+    # The traceback IS written (once, in full) to the per-run JSONL log file
+    # (docs/09 §3.2) — the JSONL is for forensics, the table is for
+    # queryability. ``error_type`` + ``error_message`` give a SQL caller the
+    # filterable shape ("which runs failed with ``HTTPError``?") without
+    # forcing a join through unstructured text.
+
+    # NOTE: frozen because once a run finishes the record is the canonical
+    # immutable artifact of that run. A retry of the destination write
+    # rebinds the same record; an in-place mutation would muddy the audit
+    # promise.
+    """
+
+    run_id: str
+    config: str
+    source: str
+    destination: str
+    target: str
+    status: RunStatus
+    started_at: datetime
+    ended_at: datetime
+    rows_loaded: int
+    streams: tuple[StreamResult, ...] = ()
+    full_refresh: bool = False
+    error_type: str | None = None
+    error_message: str | None = None
+
+    @property
+    def duration_s(self) -> float:
+        """Wall-clock run duration in seconds — docs/09 §4 ``duration_s``."""
+        return (self.ended_at - self.started_at).total_seconds()
+
+    def streams_json(self) -> list[dict[str, Any]]:
+        """The per-stream breakdown for the ``streams_json`` table column.
+
+        docs/09 §4: a JSON array under one column so an admin/UI can drill
+        down without joining. Uses :meth:`StreamResult.to_dict` so the per-
+        stream shape matches the JSONL log's ``stream_end`` event exactly.
+        """
+        return [s.to_dict() for s in self.streams]
 
 
 # ---------------------------------------------------------------------------

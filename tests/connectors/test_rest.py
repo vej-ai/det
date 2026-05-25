@@ -782,8 +782,10 @@ def test_authorization_header_is_redacted(caplog: pytest.LogCaptureFixture) -> N
     then drives a stream against the stub. The captured log must not contain
     the literal token, even if a developer accidentally logged it.
     """
+    from det.engine.logger import Redactor
+
     secret = "super-secret-token-shhh"
-    log = build_logger("test-redact", [secret])
+    log = build_logger("test-redact", Redactor([secret]))
 
     # Manually log the secret — proves the filter catches even an accidental
     # interpolation; the connector itself never logs header values, but defence

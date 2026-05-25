@@ -506,7 +506,9 @@ def test_redacting_filter_masks_secret() -> None:
     """The redacting filter replaces a secret value with the mask."""
     import logging
 
-    f = RedactingFilter(["super-secret-token"])
+    from det.engine.logger import Redactor
+
+    f = RedactingFilter(Redactor(["super-secret-token"]))
     record = logging.LogRecord(
         "t", logging.INFO, __file__, 1, "calling API with super-secret-token", None, None
     )
@@ -517,7 +519,9 @@ def test_redacting_filter_masks_secret() -> None:
 
 def test_build_logger_redacts(capsys: pytest.CaptureFixture[str]) -> None:
     """A logger built with a secret value never emits that value."""
-    log = build_logger("test-run", ["leaked-credential-xyz"])
+    from det.engine.logger import Redactor
+
+    log = build_logger("test-run", Redactor(["leaked-credential-xyz"]))
     log.info("token is leaked-credential-xyz here")
     captured = capsys.readouterr()
     assert "leaked-credential-xyz" not in captured.err

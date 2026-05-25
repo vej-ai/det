@@ -89,8 +89,10 @@ The runtime unit is a **config** (chapter 12) — a pipeline file under
   │      b. NORMALIZE  infer/evolve schema; coerce types per batch   │
   │      c. LOAD       hand normalized batch to the destination      │
   │      d. COMMIT     persist this stream's cursor to state         │
-  │ 6. RUN RECORD  write a structured record: per-stream rows, bytes,│
-  │                cursor, duration, status; print summary; exit     │
+  │ 6. RUN RECORD  build a RunRecord and call destination's          │
+  │                @destination.write_run_record (if Capability      │
+  │                .RUN_RECORDS) → close → emit run_end to the per-  │
+  │                run JSONL log → return RunResult. See chapter 09. │
   └─────────────────────────────────────────────────────────────────┘
 ```
 

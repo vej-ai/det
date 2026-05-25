@@ -12,7 +12,11 @@ itself is unchanged.
 The destination hooks are driven in the exact order docs/03 §3.4 / docs/05 §1
 fix::
 
-    open → read_state → [ensure_schema → write_batch ...]* → commit_state → close
+    open → read_state → [ensure_schema → write_batch ...]* → commit_state → write_run_record → close
+
+(``write_run_record`` is added at stage 8a — docs/09 §4. It is conditional
+on ``Capability.RUN_RECORDS``; without that capability the engine still
+writes the per-run JSONL log file but skips the destination-side audit row.)
 
 Locked decisions honored here:
 
@@ -35,6 +39,7 @@ Locked decisions honored here:
 from __future__ import annotations
 
 import logging
+import traceback as _tb
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -45,7 +50,7 @@ from typing import Any
 from det.engine import config as cfg
 from det.engine import configs as cfgs
 from det.engine import discovery as disc
-from det.engine.logger import build_logger
+from det.engine.logger import Redactor, RunLog, build_logger
 from det.registry import compute_injection
 from det.types import (
     Batch,
@@ -57,6 +62,7 @@ from det.types import (
     FieldType,
     PipelineConfig,
     RunConfig,
+    RunRecord,
     RunResult,
     RunStatus,
     Schema,
@@ -215,6 +221,17 @@ def _resolve_destination_hooks(
                 f"@destination.transaction hook required to honor it (docs/05 §5.3)"
             )
         hooks["transaction"] = hook.func
+
+    if Capability.RUN_RECORDS in capabilities:
+        hook = registry.hook("write_run_record")
+        if hook is None:
+            raise EngineError(
+                f"destination {dest.manifest.name!r} declares "
+                f"Capability.RUN_RECORDS but is missing the "
+                f"@destination.write_run_record hook required to honor it "
+                f"(docs/09 §4)"
+            )
+        hooks["write_run_record"] = hook.func
     return hooks, capabilities
 
 
@@ -243,8 +260,15 @@ def _run_one_stream(
     run_config: RunConfig,
     prior: StateRecord | None,
     log: Any,
+    run_log: RunLog | None = None,
 ) -> StreamResult:
-    """Run one stream end to end — docs/02 §Run lifecycle step 5 (a–d)."""
+    """Run one stream end to end — docs/02 §Run lifecycle step 5 (a–d).
+
+    Emits ``stream_start`` / ``batch_loaded`` / ``stream_committed`` events to
+    ``run_log`` (docs/09 §2) when one is supplied. ``stream_failed`` is
+    emitted by the caller when this raises — the exception carries the data
+    needed (error_type / message / traceback) and is fully recorded there.
+    """
     registration = source.registry.stream(stream_def.name)
     if registration is None:  # pragma: no cover — validate_connector caught it.
         raise EngineError(f"stream {stream_def.name!r} has no registered @stream function")
@@ -275,6 +299,14 @@ def _run_one_stream(
         available["cursor"] = cursor
     kwargs = compute_injection(registration.func, available)
 
+    if run_log is not None:
+        run_log.emit(
+            "stream_start",
+            stream=stream_def.name,
+            disposition=stream_def.write_disposition.value,
+            cursor_before=cursor_before,
+        )
+
     # -- 5b: NORMALIZE — pull the first batch and resolve the schema --------
     rows_loaded = 0
     rows_extracted = 0
@@ -297,10 +329,26 @@ def _run_one_stream(
     with _stream_transaction(hooks, conn, stream_meta):
         if first_batch is not None:
             rows_extracted += len(first_batch)
-            rows_loaded += hooks["write_batch"](conn, first_batch, stream_meta)
+            written = hooks["write_batch"](conn, first_batch, stream_meta)
+            rows_loaded += written
+            if run_log is not None:
+                run_log.emit(
+                    "batch_loaded",
+                    stream=stream_def.name,
+                    rows=written,
+                    cumulative_rows=rows_loaded,
+                )
             for batch in batches:
                 rows_extracted += len(batch)
-                rows_loaded += hooks["write_batch"](conn, batch, stream_meta)
+                written = hooks["write_batch"](conn, batch, stream_meta)
+                rows_loaded += written
+                if run_log is not None:
+                    run_log.emit(
+                        "batch_loaded",
+                        stream=stream_def.name,
+                        rows=written,
+                        cumulative_rows=rows_loaded,
+                    )
 
         cursor_after = cursor_before
         if cursor is not None and cursor.observed_max is not None:
@@ -321,6 +369,14 @@ def _run_one_stream(
         )
         hooks["commit_state"](conn, run_config.run_id, [record])
 
+    if run_log is not None:
+        run_log.emit(
+            "stream_committed",
+            stream=stream_def.name,
+            rows_loaded=rows_loaded,
+            cursor_after=cursor_after,
+        )
+
     return StreamResult(
         name=stream_def.name,
         rows_extracted=rows_extracted,
@@ -329,6 +385,76 @@ def _run_one_stream(
         cursor_after=cursor_after,
         status=StreamStatus.SUCCEEDED,
     )
+
+
+# ---------------------------------------------------------------------------
+# Run-record construction — the engine builds RunRecord from RunResult
+# ---------------------------------------------------------------------------
+
+
+def _format_traceback(exc: BaseException) -> str:
+    """Render an exception's traceback as a plain string for the JSONL log.
+
+    The full traceback lands in ``.det/logs/<run_id>/run.jsonl`` (the
+    forensics surface — docs/09 §3.2); deliberately NOT in the ``_det_runs``
+    audit row (the queryability surface — docs/09 §4 NOTE on RunRecord).
+    """
+    return "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+
+
+def _build_run_record(
+    *,
+    run_id: str,
+    config_name: str,
+    connector_name: str,
+    destination_name: str,
+    target_name: str,
+    started_at: datetime,
+    streams: list[StreamResult],
+    full_refresh: bool,
+    final_result: RunResult | None,
+) -> RunRecord:
+    """Build the :class:`RunRecord` from the engine's run state — docs/09 §4.
+
+    Single source of truth: the engine builds the record from the
+    :class:`RunResult` it already built (or from the loose locals if a
+    BaseException prevented even that). The record is what
+    ``@destination.write_run_record`` receives; the table column set is
+    derived from it.
+    """
+    if final_result is not None:
+        status = final_result.status
+        ended_at = final_result.ended_at
+        rows_loaded = final_result.rows_loaded
+        error_type, error_message = _split_error(final_result.error)
+    else:  # pragma: no cover — only on BaseException between except/finally.
+        status = RunStatus.FAILED
+        ended_at = datetime.now(UTC)
+        rows_loaded = sum(s.rows_loaded for s in streams)
+        error_type, error_message = ("BaseException", "run aborted before record")
+
+    return RunRecord(
+        run_id=run_id,
+        config=config_name,
+        source=connector_name,
+        destination=destination_name,
+        target=target_name,
+        status=status,
+        started_at=started_at,
+        ended_at=ended_at,
+        rows_loaded=rows_loaded,
+        streams=tuple(streams),
+        full_refresh=full_refresh,
+        error_type=error_type,
+        error_message=error_message,
+    )
+
+
+def _split_error(error: BaseException | None) -> tuple[str | None, str | None]:
+    """Split a run's terminal error into (error_type, error_message) — docs/09 §4."""
+    if error is None:
+        return None, None
+    return type(error).__name__, str(error)
 
 
 # ---------------------------------------------------------------------------
@@ -404,13 +530,32 @@ def run(
     streams: list[StreamResult] = []
     conn: Any = None
     hooks: dict[str, Callable[..., Any]] | None = None
-    log = build_logger(run_id)
+    capabilities: set[Capability] = set()
+    run_log: RunLog | None = None
+    log_path: str = ""
+    # The RunResult assembled in the try/except. Captured into this slot so
+    # the finally block can build the RunRecord from the same authoritative
+    # data (the in-memory shape is the source; the record is its
+    # persistence-layer twin — docs/09 §4).
+    final_result: RunResult | None = None
+    # The shared redactor is created here so the JSONL writer (opened before
+    # stage 2 RESOLVE) and the stdlib logger (rebuilt after secrets resolve)
+    # both mask through the same mutable bag of secret values (docs/09 §5).
+    redactor = Redactor()
+    log = build_logger(run_id, redactor)
 
     try:
         # -- Stage 1: DISCOVER ----------------------------------------------
         project_root = disc.find_project_root(project_dir)
         project = cfg.ProjectConfig.load(project_root)
         profiles = cfg.Profiles.load(project_root)
+
+        # Open the JSONL log file as soon as the project root is known — a
+        # destination-open failure (or any later stage) is still captured.
+        # ``.det/logs/`` is per-project; the dir is created lazily.
+        run_log = RunLog(run_id, project_root / ".det" / "logs", redactor)
+        log_path = str(run_log.path)
+        log = build_logger(run_id, redactor, run_log=run_log)
 
         pipeline: PipelineConfig = cfgs.load_config(
             config, project_root, list(project.config_paths)
@@ -460,6 +605,10 @@ def run(
             overrides=dest_overrides,
         )
 
+        # Resolved-secret values now exist; load them into the shared redactor
+        # so every subsequent emission (stdlib + JSONL) masks them.
+        redactor.add(source_config.secrets.values())
+
         # CLI --select REPLACES the config's select (not unions). docs/07.
         effective_select = tuple(select) if select else pipeline.select
 
@@ -472,10 +621,22 @@ def run(
             select=effective_select,
             full_refresh=full_refresh,
         )
-        log = build_logger(run_id, source_config.secrets.values())
+
+        # The single ``run_start`` event — emitted *after* discovery + resolve
+        # succeed so every config/source/destination/target field is known
+        # (docs/09 §2 event table). A pre-discovery failure has no run_start,
+        # which itself signals "the run never began."
+        run_log.emit(
+            "run_start",
+            config=config_name,
+            source=connector_name,
+            destination=destination_name,
+            target=target_name,
+            full_refresh=full_refresh,
+        )
 
         # -- Stage 3: INIT DEST ---------------------------------------------
-        hooks, _capabilities = _resolve_destination_hooks(dest)
+        hooks, capabilities = _resolve_destination_hooks(dest)
         conn = hooks["open"](Config(params=dict(dest_config.params)))
 
         # -- Stage 4: LOAD STATE --------------------------------------------
@@ -495,6 +656,7 @@ def run(
                 )
                 continue
             log.info("running stream %r", stream_def.name)
+            run_log.active_stream = stream_def.name
             try:
                 result = _run_one_stream(
                     stream_def,
@@ -504,24 +666,37 @@ def run(
                     run_config,
                     state_by_stream.get(stream_def.name),
                     log,
+                    run_log=run_log,
                 )
             except Exception as exc:  # noqa: BLE001 — recorded, then re-raised.
                 streams.append(
                     StreamResult(name=stream_def.name, status=StreamStatus.FAILED)
                 )
+                # Capture the traceback in the JSONL (the table-side record
+                # deliberately omits tracebacks — docs/09 §4 NOTE).
+                run_log.emit(
+                    "stream_failed",
+                    stream=stream_def.name,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    traceback=_format_traceback(exc),
+                )
                 stream_error = exc
                 break
-            streams.append(result)
-            log.info(
-                "stream %r loaded %d row(s)", stream_def.name, result.rows_loaded
-            )
+            else:
+                streams.append(result)
+                log.info(
+                    "stream %r loaded %d row(s)", stream_def.name, result.rows_loaded
+                )
+            finally:
+                run_log.active_stream = None
 
         if stream_error is not None:
             raise stream_error
 
         ended_at = datetime.now(UTC)
         total_rows = sum(s.rows_loaded for s in streams)
-        return RunResult(
+        final_result = RunResult(
             run_id=run_id,
             config=config_name,
             connector=connector_name,
@@ -533,11 +708,13 @@ def run(
             streams=streams,
             rows_loaded=total_rows,
             full_refresh=full_refresh,
+            log_path=log_path,
         )
+        return final_result
 
     except Exception as exc:  # noqa: BLE001 — run() never raises; see docstring.
         log.error("run failed: %s: %s", type(exc).__name__, exc)
-        return RunResult(
+        final_result = RunResult(
             run_id=run_id,
             config=config_name,
             connector=connector_name,
@@ -550,7 +727,58 @@ def run(
             rows_loaded=sum(s.rows_loaded for s in streams),
             full_refresh=full_refresh,
             error=exc,
+            log_path=log_path,
         )
+        return final_result
     finally:
+        # The RunResult is built; rebind it into a RunRecord (the
+        # persistence-layer twin — docs/09 §4) and persist it before
+        # close. ``final_result`` is None ONLY if a BaseException escaped
+        # both branches (e.g. KeyboardInterrupt during except-block
+        # assignment) — in that case we still want a record on disk if
+        # possible, so build one from the loose locals.
+        record = _build_run_record(
+            run_id=run_id,
+            config_name=config_name,
+            connector_name=connector_name,
+            destination_name=destination_name,
+            target_name=target_name,
+            started_at=started_at,
+            streams=streams,
+            full_refresh=full_refresh,
+            final_result=final_result,
+        )
+        # Run-record write goes BEFORE close, INSIDE the finally so it
+        # runs on success and failure paths (docs/09 §4: "A run record is
+        # written even when a run fails"). Failure to write the audit row
+        # must not mask the run's real error, so any exception here is
+        # logged and dropped (the JSONL file is the durable fallback).
+        if (
+            conn is not None
+            and hooks is not None
+            and Capability.RUN_RECORDS in capabilities
+            and "write_run_record" in hooks
+        ):
+            try:
+                hooks["write_run_record"](conn, record)
+            except Exception as wr_exc:  # noqa: BLE001 — must not mask the real error.
+                log.error(
+                    "write_run_record failed for run %s: %s: %s",
+                    run_id,
+                    type(wr_exc).__name__,
+                    wr_exc,
+                )
+
+        if run_log is not None:
+            run_log.emit(
+                "run_end",
+                status=record.status.value,
+                rows_loaded=record.rows_loaded,
+                duration_s=record.duration_s,
+                error_type=record.error_type,
+                error_message=record.error_message,
+            )
+            run_log.close()
+
         if conn is not None and hooks is not None:
             hooks["close"](conn)

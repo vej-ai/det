@@ -85,13 +85,14 @@ def test_enum_parse_rejects_non_string() -> None:
         FieldType.parse(42)
 
 
-def test_capability_has_exactly_four_members() -> None:
-    """Capability matches docs/05 §1 exactly — four members, no more."""
+def test_capability_has_exactly_five_members() -> None:
+    """Capability matches docs/05 §1 + docs/09 §4 (stage 8a added RUN_RECORDS)."""
     assert {c.name for c in Capability} == {
         "STATE",
         "MERGE",
         "SCHEMA_EVOLUTION",
         "TRANSACTIONAL_LOAD",
+        "RUN_RECORDS",
     }
 
 

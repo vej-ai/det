@@ -150,9 +150,13 @@ for users who want to handle loading themselves, in addition to whole-run
 A `det logs <run_id>` command to pretty-print a past run's `run.jsonl`, and
 a `--keep-logs <n>` retention flag.
 
-- **Lean:** both v2 — quality-of-life, neither v1-critical.
+- **Resolution (stage 8a, 2026-05-25):** the pretty-print command landed as
+  `det runs show <run_id>` — it prints the `_det_runs` summary AND the
+  events from `run.jsonl`, which is the strictly stronger form. The
+  `--keep-logs <n>` retention flag remains v2 (still
+  quality-of-life-only — `.det/logs/` is gitignored and operator-managed).
 - **Stakes:** Operator ergonomics only.
-- **Decide by:** v2.
+- **Decide by:** retention v2.
 
 ---
 

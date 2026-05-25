@@ -25,9 +25,12 @@ from det import (
     Field,
     FieldMode,
     FieldType,
+    RunRecord,
+    RunStatus,
     Schema,
     StateRecord,
     StreamMeta,
+    StreamResult,
     WriteDisposition,
 )
 from det.destinations.duckdb.ddl import (
@@ -80,13 +83,14 @@ def _events_meta(
 
 
 def test_capabilities_declares_tier_a_merge_evolution(duckdb_destination: LoadedConnector) -> None:
-    """DuckDB declares STATE, MERGE, SCHEMA_EVOLUTION and TRANSACTIONAL_LOAD."""
+    """DuckDB declares STATE, MERGE, SCHEMA_EVOLUTION, TRANSACTIONAL_LOAD and RUN_RECORDS."""
     caps = _hooks(duckdb_destination)["capabilities"]()
     assert caps == {
         Capability.STATE,
         Capability.MERGE,
         Capability.SCHEMA_EVOLUTION,
         Capability.TRANSACTIONAL_LOAD,
+        Capability.RUN_RECORDS,
     }
 
 
@@ -620,3 +624,131 @@ def test_dataset_param_places_tables_in_schema(
         "WHERE table_name = 'echo_events'",
     )[0][0]
     assert schema == "analytics"
+
+
+# --------------------------------------------------------------------------
+# write_run_record — _det_runs audit table — docs/09 §4
+# --------------------------------------------------------------------------
+
+
+def _build_record(
+    run_id: str = "run-abc123",
+    *,
+    status: RunStatus = RunStatus.SUCCEEDED,
+    rows_loaded: int = 5,
+    streams: tuple[StreamResult, ...] = (),
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> RunRecord:
+    """Build a RunRecord for the write_run_record hook tests."""
+    started = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    ended = datetime(2026, 5, 25, 12, 0, 5, tzinfo=UTC)
+    return RunRecord(
+        run_id=run_id,
+        config="echo_dev",
+        source="echo",
+        destination="duckdb",
+        target="dev",
+        status=status,
+        started_at=started,
+        ended_at=ended,
+        rows_loaded=rows_loaded,
+        streams=streams,
+        full_refresh=False,
+        error_type=error_type,
+        error_message=error_message,
+    )
+
+
+def test_write_run_record_creates_table_and_inserts_row(
+    duckdb_destination: LoadedConnector,
+    duckdb_path: str,
+    query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
+) -> None:
+    """write_run_record lazily creates _det_runs and writes one row per RunRecord."""
+    hooks = _hooks(duckdb_destination)
+    conn = _open(duckdb_destination, duckdb_path)
+    streams = (
+        StreamResult(name="events", rows_extracted=4, rows_loaded=4),
+        StreamResult(name="items", rows_extracted=5, rows_loaded=5, cursor_after=5),
+    )
+    hooks["write_run_record"](conn, _build_record(streams=streams, rows_loaded=9))
+    hooks["close"](conn)
+
+    rows = query_duckdb(
+        duckdb_path,
+        "SELECT run_id, config, source, destination, target, status, "
+        "rows_loaded, full_refresh, duration_s, error_type FROM _det_runs",
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row[0] == "run-abc123"
+    assert row[1] == "echo_dev"
+    assert row[2] == "echo"
+    assert row[3] == "duckdb"
+    assert row[4] == "dev"
+    assert row[5] == "succeeded"
+    assert row[6] == 9
+    assert row[7] is False
+    assert row[8] == 5.0  # 12:00:05 - 12:00:00
+    assert row[9] is None
+
+
+def test_write_run_record_persists_streams_json(
+    duckdb_destination: LoadedConnector,
+    duckdb_path: str,
+    query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
+) -> None:
+    """The per-stream breakdown lands as a JSON array readable via JSON ops."""
+    hooks = _hooks(duckdb_destination)
+    conn = _open(duckdb_destination, duckdb_path)
+    streams = (StreamResult(name="items", rows_loaded=3, cursor_after=42),)
+    hooks["write_run_record"](conn, _build_record(streams=streams, rows_loaded=3))
+    hooks["close"](conn)
+
+    name = query_duckdb(
+        duckdb_path, "SELECT streams_json->>'$[0].name' FROM _det_runs"
+    )[0][0]
+    assert name == "items"
+
+
+def test_write_run_record_is_idempotent_on_run_id(
+    duckdb_destination: LoadedConnector,
+    duckdb_path: str,
+    query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
+) -> None:
+    """Writing the same run_id twice updates rather than duplicating — docs/09 §4."""
+    hooks = _hooks(duckdb_destination)
+    conn = _open(duckdb_destination, duckdb_path)
+    hooks["write_run_record"](conn, _build_record(rows_loaded=1))
+    hooks["write_run_record"](conn, _build_record(rows_loaded=99))
+    hooks["close"](conn)
+
+    rows = query_duckdb(duckdb_path, "SELECT count(*), max(rows_loaded) FROM _det_runs")
+    assert rows[0] == (1, 99)
+
+
+def test_write_run_record_persists_error_fields_on_failure(
+    duckdb_destination: LoadedConnector,
+    duckdb_path: str,
+    query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
+) -> None:
+    """A failed run stores error_type + error_message; status is 'failed'."""
+    hooks = _hooks(duckdb_destination)
+    conn = _open(duckdb_destination, duckdb_path)
+    hooks["write_run_record"](
+        conn,
+        _build_record(
+            status=RunStatus.FAILED,
+            rows_loaded=0,
+            error_type="HTTPError",
+            error_message="boom",
+        ),
+    )
+    hooks["close"](conn)
+
+    row = query_duckdb(
+        duckdb_path,
+        "SELECT status, error_type, error_message FROM _det_runs",
+    )[0]
+    assert row == ("failed", "HTTPError", "boom")

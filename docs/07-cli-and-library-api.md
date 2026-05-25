@@ -162,6 +162,27 @@ clears the cursor without touching loaded data, so the next run re-extracts
 the window. Both read/write the `_det_state` table described in
 [05 — Destinations and State](./05-destinations-and-state.md).
 
+### `det runs {list|show}` — inspect run history
+
+Every run lands two artifacts: an audit row in `_det_runs` and a per-run
+JSONL log at `.det/logs/<run_id>/run.jsonl` (see
+[09 — Logging and Observability](./09-logging-and-observability.md)).
+These commands read them back.
+
+```bash
+det runs list -p stripe_prod                  # recent runs (default --limit 20)
+det runs list -p stripe_prod --limit 5        # the most recent five
+det runs show <run_id> -p stripe_prod         # full record + JSONL events
+det runs show abc123def -p stripe_prod        # short id (12-hex tail) also works
+```
+
+`-p <config>` is **required** — run records are stored per destination, and
+the config disambiguates which destination's `_det_runs` to query (a
+project with multiple destinations would otherwise need a multi-store
+union v1 does not honour; a future `--destination <name>` is the natural
+relaxation). `show` colors events by type on a TTY; piped output is plain
+JSON-lines.
+
 ### `det --version`
 
 Print the installed package version and exit 0.

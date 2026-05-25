@@ -5,7 +5,7 @@ docs/05 §2 catalog row: "DuckDB — Local ``.duckdb`` file; ``INSERT`` /
 v1 dev default and every contract test runs through it, so this is built as
 genuinely production-quality code, not a stub.
 
-Hook contract — docs/03 §3.4 / docs/05 §1, exact signatures:
+Hook contract — docs/03 §3.4 / docs/05 §1 / docs/09 §4, exact signatures:
 
 * ``capabilities() -> set[Capability]``
 * ``open(config) -> conn``
@@ -13,11 +13,13 @@ Hook contract — docs/03 §3.4 / docs/05 §1, exact signatures:
 * ``write_batch(conn, table, batch, disposition) -> int``
 * ``read_state(conn, connector) -> list[StateRecord]``
 * ``commit_state(conn, run_id, records) -> None``
+* ``transaction(conn, stream) -> contextmanager``  (Capability.TRANSACTIONAL_LOAD)
+* ``write_run_record(conn, record) -> None``       (Capability.RUN_RECORDS)
 * ``close(conn) -> None``
 
 The engine drives them in the order
-``open → read_state → [ensure_schema → write_batch ...]* → commit_state → close``
-(docs/05 §1); ``close`` always runs.
+``open → read_state → [ensure_schema → write_batch ...]* → commit_state → write_run_record → close``
+(docs/05 §1, docs/09 §4); ``close`` always runs.
 
 The ``conn`` passed between hooks is a :class:`DuckConn` wrapper, **not** the
 raw ``duckdb`` connection — see its docstring for why.
@@ -44,6 +46,7 @@ from det import (
     Batch,
     Capability,
     Config,
+    RunRecord,
     Schema,
     StateRecord,
     StreamMeta,
@@ -74,6 +77,12 @@ _DEFAULT_DB_PATH = ".det/warehouse.duckdb"
 # consistent across all engine-owned tables.
 _STATE_TABLE = "_det_state"
 
+# The engine-owned run-record audit table — docs/09 §4. One row per run;
+# primary key ``run_id``. Same ``_det_`` namespace as ``_det_state`` so both
+# engine tables sort together and apart from user tables. Created lazily on
+# first write_run_record call via the ``DuckConn.runs_table_ready`` flag.
+_RUNS_TABLE = "_det_runs"
+
 
 @dataclass
 class DuckConn:
@@ -102,6 +111,7 @@ class DuckConn:
     dataset: str | None = None
     replace_truncated: set[str] = field(default_factory=set)
     state_table_ready: bool = False
+    runs_table_ready: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -127,12 +137,17 @@ def capabilities() -> set[Capability]:
       ``[write_batch… → commit_state]`` block in that context; a crash
       mid-stream rolls back, so an ``append`` stream never leaves half-written
       duplicates (docs/05 §5.3).
+    * ``RUN_RECORDS`` — DuckDB hosts the ``_det_runs`` audit table alongside
+      ``_det_state``, so a run's structured record is queryable with plain
+      SQL (docs/09 §4). The ``@destination.write_run_record`` hook below
+      implements it.
     """
     return {
         Capability.STATE,
         Capability.MERGE,
         Capability.SCHEMA_EVOLUTION,
         Capability.TRANSACTIONAL_LOAD,
+        Capability.RUN_RECORDS,
     }
 
 
@@ -682,3 +697,119 @@ def _decode_json(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+# --------------------------------------------------------------------------
+# write_run_record — the _det_runs audit table — docs/09 §4 (Capability.RUN_RECORDS)
+# --------------------------------------------------------------------------
+
+
+def _ensure_runs_table(conn: DuckConn) -> None:
+    """Create ``_det_runs`` lazily on first use — docs/09 §4.
+
+    Columns (the canonical schema, destination-agnostic in the logical
+    design; the DuckDB implementation maps them to native types here):
+
+    * ``run_id``        TEXT, PRIMARY KEY — one row per run, upsertable.
+    * ``config``        TEXT — the pipeline config name.
+    * ``source``        TEXT — the source connector name.
+    * ``destination``   TEXT — the destination connector name.
+    * ``target``        TEXT — the profiles.yml target used.
+    * ``status``        TEXT — ``succeeded`` / ``failed``.
+    * ``started_at``    TIMESTAMP — run window open.
+    * ``ended_at``      TIMESTAMP — run window close.
+    * ``duration_s``    DOUBLE — computed seconds.
+    * ``rows_loaded``   BIGINT — total rows across streams.
+    * ``full_refresh``  BOOLEAN — whether state was discarded.
+    * ``error_type``    TEXT, nullable — exception class name on failure.
+    * ``error_message`` TEXT, nullable — exception message on failure.
+    * ``streams_json``  JSON — per-stream array (StreamResult.to_dict each).
+
+    # NOTE: ``duration_s`` is stored as a real column (not computed at read
+    # time) so SQL ``ORDER BY duration_s DESC`` "show me the slowest runs"
+    # works without a derivation expression — a common admin query, and the
+    # value is trivially cheap to compute once at write time.
+    """
+    if conn.runs_table_ready:
+        return
+    table = qualified_table(conn.dataset, _RUNS_TABLE)
+    conn.conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {table} ("
+        f"  {quote_identifier('run_id', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('config', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('source', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('destination', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('target', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('status', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('started_at', kind='column')} TIMESTAMP NOT NULL, "
+        f"  {quote_identifier('ended_at', kind='column')} TIMESTAMP NOT NULL, "
+        f"  {quote_identifier('duration_s', kind='column')} DOUBLE NOT NULL, "
+        f"  {quote_identifier('rows_loaded', kind='column')} BIGINT NOT NULL DEFAULT 0, "
+        f"  {quote_identifier('full_refresh', kind='column')} BOOLEAN NOT NULL DEFAULT FALSE, "
+        f"  {quote_identifier('error_type', kind='column')} VARCHAR, "
+        f"  {quote_identifier('error_message', kind='column')} VARCHAR, "
+        f"  {quote_identifier('streams_json', kind='column')} JSON, "
+        f"  PRIMARY KEY ({quote_identifier('run_id', kind='column')})"
+        f")"
+    )
+    conn.runs_table_ready = True
+
+
+@destination.write_run_record
+def write_run_record(conn: DuckConn, record: RunRecord) -> None:
+    """Persist one :class:`RunRecord` to ``_det_runs`` — docs/09 §4.
+
+    Called once per run by the engine, after streams finish and before
+    ``close`` (docs/05 §1 lifecycle, stage 8a addendum). The write is
+    idempotent on ``run_id``: a duplicate write of the same record updates
+    the row rather than duplicating it. The engine only writes once, but
+    the upsert is the defensive guarantee — a future retry-on-transient
+    cannot corrupt the audit chain.
+
+    ``streams_json`` is a ``JSON`` column so per-stream detail (rows,
+    cursor, status) survives in queryable form without a join.
+    :func:`_encode_json_column` serializes it (the stage-7 split: data
+    binds go to typed columns; JSON-column binds go through dumps).
+    """
+    _ensure_runs_table(conn)
+    table = qualified_table(conn.dataset, _RUNS_TABLE)
+    sql = (
+        f"INSERT INTO {table} ("
+        f"  run_id, config, source, destination, target, status, "
+        f"  started_at, ended_at, duration_s, rows_loaded, full_refresh, "
+        f"  error_type, error_message, streams_json"
+        f") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        f"ON CONFLICT (run_id) DO UPDATE SET "
+        f"  config        = EXCLUDED.config, "
+        f"  source        = EXCLUDED.source, "
+        f"  destination   = EXCLUDED.destination, "
+        f"  target        = EXCLUDED.target, "
+        f"  status        = EXCLUDED.status, "
+        f"  started_at    = EXCLUDED.started_at, "
+        f"  ended_at      = EXCLUDED.ended_at, "
+        f"  duration_s    = EXCLUDED.duration_s, "
+        f"  rows_loaded   = EXCLUDED.rows_loaded, "
+        f"  full_refresh  = EXCLUDED.full_refresh, "
+        f"  error_type    = EXCLUDED.error_type, "
+        f"  error_message = EXCLUDED.error_message, "
+        f"  streams_json  = EXCLUDED.streams_json"
+    )
+    conn.conn.execute(
+        sql,
+        [
+            record.run_id,
+            record.config,
+            record.source,
+            record.destination,
+            record.target,
+            record.status.value,
+            record.started_at,
+            record.ended_at,
+            record.duration_s,
+            record.rows_loaded,
+            record.full_refresh,
+            record.error_type,
+            record.error_message,
+            _encode_json_column(record.streams_json()),
+        ],
+    )

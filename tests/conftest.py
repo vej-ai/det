@@ -144,3 +144,29 @@ def duckdb_destination() -> Iterator[LoadedConnector]:
 def echo_source() -> Iterator[LoadedConnector]:
     """The echo fixture source connector, loaded via the harness."""
     yield load_connector(ECHO_CONNECTOR_DIR)
+
+
+# The committed fixture project (`tests/fixtures/`) is a real det project, so
+# tests that call ``det.run(project_dir=str(FIXTURES_DIR), ...)`` cause the
+# engine to write its per-run JSONL log into ``tests/fixtures/.det/logs/``
+# (stage 8a, docs/09 §3.2 — project-rooted by design). ``.det/`` is
+# gitignored, but accumulated cruft over many runs is ugly. This autouse
+# fixture wipes it before *and* after each test, keeping the committed tree
+# spotless. Tests that copy the fixture into ``tmp_path`` are unaffected.
+_FIXTURE_DET_DIR = (
+    Path(__file__).resolve().parent / "fixtures" / ".det"
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_fixture_det_dir() -> Iterator[None]:
+    """Remove ``tests/fixtures/.det/`` around each test (engine writes leak there)."""
+    import shutil as _sh
+
+    if _FIXTURE_DET_DIR.exists():
+        _sh.rmtree(_FIXTURE_DET_DIR, ignore_errors=True)
+    try:
+        yield
+    finally:
+        if _FIXTURE_DET_DIR.exists():
+            _sh.rmtree(_FIXTURE_DET_DIR, ignore_errors=True)

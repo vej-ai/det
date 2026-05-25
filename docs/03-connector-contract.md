@@ -524,6 +524,7 @@ def close(conn):                         # flush + release — always runs
 | `@destination.read_state` | If `Capability.STATE` | Loads prior cursor state at run start. |
 | `@destination.state_backend` | If **not** `Capability.STATE` | Returns a companion state backend for Tier B (object-storage) destinations. |
 | `@destination.transaction` | If `Capability.TRANSACTIONAL_LOAD` | A context-manager hook the engine wraps around each stream's `write_batch`+`commit_state` block, so data and cursor flip atomically. See chapter 05 §1. |
+| `@destination.write_run_record` | If `Capability.RUN_RECORDS` | Persists one `RunRecord` row into `_det_runs` — the queryable audit table. Called once per run, after streams finish and before `close`. See chapter 09 §4. |
 | `@destination.close` | **Yes** | Flushes and releases resources. Runs even on failure. |
 
 The `Capability` enum referenced above (`STATE`, `MERGE`, `SCHEMA_EVOLUTION`, …)
@@ -533,8 +534,10 @@ which members it supports, and that set fixes its capability tier.
 The engine never calls these out of order. The per-run lifecycle is:
 
 ```
-open → read_state → [ensure_schema → write_batch ...]* → commit_state → close
+open → read_state → [ensure_schema → write_batch ...]* → commit_state → write_run_record → close
 ```
+
+(`write_run_record` is conditional on `Capability.RUN_RECORDS`; without that capability the engine simply skips it.)
 
 A `@destination` hook does not yield — `write_batch` returns when the batch is
 durably written; an exception means the batch failed and the engine retries per

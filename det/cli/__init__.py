@@ -32,6 +32,7 @@ Command surface:
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -46,6 +47,9 @@ from det.cli._discovery import (
     discover_all_sources,
 )
 from det.cli._format import print_run_result, render_table
+from det.cli._runs import get_run as runs_get
+from det.cli._runs import list_runs as runs_list
+from det.cli._runs import read_log_lines
 from det.cli._scaffold import (
     ScaffoldError,
     scaffold_config,
@@ -735,6 +739,238 @@ def state_reset(
             fg="green",
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# runs
+# ---------------------------------------------------------------------------
+
+
+_RUN_STATUS_COLOR: dict[str, str] = {
+    "succeeded": "green",
+    "failed": "red",
+}
+
+
+def _fmt_dt(value: Any) -> str:
+    """Render a datetime cell for the runs table — '-' if absent."""
+    if value is None:
+        return "-"
+    if hasattr(value, "isoformat"):
+        return value.isoformat(sep=" ", timespec="seconds")
+    return str(value)
+
+
+def _fmt_short(run_id: str) -> str:
+    """Trim a ``run-<12hex>`` id to ``<12hex>`` for compact tables."""
+    if run_id.startswith("run-"):
+        return run_id[len("run-"):]
+    return run_id
+
+
+@cli.group()
+def runs() -> None:
+    """Inspect run history (the destination's _det_runs + per-run JSONL log)."""
+
+
+@runs.command(name="list")
+@click.option(
+    "-p",
+    "--conf",
+    "config",
+    required=True,
+    metavar="CONFIG",
+    help="Pipeline config name. Required — run records are per-destination, "
+    "and the config disambiguates which destination to query.",
+)
+@click.option(
+    "--limit", "limit", type=int, default=20, show_default=True,
+    help="Max number of recent runs to show.",
+)
+@click.option(
+    "--target", "target", help="Override the config's target for this lookup."
+)
+@click.option(
+    "--project-dir",
+    "project_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Project root. Defaults to the current directory.",
+)
+@click.option(
+    "--destination-param",
+    "destination_params",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Override a destination config value. Repeatable.",
+)
+def runs_list_cmd(
+    config: str,
+    limit: int,
+    target: str | None,
+    project_dir: Path | None,
+    destination_params: tuple[str, ...],
+) -> None:
+    """List recent runs from the destination's ``_det_runs`` table.
+
+    Run records are written by the destination's
+    ``@destination.write_run_record`` hook (docs/09 §4). Tier-A destinations
+    declaring ``Capability.RUN_RECORDS`` host the table; this command opens
+    the same destination the config binds to and queries it.
+    """
+    dest_params = _parse_kv("destination-param", destination_params)
+    try:
+        rows = runs_list(
+            config,
+            limit=limit,
+            project_dir=project_dir,
+            target=target,
+            destination_params=dest_params or None,
+        )
+    except _FRIENDLY_ERRORS as exc:
+        _fail(str(exc), code=2)
+        return  # unreachable.
+
+    if not rows:
+        click.echo(f"config {config!r} has no run records")
+        return
+
+    table_rows: list[list[str]] = []
+    for r in rows:
+        color = _RUN_STATUS_COLOR.get(r.status.value, "white")
+        table_rows.append(
+            [
+                _fmt_short(r.run_id),
+                r.config,
+                click.style(r.status.value, fg=color),
+                _fmt_dt(r.started_at),
+                f"{r.duration_s:.2f}s",
+                str(r.rows_loaded),
+                r.error_type or "-",
+            ]
+        )
+    click.echo(
+        render_table(
+            ["RUN", "CONFIG", "STATUS", "STARTED", "DURATION", "ROWS", "ERROR"],
+            table_rows,
+        )
+    )
+
+
+@runs.command(name="show")
+@click.argument("run_id")
+@click.option(
+    "-p",
+    "--conf",
+    "config",
+    required=True,
+    metavar="CONFIG",
+    help="Pipeline config name. Required — run records are per-destination.",
+)
+@click.option(
+    "--target", "target", help="Override the config's target for this lookup."
+)
+@click.option(
+    "--project-dir",
+    "project_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Project root. Defaults to the current directory.",
+)
+@click.option(
+    "--destination-param",
+    "destination_params",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Override a destination config value. Repeatable.",
+)
+def runs_show_cmd(
+    run_id: str,
+    config: str,
+    target: str | None,
+    project_dir: Path | None,
+    destination_params: tuple[str, ...],
+) -> None:
+    """Show one run's full record + its JSONL log file — docs/09 §3.2, §4.
+
+    Looks up ``<run_id>`` in ``_det_runs`` (the queryable summary) and
+    reads ``.det/logs/<run_id>/run.jsonl`` (the narrative). Accepts the
+    short form (``abc123def``) or the long form (``run-abc123def``).
+    """
+    dest_params = _parse_kv("destination-param", destination_params)
+    canonical = run_id if run_id.startswith("run-") else f"run-{run_id}"
+    try:
+        record, log_path = runs_get(
+            config,
+            canonical,
+            project_dir=project_dir,
+            target=target,
+            destination_params=dest_params or None,
+        )
+    except _FRIENDLY_ERRORS as exc:
+        _fail(str(exc), code=2)
+        return  # unreachable.
+
+    if record is None and log_path is None:
+        _fail(f"no run record or log for {run_id!r}", code=1)
+        return
+
+    if record is not None:
+        click.echo(click.style(f"run {record.run_id}", bold=True))
+        click.echo(f"  config       : {record.config}")
+        click.echo(f"  source       : {record.source}")
+        click.echo(f"  destination  : {record.destination}")
+        click.echo(f"  target       : {record.target}")
+        color = _RUN_STATUS_COLOR.get(record.status.value, "white")
+        click.echo(f"  status       : {click.style(record.status.value, fg=color)}")
+        click.echo(f"  started_at   : {_fmt_dt(record.started_at)}")
+        click.echo(f"  ended_at     : {_fmt_dt(record.ended_at)}")
+        click.echo(f"  duration_s   : {record.duration_s:.2f}")
+        click.echo(f"  rows_loaded  : {record.rows_loaded}")
+        click.echo(f"  full_refresh : {record.full_refresh}")
+        if record.error_type or record.error_message:
+            click.echo(
+                click.style(
+                    f"  error        : {record.error_type}: {record.error_message}",
+                    fg="red",
+                )
+            )
+        if record.streams:
+            click.echo("  streams      :")
+            for s in record.streams:
+                click.echo(
+                    f"    - {s.get('name')}: status={s.get('status')} "
+                    f"rows_loaded={s.get('rows_loaded')} "
+                    f"cursor_after={s.get('cursor_after')}"
+                )
+    else:
+        click.echo(click.style(f"no _det_runs row for {run_id!r}", fg="yellow"))
+
+    click.echo()
+    if log_path is None:
+        click.echo(click.style("no JSONL log file found", fg="yellow"))
+        return
+
+    click.echo(click.style(f"log: {log_path}", bold=True))
+    events = read_log_lines(log_path)
+    if not events:
+        click.echo("(log file is empty)")
+        return
+    use_color = click.get_text_stream("stdout").isatty()
+    for event in events:
+        event_name = str(event.get("event", "?"))
+        rendered = json.dumps(event, default=str)
+        if use_color:
+            event_color = {
+                "run_start": "cyan",
+                "stream_start": "cyan",
+                "batch_loaded": "white",
+                "stream_committed": "green",
+                "stream_failed": "red",
+                "run_end": "cyan",
+                "user": "yellow",
+            }.get(event_name)
+            if event_color:
+                rendered = click.style(rendered, fg=event_color)
+        click.echo(rendered)
 
 
 # ---------------------------------------------------------------------------

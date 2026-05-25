@@ -337,18 +337,26 @@ DESTINATION_HOOKS: frozenset[str] = frozenset(
         "read_state",
         "state_backend",
         "transaction",
+        "write_run_record",
         "close",
     }
 )
 """Every valid ``@destination.*`` hook name — docs/03 §3.4, docs/05 §1.
 
-Nine hooks. ``@destination.<anything-else>`` (e.g. a ``write_batchs`` typo)
+Ten hooks. ``@destination.<anything-else>`` (e.g. a ``write_batchs`` typo)
 raises :class:`AttributeError` at import time.
 
 ``transaction`` is a *conditionally* mandatory hook: a destination that
 declares ``Capability.TRANSACTIONAL_LOAD`` must define it (a context-manager
 hook the engine wraps around each stream's ``[ensure_schema → write_batch… →
 commit_state]`` block, so data and cursor flip atomically per stream).
+
+``write_run_record`` is a *conditionally* mandatory hook (docs/09 §4, stage
+8a): a destination that declares ``Capability.RUN_RECORDS`` must define it.
+The engine calls it once per run, after streams finish and before ``close``,
+with a fully-built :class:`~det.types.RunRecord`. It is the destination's
+half of the run-record audit table (``_det_runs``); the per-run JSONL log
+file is the engine's half and is written regardless of capability.
 """
 
 # NOTE: docs/03 §3.4 / docs/05 §1 mark capabilities/open/ensure_schema/

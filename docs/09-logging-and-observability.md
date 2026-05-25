@@ -2,34 +2,39 @@
 
 > Part of the det design handbook. See [README.md](./README.md) for the full table of contents.
 
-The operator's requirement is plain: **"I want to know exactly what is happening."** det meets it with one mechanism — structured, per-run logging — used two ways: a human-readable stream while a run is in progress, and a machine-readable record after it. There is no separate metrics system, no agent, no telemetry. Logs *are* the observability layer.
+The operator's requirement is plain: **"I want to know exactly what is happening."** det meets it with one mechanism — structured per-run logging — used two ways: a JSON-lines file every run writes to disk, and a `_det_runs` audit row the destination persists. There is no separate metrics system, no agent, no telemetry. Logs *are* the observability layer.
 
 ---
 
 ## 1. Principles
 
-- **Structured first.** Every log line is a JSON object. Human-readable text is a *rendering* of that object for a TTY, not a separate code path.
-- **Per-run scoped.** Every line carries the `run_id`. One run's story is fully reconstructable from its log file alone.
+- **Structured first.** Every event is a JSON object. Human-readable text is a *rendering* of that object for a TTY, not a separate code path.
+- **Per-run scoped.** Every event carries the `run_id`. One run's story is fully reconstructable from its log file alone.
 - **Self-hosted, no phone-home.** Logs are written to the local filesystem and (optionally) the destination. det sends nothing anywhere.
-- **Simple now, sufficient for later.** The same structured records that a human reads today are what a future UI and orchestrators consume tomorrow — without a new system.
+- **Two surfaces, one source of truth.** The JSONL file is the *narrative* (forensics). The `_det_runs` table is the *receipt* (queryability). The engine builds the table row from the same `RunResult` it returned to the caller.
+- **Redaction is a property of the bus, not the call.** Both surfaces scrub through one shared redactor. Adding a secret value masks it everywhere from the next event onward.
 
 ---
 
-## 2. Run lifecycle events
+## 2. Run lifecycle events (the JSONL taxonomy)
 
-A run emits a fixed, ordered set of event types. This is the contract a UI or alerting rule can rely on.
+The engine emits a fixed, ordered set of events to `.det/logs/<run_id>/run.jsonl`. This is the contract a UI or alerting rule can rely on.
 
 | Event | When | Key fields |
 |---|---|---|
-| `run_start` | Run begins | `run_id`, `connector`, `target`, `destination`, `streams`, `full_refresh` |
-| `stream_start` | Each stream begins | `stream`, `disposition`, `cursor_before` |
-| `batch_written` | Each batch persisted | `stream`, `batch_n`, `rows` |
-| `stream_end` | Each stream finishes | `stream`, `rows_extracted`, `rows_loaded`, `cursor_after`, `status` |
-| `state_committed` | State persisted (whole run) | `cursors` (per-stream resume points) |
-| `run_end` | Run finishes | `status`, `rows_loaded`, `duration_s`, `error` (if failed) |
-| `warn` / `error` | Any time | `message`, `stream` (if applicable), `exc_type` |
+| `run_start` | After RESOLVE; the run has bound a source + destination + target | `config`, `source`, `destination`, `target`, `full_refresh` |
+| `stream_start` | Each stream begins (after the engine seeds its cursor) | `stream`, `disposition`, `cursor_before` |
+| `batch_loaded` | Each batch persisted via `write_batch` | `stream`, `rows`, `cumulative_rows` |
+| `stream_committed` | Each stream's transaction closed (data + state durably committed) | `stream`, `rows_loaded`, `cursor_after` |
+| `stream_failed` | A stream raised — written before the run unwinds | `stream`, `error_type`, `error_message`, `traceback` |
+| `run_end` | The run finishes (success or failure) | `status`, `rows_loaded`, `duration_s`, `error_type`, `error_message` |
+| `user` | Any `log.info(...)` / `log.warning(...)` / `log.error(...)` from a `@stream` function | `level`, `message`, `stream` (when raised inside a stream) |
 
-The ordering mirrors the destination lifecycle in [05 §5.3](./05-destinations-and-state.md): `state_committed` always follows every `stream_end` and always precedes `run_end` on success. On failure, `state_committed` is **absent** — its absence in the log is itself the signal that state did not advance.
+Every event also carries `ts` (ISO-8601 UTC with offset — `2026-05-25T14:32:01.123456+00:00`), `run_id`, and `event`. The ordering mirrors the destination lifecycle in [05 §5.3](./05-destinations-and-state.md): `stream_committed` always follows the `batch_loaded`s for a stream. On a stream failure, `stream_failed` replaces `stream_committed` for that stream and the run unwinds.
+
+`run_start` is emitted *after* DISCOVER + RESOLVE so every bound field (`config` / `source` / `destination` / `target`) is known. A failure before that point has no `run_start` and no JSONL file — failure to discover is fully captured by the CLI's exit code + stderr message, not the log.
+
+The `user` event is the bridge between a connector author's `log.info(...)` and the JSONL bus: every stdlib log call from a `@stream` function is mirrored here as `event=user` with the right `level` and the active stream name, so the connector's chatter survives without conflicting with the engine's taxonomy.
 
 ---
 
@@ -37,89 +42,80 @@ The ordering mirrors the destination lifecycle in [05 §5.3](./05-destinations-a
 
 ### 3.1 stdout
 
-While `det run` blocks (it always runs synchronously — see [07 §3](./07-cli-and-library-api.md)), it streams events to stdout:
+While `det run` blocks (it always runs synchronously — see [07 §3](./07-cli-and-library-api.md)), it streams stdlib log records to stderr in the usual format:
 
-- **TTY** → human-rendered, one line per event, as shown in [07 §2](./07-cli-and-library-api.md).
-- **Piped / not a TTY** (CI, orchestrator) → raw JSON-lines, one object per line. No rendering, fully parseable.
+```
+2026-05-25 14:32:01,123 [INFO] det: running stream 'items'
+```
 
-`--log-level debug|info|warn|error` controls stdout verbosity. `debug` adds per-request detail (paginated API calls, SQL issued, retries); `info` is the default and shows the lifecycle events above.
+A future `--log-level debug|info|warn|error` flag will control stdout verbosity; v1 ships at INFO.
 
-### 3.2 The per-run log file
+### 3.2 The per-run JSONL log file
 
-Independent of stdout verbosity, **every run writes a complete `debug`-level JSON-lines file** under the project's `.det/` directory:
+Independent of stdout verbosity, **every run writes a complete JSON-lines file** under the project's `.det/` directory:
 
 ```
 .det/
   logs/
-    a1b9f3/                 # one directory per run_id
-      run.jsonl             # every event, JSON-lines, always debug-level
-    9c2d10/
+    run-a1b9f3.../          # one directory per run_id
+      run.jsonl             # every event, JSON-lines
+    run-9c2d10.../
       run.jsonl
-  runs/                     # run records — see section 4 (Tier B fallback)
-  state/                    # sidecar state for Tier B destinations — see 05
 ```
 
-So a quiet `info` run on screen still leaves a full `debug` trace on disk for post-mortem. A line from `run.jsonl`:
+`.det/logs/` is project-rooted (the engine creates it under the directory holding `det_project.yml`), so `det runs show` from any sub-directory finds the right file.
+
+A line from `run.jsonl`:
 
 ```json
-{"ts":"2026-05-21T03:14:07.882Z","run_id":"a1b9f3","level":"info","event":"batch_written","connector":"stripe","stream":"charges","batch_n":2,"rows":2310}
+{"ts":"2026-05-25T03:14:07.882000+00:00","run_id":"run-a1b9f3...","event":"stream_committed","stream":"items","rows_loaded":5,"cursor_after":5}
 ```
 
-Log retention is the operator's call: `.det/logs/` is gitignored and can be cleaned by cron or by `det state` housekeeping. det does not auto-delete logs in v1.
+The file is opened with line-buffering and each write ends with `\n`, so a crash mid-run leaves a partial-but-readable line-terminated file. The full traceback for a failed run lives here (in the `stream_failed` event) — it is the forensics surface for "what happened to this run".
 
-> [Open question: a `det logs <run_id>` command to pretty-print a past run's `run.jsonl`, and a `--keep-logs <n>` retention flag. Both are small, both are quality-of-life, neither is v1-critical. Proposal: v2.]
+Log retention is the operator's call: `.det/logs/` is gitignored. det does not auto-delete logs in v1; a future `--keep-logs N` flag is tracked as a v2 quality-of-life item.
 
 ---
 
-## 4. The run record
+## 4. The `_det_runs` audit table
 
-A run record is the **structured summary** of one run — the same `RunResult` object the library returns ([07 §4.1](./07-cli-and-library-api.md)), persisted. Where the per-run log file is the *narrative*, the run record is the *receipt*.
+Where the JSONL file is the *narrative*, the `_det_runs` row is the *receipt* — the structured summary one row carries per run, queryable with plain SQL.
 
-```json
-{
-  "run_id": "a1b9f3",
-  "connector": "stripe",
-  "target": "prod",
-  "destination": "bigquery",
-  "status": "succeeded",
-  "started_at": "2026-05-21T03:13:26Z",
-  "ended_at":   "2026-05-21T03:14:07Z",
-  "duration_s": 41.2,
-  "rows_loaded": 9150,
-  "full_refresh": false,
-  "streams": [
-    {"name":"charges","rows_extracted":7310,"rows_loaded":7310,
-     "cursor_before":"2026-05-20T00:00:00Z","cursor_after":"2026-05-21T00:00:00Z","status":"succeeded"},
-    {"name":"customers","rows_extracted":1840,"rows_loaded":1840,
-     "cursor_before":null,"cursor_after":null,"status":"succeeded"}
-  ],
-  "error": null
-}
-```
+The destination owns this table. A destination declaring `Capability.RUN_RECORDS` implements `@destination.write_run_record(conn, record)`; the engine calls it once per run, after streams finish and before `close`, with a fully-built `RunRecord`.
 
-### 4.1 Where run records are stored
+### 4.1 Schema
 
-Run records follow the **same capability-tier model as state** ([05 §5.4](./05-destinations-and-state.md)) — this keeps det's data-placement story consistent: data, state, and run records all sit together, wherever "together" is.
+The logical schema (destination-agnostic):
 
-- **Tier A destinations** → a `_det_runs` table in the destination, alongside `_det_state`. One row per run. This makes run history *queryable with SQL* — "show me every failed stripe run this week", "rows loaded per day" — with no extra tooling. The table:
+| Column | Type | Description |
+|---|---|---|
+| `run_id` | string, **PK** | One row per run. Upsert key. |
+| `config` | string | The pipeline config name (`-p / --conf` arg). |
+| `source` | string | Source connector name. |
+| `destination` | string | Destination connector name. |
+| `target` | string | `profiles.yml` target used. |
+| `status` | string | `succeeded` / `failed`. |
+| `started_at` | timestamp | Run window open. |
+| `ended_at` | timestamp | Run window close. |
+| `duration_s` | float | Wall-clock seconds. Computed at write time. |
+| `rows_loaded` | int | Total rows across streams. |
+| `full_refresh` | bool | Whether prior state was discarded. |
+| `error_type` | string | Exception class on failure (`HTTPError`); `NULL` on success. |
+| `error_message` | string | Exception message on failure; `NULL` on success. |
+| `streams_json` | json | Per-stream breakdown: `[{"name":..., "rows_loaded":..., "cursor_after":..., "status":...}, ...]`. Same shape as `StreamResult.to_dict()` so admin/UI drill-down needs no join. |
 
-  | Column | Type | Description |
-  |---|---|---|
-  | `run_id` | `string` | Primary key. |
-  | `connector` | `string` | Connector name. |
-  | `target` | `string` | Profile target used. |
-  | `status` | `string` | `succeeded` / `failed`. |
-  | `started_at` / `ended_at` | `timestamp` | Run window. |
-  | `rows_loaded` | `int` | Total rows across streams. |
-  | `full_refresh` | `bool` | Whether state was discarded. |
-  | `streams` | `json` | Per-stream array (as above). |
-  | `error` | `string` | Error message + type, `NULL` on success. Redacted (§5). |
+`run_id` is the primary key and the upsert target: writing the same `run_id` twice updates the row rather than duplicating it. The engine only writes once per run, but the upsert is the defensive guarantee — a future retry-on-transient cannot corrupt the audit chain.
 
-- **Tier B destinations** (object storage, no tables) → the run record is written as `.det/runs/<run_id>.json` locally, and optionally mirrored as a `_det_runs/<run_id>.json` object in the bucket. Symmetric with the Tier B sidecar-state design.
+### 4.2 What is deliberately NOT here
 
-The run record is **always** written locally to `.det/runs/` regardless of tier, so run history survives even if the destination is unreachable for the write. The destination copy is the shared, queryable source of truth; the local copy is the durable fallback.
+- **Traceback** — the full traceback is verbose, embeds filesystem paths, and bloats `_det_runs` in a way that confounds SQL filtering. It lives in the JSONL `stream_failed` event (the forensics surface).
+- **The `error` object itself** — the `RunResult.error` is a live Python exception; only its string projection (`error_type`, `error_message`) crosses the table boundary. The JSONL also has the traceback.
 
-A run record is written even when a run **fails** — `status: "failed"` with a populated `error`. A failed run that produced no run record means det itself crashed before it could write one; that is the only ambiguous state, and the per-run log file (written incrementally) covers it.
+### 4.3 Tier-A only, for now
+
+`_det_runs` is hosted by the destination, in the same store as `_det_state` and the loaded data — so "show me every failed `echo_dev` run this week" is one `SELECT`. v1 ships DuckDB (declares `Capability.RUN_RECORDS`); BigQuery follows in stage 8b. A destination that does NOT declare the capability is fully valid — the engine simply skips the table write and the JSONL log file remains the durable record.
+
+A destination that *does* declare `Capability.RUN_RECORDS` but does not implement `@destination.write_run_record` is rejected at run start with a clear `EngineError` — same conditional-mandatory pattern as `@destination.transaction` under `Capability.TRANSACTIONAL_LOAD` (see [05 §1](./05-destinations-and-state.md)).
 
 ---
 
@@ -127,28 +123,47 @@ A run record is written even when a run **fails** — `status: "failed"` with a 
 
 | Level | Use |
 |---|---|
-| `debug` | Per-request detail: API pages, SQL, retries, resolved (redacted) config. Always in `run.jsonl`. |
-| `info` | Lifecycle events (§2). Default for stdout. |
-| `warn` | Recoverable issues: a retried request, a skipped stream, a loose `profiles.yml` permission. |
+| `debug` | Per-request detail: API pages, SQL, retries. (Connector authors emit at this level via `log.debug`.) |
+| `info` | Lifecycle events + connector "what I'm doing now" messages. The stdout default. |
+| `warn` | Recoverable issues: a retried request, a skipped stream, a deprecated config key. |
 | `error` | A failure that ends the run or fails a stream. |
 
-**Redaction is enforced in the logging layer**, per the security contract in [08 §6](./08-security.md): any value marked `secret: true`, or resolved from `${ENV_VAR}` / `secret://`, is replaced with `***` in *every* sink — stdout, `run.jsonl`, and the `_det_runs` record. Redaction is value-based: det scrubs known secret values out of log strings before writing, so a secret echoed inside an HTTP error body is also caught. This is best-effort against a hostile connector ([08 §7](./08-security.md)) but a reliable guard against accidental leakage.
+**Redaction is enforced in the logging layer**, per the security contract in [08 §6](./08-security.md). Both sinks (stdlib + JSONL) share one `Redactor`: any value marked `secret: true` or resolved from `${env.X}` / `${profile.X.Y}` is replaced with `***` in *every* sink. Redaction is value-based: det scrubs known secret values out of the final rendered text (a stdlib message; a serialized JSONL line) before writing, so a secret accidentally interpolated into a URL, an HTTP error body, or a structured field is also caught.
+
+The JSONL writer redacts *after* serialization — the entire JSON line is run through the redactor — so a secret in a nested field (`{"event":"user","message":"...","extra":{"token":"..."}}` ) is masked, not just one at the top level. This is best-effort against a hostile connector ([08 §7](./08-security.md)) but a reliable guard against accidental leakage.
 
 ---
 
-## 6. Feeding future UI and orchestrators
+## 6. The `det runs` CLI
+
+Two commands read this layer back:
+
+### `det runs list -p <config> [--limit N]`
+
+Show recent runs from the destination's `_det_runs`. `-p <config>` is **required** — run records are per-destination, and the config disambiguates which destination's table to query. (In a project where every config targets the same destination, this redundancy is the price for not inventing a multi-destination union that v1 cannot honour. A future `--destination <name>` flag is the natural relaxation.) A target without `_det_runs` yet (a brand-new project) prints "no run records".
+
+### `det runs show <run_id> -p <config>`
+
+Show one run's full record + every event in its `.det/logs/<run_id>/run.jsonl`. Accepts the short id (`abc123def...`) or the long form (`run-abc123def...`). On a TTY, events are colored by type; piped output is plain.
+
+Both commands open the destination via its own `@destination.open` / `@destination.close` hooks (same pattern as `det state list`) and run a parameterized `SELECT` on the connection. Like `det state reset`, this reaches past the destination hook contract — there is no `read_run_records` hook in v1, and SQL-direct querying is the v1 limitation. DuckDB is the only Tier-A destination shipping v1 with `Capability.RUN_RECORDS`; future Tier-A destinations follow the same pattern (the table is the contract; the implementation hands back rows the CLI shape).
+
+---
+
+## 7. Feeding future UI and orchestrators
 
 The structured design is what makes deferring the UI (see [10 — Roadmap](./10-roadmap-and-scope.md)) safe — the data is already there when the UI arrives:
 
-- **A future UI** reads `_det_runs` and `_det_state` straight from the destination, plus `run.jsonl` for run drill-down. No new collection layer, no agent — the UI is a *reader* of data det already writes.
-- **Orchestrators** consume the `RunResult` returned by `project.run()` ([07 §4.3](./07-cli-and-library-api.md)) — `run_id`, per-stream counts, `log_path` — and attach it as native run metadata (Dagster asset metadata, Airflow XCom). The orchestrator gets observability for free because the library hands it a structured result.
+- **A future UI** reads `_det_runs` and `_det_state` straight from the destination, plus `run.jsonl` for drill-down. No new collection layer, no agent — the UI is a *reader* of data det already writes.
+- **Orchestrators** consume the `RunResult` returned by `det.run()` ([07 §4.1](./07-cli-and-library-api.md)) — `run_id`, per-stream counts, `log_path`, the populated `error` on failure — and attach it as native run metadata.
 - **Alerting** is just a query: a scheduled check over `_det_runs` for `status = 'failed'`, or a CI step that inspects the exit code ([07 §3](./07-cli-and-library-api.md)).
 
 One mechanism — structured per-run logs plus a run record — serves the operator today and the UI and orchestrators later. That is the simplicity bar, met.
 
 ### Reference
 
-- `RunResult` / `StreamResult` shapes → [07 — CLI and Library API](./07-cli-and-library-api.md)
+- `RunResult` / `RunRecord` / `StreamResult` shapes → `det/types.py` (the source of truth)
 - State lifecycle, capability tiers, `.det/` layout → [05 — Destinations and State](./05-destinations-and-state.md)
+- The `@destination` hook namespace + `write_run_record` → [03 — The Connector Contract](./03-connector-contract.md) §3.4
 - Redaction and the secret model → [08 — Security](./08-security.md)
 - Deferred UI and orchestrator integration → [10 — Roadmap and Scope](./10-roadmap-and-scope.md)
