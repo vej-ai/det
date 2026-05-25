@@ -2,8 +2,8 @@
 
 A det source connector that extracts ShipHero fulfillment data via the
 public GraphQL API. This is the proof case docs/03 §2.8 designed the contract
-around — ported from `internal-shiphero-script/v2/main.py`, which the
-author has been running in production.
+around — ported from an internal hand-written ShipHero connector that's been
+running in production.
 
 ## Authentication
 
@@ -72,10 +72,13 @@ SHIPHERO_REFRESH_TOKEN=... det run shiphero --target dev \
 
 ## Ported from
 
-- `internal-shiphero-script/v2/main.py` — `refresh_access_token`,
-  `execute_graphql`, `sync_table`, `extract_records`.
-- `internal-shiphero-script/config.json` — the `tables.*` blocks
-  became `streams[]` in `register.yaml`; strategy knobs became `params`.
+The connector started life as a hand-written internal script with a
+`main.py` and `config.json`. The port mapped:
+
+- `main.py` — `refresh_access_token`, `execute_graphql`, `sync_table`,
+  `extract_records` → split across `client.py`, `pagination.py`, `source.py`.
+- `config.json` — the `tables.*` blocks became `streams[]` in
+  `register.yaml`; strategy knobs became `params`.
 
 What moved out of the connector (now the engine / destination does it):
 

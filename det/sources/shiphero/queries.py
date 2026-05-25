@@ -28,9 +28,9 @@ into one node-dict per row.
 from __future__ import annotations
 
 # NOTE: query strings carry no Python expressions — they are pure GraphQL text
-# the client POSTs alongside its `variables` map. Ported from
-# `internal-shiphero-script/config.json` lines 17, with `orders` /
-# `products` filled in to match the public ShipHero schema in the same shape.
+# the client POSTs alongside its `variables` map. The `shipments` query was
+# ported from a hand-written internal connector's config; `orders` / `products`
+# match the public ShipHero schema in the same shape.
 
 SHIPMENTS_QUERY: str = (
     "query Shipments($first:Int,$after:String,"

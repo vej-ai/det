@@ -1,7 +1,7 @@
 # ShipHero baked source connector — docs/03 §2.8 worked example, expanded.
 #
-# Ports the hand-written `internal-shiphero-script/v2/main.py` plus its
-# `config.json` into the det contract. The split is the one docs/03 §2.8
+# Ports a hand-written internal ShipHero connector (a `main.py` plus a
+# `config.json`) into the det contract. The split is the one docs/03 §2.8
 # fixes: only the *discovery contract* lives here — GraphQL query strings,
 # `field_path` walks, pagination logic, and date-window stepping are Python in
 # `source.py` / `client.py` / `queries.py` / `windows.py` / `pagination.py`.
