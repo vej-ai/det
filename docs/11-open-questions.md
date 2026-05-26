@@ -49,17 +49,21 @@ physically separated from the repo).
 
 ## B. The connector contract
 
-### Q3 — Secret resolver forms
+### Q3 — Secret resolver forms — **RESOLVED (stage 9a, 2026-05-26)**
 *Source: [03 — Connector Contract](./03-connector-contract.md), §2.5*
 
 Keep only `${env.X}` and `${profile.X.Y}`, or also add a `${vault...}` /
 secret-manager resolver form.
 
-- **Lean:** keep just the two; let a profile point at a manager-backed file
-  rather than teaching `register.yaml` about every secret manager.
+- **Resolution:** add a **third** form — `secret://<scheme>/<path>[#<field>]` —
+  alongside the original two, but make it the PLUGIN surface (the URL syntax
+  is in the contract; the resolvers themselves are loaded via entry-points
+  OR a project-local `det_plugins.py`). The `${env.X}` and `${profile.X.Y}`
+  built-ins stay unchanged. See [08 §3](./08-security.md) for the protocol +
+  registration; the `det secrets test` command verifies wiring without
+  leaking values.
 - **Stakes:** Connector portability and the secret-manager integration story
   ([08 §resolvers](./08-security.md)).
-- **Decide by:** v1 freeze — the resolver grammar is part of the manifest contract.
 
 ### Q4 — Child / nested streams
 *Source: [04 — Connector Body](./04-connector-body.md), §172*
@@ -170,6 +174,10 @@ per run, or always fetch fresh.
 
 - **Lean:** fresh-every-run for v1/v2 — simpler and safer; caching only matters
   at high run frequency.
+- **Stage 9a status:** the v1 implementation honors the lean. The per-process
+  resolver INSTANCE is cached (a GCP SDK init only runs once per process), but
+  the per-reference VALUE is re-fetched every run. No on-disk cache. Caching
+  remains deferred until a real cost problem surfaces.
 - **Stakes:** Run latency vs. attack surface at high invocation rates.
 - **Decide by:** revisit only if round-trip cost becomes real.
 

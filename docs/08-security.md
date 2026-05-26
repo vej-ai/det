@@ -77,32 +77,90 @@ For local development, det auto-loads a gitignored `.env` file from the project 
 
 Environment variables are the v1 baseline. They are simple and universal, but they put plaintext secrets in the process environment and in CI settings. Teams with stricter requirements want secrets fetched **at run time** from a manager. det supports this with a typed reference syntax and a pluggable resolver.
 
-A value in `profiles.yml` may be a **secret reference** instead of a literal or `${ENV_VAR}`:
+A `secrets[].ref` value in a connector's `register.yaml` may be a **secret reference** in one of three forms (the original two `${...}` forms PLUS the pluggable URL form, locked at stage 9a):
 
 ```yaml
+# Pluggable secret-manager URL (stage 9a)
 prod:
   api_key:     secret://gcp-secret-manager/projects/my-proj/secrets/stripe-key/versions/latest
   credentials: secret://vault/secret/data/warehouse#service_account
 ```
 
-A `secret://` URL has the shape `secret://<resolver>/<path>[#<field>]`. At config-resolution time, det hands the reference to the matching **resolver**:
+A `secret://` URL has the shape `secret://<scheme>/<path>[#<field>]`. At config-resolution time, det parses the URL and hands the `(path, field)` pair to the matching **resolver**:
 
 ```python
 class SecretResolver(Protocol):
-    scheme: str   # e.g. "gcp-secret-manager", "aws-secrets-manager", "vault"
+    scheme: ClassVar[str]   # e.g. "gcp", "aws-secrets-manager", "vault"
     def resolve(self, path: str, field: str | None) -> str: ...
 ```
 
-| Resolver | Scheme | v1? |
+**Stage 9a ships the core (the `SecretResolver` Protocol, URL parsing, the plugin registry); no live cloud resolver is built in.** A live GCP / AWS / Vault resolver is delivered either by a third-party package (entry-point registration) or by a project-local `det_plugins.py` (see below).
+
+| Resolver | Scheme | Status |
 |---|---|---|
-| Environment variables | `${ENV_VAR}` (built-in syntax) | **v1** |
-| GCP Secret Manager | `secret://gcp-secret-manager/...` | v2 |
-| AWS Secrets Manager | `secret://aws-secrets-manager/...` | v2 |
-| HashiCorp Vault | `secret://vault/...` | v2 |
+| Environment variables | `${env.X}` (built-in syntax) | **v1** |
+| Profiles.yml lookup | `${profile.X.Y}` (built-in syntax) | **v1** |
+| `secret://` plugin surface | `secret://<scheme>/...` (protocol + parser) | **v1 (stage 9a)** |
+| GCP Secret Manager | `secret://gcp/...` (plugin) | v2 (9b) |
+| AWS Secrets Manager | `secret://aws-secrets-manager/...` (plugin) | v2 (9c) |
+| HashiCorp Vault | `secret://vault/...` (plugin) | v2 |
 
-In v1, only env-var interpolation ships built in. The `SecretResolver` protocol and `secret://` parsing exist so a manager can be added as a small package (or a project-local plugin) **without an engine change** — the same extensibility philosophy as the `StateBackend` in [05](./05-destinations-and-state.md). Resolved secret values are held only in memory for the duration of the run and are subject to the redaction rules in §6.
+The `SecretResolver` protocol and `secret://` parsing exist so a manager can be added as a small package or a project-local plugin **without an engine change** — the same extensibility philosophy as the `StateBackend` in [05](./05-destinations-and-state.md). Resolved secret values are held only in memory for the duration of the run and are subject to the redaction rules in §6.
 
-> [Open question: should resolved secrets be cached on disk (encrypted) to avoid a manager round-trip per run, or always fetched fresh? Fresh-every-run is simpler and safer; caching matters only at high run frequency. Proposal: fresh-every-run in v1/v2; revisit caching if it becomes a cost problem.]
+> Resolved-secret caching (Q11) is deferred: stage 9a commits to **fresh-every-run** (no on-disk cache). The per-process resolver INSTANCE is cached after first use (a GCP SDK init only runs once), but the per-reference value is re-fetched on every run.
+
+### Writing a custom resolver
+
+A resolver is any object whose class declares a `scheme: ClassVar[str]` and implements `resolve(path, field) -> str`. Register a factory (a zero-arg callable returning a resolver instance) under a scheme:
+
+```python
+# my_pkg/my_resolver.py
+from typing import ClassVar
+import det
+
+class MyVaultResolver:
+    scheme: ClassVar[str] = "my-vault"
+    def resolve(self, path: str, field: str | None) -> str:
+        # Talk to your manager here; never embed the value in any exception text.
+        return _fetch_from_vault(path, field)
+
+def factory() -> MyVaultResolver:
+    return MyVaultResolver()
+```
+
+There are **two ways** to surface a resolver to det:
+
+1. **Entry-point** (for distributable packages). In `pyproject.toml`:
+
+   ```toml
+   [project.entry-points."det.secret_resolvers"]
+   my-vault = "my_pkg.my_resolver:factory"
+   ```
+
+   The entry-point NAME is the scheme; the value is a `module:factory` pointing at the zero-arg factory. Loaded lazily — only on the first `secret://my-vault/...` reference.
+
+2. **Project-local `det_plugins.py`** (no packaging required). Drop a file at the project root (next to `det_project.yml`):
+
+   ```python
+   # det_plugins.py
+   from typing import ClassVar
+   import det
+
+   class MyResolver:
+       scheme: ClassVar[str] = "my-scheme"
+       def resolve(self, path, field):
+           return _fetch(path, field)
+
+   det.register_secret_resolver("my-scheme", MyResolver)
+   ```
+
+   The file runs once per project per process at engine startup. It is arbitrary Python with the engine's privileges — same trust model as `sources/<name>/source.py`.
+
+**Resolution precedence**: project-local registration always wins over an entry-point of the same scheme. Explicit beats implicit (same rule as project-local connectors shadowing baked ones, [03 §5](./03-connector-contract.md)).
+
+### Verifying resolution with `det secrets test`
+
+The `det secrets test` command resolves every declared reference and reports `✓` / `✗` per reference WITHOUT printing the resolved value — the operator can verify "my creds are wired up right" without leaking what they are. See [07 — CLI and Library API](./07-cli-and-library-api.md) for the full surface.
 
 ---
 

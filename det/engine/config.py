@@ -44,6 +44,10 @@ from typing import Any
 import yaml
 
 from det.engine.discovery import PROJECT_FILE
+from det.secrets import (
+    SecretResolutionError,
+    resolve_secret_url,
+)
 from det.types import (
     Config,
     ConnectorManifest,
@@ -487,21 +491,49 @@ def resolve_secret_ref(
 ) -> str:
     """Resolve one ``register.yaml`` secret ref to its value — docs/03 §2.5.
 
-    Exactly two resolver forms exist (locked decision, docs/03 §2.5):
+    Three resolver forms exist (docs/03 §2.5 + docs/08 §3, Q3 resolved at
+    stage 9a):
 
-    * ``${env.X}`` — reads environment variable ``X``.
+    * ``${env.X}`` — reads environment variable ``X``. Universal v1 baseline.
     * ``${profile.X.Y}`` — reads key ``Y`` of the active target's profile
       ``profiles.yml[profiles][<target>][X]`` block (docs/06 post-8.B). The
       ``X`` is a logical block name — typically the source connector name —
       and the engine narrows by the active target the config selected.
+    * ``secret://<scheme>/<path>[#<field>]`` — dispatches to a pluggable
+      :class:`~det.secrets.SecretResolver` (docs/08 §3). The resolver itself
+      is plugin-loaded — built-in env / profile resolution stays unchanged,
+      ``secret://`` is the extensibility surface (stage 9a). The
+      :mod:`det.secrets` package handles the URL grammar and the registry.
 
     A ref whose env var / profile key is missing raises :class:`ConfigError`
     naming the secret's *logical name* and the *ref form* — never the value,
     and never a fragment that could leak a credential. ``${profile.X.Y}`` also
     supports a nested ``${env.VAR}`` inside the profile value, so a
     ``profiles.yml`` can itself stay free of literal secrets (docs/06).
+
+    # NOTE: stage 9a wires ``secret://`` ONLY at this surface (the
+    # ``register.yaml`` ``secrets[].ref`` value). Two other places where a
+    # ``secret://`` URL could plausibly appear — INSIDE a profile value
+    # (``profiles.yml[profiles][<target>][X][Y]: secret://...``) and as a
+    # destination target-param value (``profiles.yml[<dest>].targets[<t>].password:
+    # secret://...``) — are NOT wired in 9a. Both are reasonable future-work
+    # items; the current behavior is "literal string passthrough" for both,
+    # which matches today's ``${env.X}`` nested-resolution scope (only one
+    # level deep, only inside ``${profile.X.Y}``).
     """
     inner = ref.ref.strip()
+    if inner.startswith(SecretRef.SECRET_URL_PREFIX):
+        # ``secret://`` dispatch — stage 9a (docs/08 §3). The URL grammar +
+        # resolver lookup live in :mod:`det.secrets`; we only translate the
+        # plugin layer's exception into the engine's :class:`ConfigError`
+        # so the runner's existing error-handling stays uniform.
+        try:
+            return resolve_secret_url(inner)
+        except SecretResolutionError as exc:
+            raise ConfigError(
+                f"secret {ref.name!r}: {exc}"
+            ) from exc
+
     if inner.startswith(SecretRef.ENV_PREFIX):
         var = inner[len(SecretRef.ENV_PREFIX) : -1].strip()
         if var not in os.environ:

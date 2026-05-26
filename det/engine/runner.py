@@ -56,6 +56,7 @@ from det.engine import configs as cfgs
 from det.engine import discovery as disc
 from det.engine.logger import Redactor, RunLog, build_logger
 from det.registry import compute_injection
+from det.secrets import load_project_plugins
 from det.types import (
     Batch,
     Capability,
@@ -769,6 +770,9 @@ def run_tag(
     # below the CLI layer, the inverse direction would invert the
     # dependency graph and force a deferred import to break the cycle.
     project_root = disc.find_project_root(project_dir)
+    # Load project-local secret-resolver plugins ONCE before walking the
+    # configs — see the corresponding call in :func:`run` for rationale.
+    load_project_plugins(project_root)
     project = cfg.ProjectConfig.load(project_root)
     profiles = cfg.Profiles.load(project_root)
     discovered = cfgs.discover_configs(project_root, list(project.config_paths))
@@ -1201,6 +1205,14 @@ def run(
     try:
         # -- Stage 1: DISCOVER ----------------------------------------------
         project_root = disc.find_project_root(project_dir)
+        # Project-local plugin file: ``det_plugins.py`` next to
+        # ``det_project.yml`` (stage 9a — docs/08 §3). The file (if present)
+        # calls ``det.register_secret_resolver(...)`` to register custom
+        # ``secret://`` schemes. Idempotent per project per process. A
+        # plugin-file import error surfaces as :class:`SecretResolutionError`,
+        # which is caught by the run loop's outer ``except`` and folded into
+        # a FAILED :class:`RunResult`. See :func:`det.secrets.load_project_plugins`.
+        load_project_plugins(project_root)
         project = cfg.ProjectConfig.load(project_root)
         profiles = cfg.Profiles.load(project_root)
 
@@ -1270,8 +1282,13 @@ def run(
         )
 
         # Resolved-secret values now exist; load them into the shared redactor
-        # so every subsequent emission (stdlib + JSONL) masks them.
+        # so every subsequent emission (stdlib + JSONL) masks them. Both
+        # source and destination secrets are registered — stage 9a fixed an
+        # asymmetry where destination-side secrets (a future destination
+        # carrying a credential ref) were not redacted. The Redactor dedupes
+        # short / repeated values, so calling ``add`` twice is harmless.
         redactor.add(source_config.secrets.values())
+        redactor.add(dest_config.secrets.values())
 
         # CLI --select REPLACES the config's select (not unions). docs/07.
         effective_select = tuple(select) if select else pipeline.select

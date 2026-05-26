@@ -275,6 +275,38 @@ union v1 does not honour; a future `--destination <name>` is the natural
 relaxation). `show` colors events by type on a TTY; piped output is plain
 JSON-lines.
 
+### `det secrets test [-p <config>] [--target <t>]` — verify secret resolution (stage 9a)
+
+```bash
+det secrets test                           # resolve every reference in every config
+det secrets test -p stripe_prod            # only this config's references
+det secrets test -p stripe_prod --target prod
+```
+
+Resolves every declared `register.yaml` `secrets[].ref` for the selected
+config(s) through the same machinery `det run` uses at run start —
+`${env.X}`, `${profile.X.Y}`, and `secret://<scheme>/...` plugin URLs —
+and prints one line per reference with its status (`✓` or `✗` + the
+error). The resolved VALUE is never printed; only the reference URL
+string (the value the operator wrote in `register.yaml` /
+`profiles.yml`) is echoed.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Every reference resolved (or no references to check). |
+| `1` | At least one reference failed to resolve. |
+| `2` | CLI usage error (unknown config, no project found). |
+
+Example output:
+
+```
+$ det secrets test -p stripe_prod
+✓ stripe_prod  source=stripe  api_token=${env.STRIPE_API_KEY}
+✗ stripe_prod  source=stripe  refresh_token=secret://vault/x/y  -- no resolver registered for scheme 'vault'; known schemes: gcp
+
+1 of 2 reference(s) failed to resolve
+```
+
 ### `det --version`
 
 Print the installed package version and exit 0.

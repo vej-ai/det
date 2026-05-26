@@ -40,6 +40,11 @@ from det.registry import (
     stream,
     stream_method,
 )
+from det.secrets import (
+    SecretResolutionError,
+    SecretResolver,
+    register_secret_resolver,
+)
 from det.types import (
     Batch,
     Capability,
@@ -85,6 +90,10 @@ __all__ = [
     "destination",
     "Connector",
     "stream_method",
+    # Secret-resolver plugin surface (det.secrets — stage 9a, docs/08 §3)
+    "SecretResolver",
+    "SecretResolutionError",
+    "register_secret_resolver",
     # Contract types a connector author references (det.types)
     "Batch",
     "Capability",

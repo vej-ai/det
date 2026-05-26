@@ -724,12 +724,16 @@ class SecretRef:
     name: str
     ref: str
 
-    # NOTE: Locked design decision — exactly two resolver forms exist:
-    # ``${env.X}`` and ``${profile.X.Y}``. No ``${secret.X}`` / vault form.
-    # docs/03 §2.5 left this as an open question; the owner closed it.
+    # NOTE: stage 9a added a third resolver form — ``secret://<scheme>/<path>[#<field>]``
+    # — for pluggable cloud secret managers (docs/08 §3, Q3 resolved). The
+    # original two-form contract still holds for the two BUILT-IN forms
+    # (``${env.X}`` is universal, ``${profile.X.Y}`` reads profiles.yml);
+    # the new ``secret://`` form is the extensibility surface so a manager
+    # ships as a plugin without an engine change. See :mod:`det.secrets`.
     # ``ClassVar`` — true class constants, excluded from the dataclass fields.
     ENV_PREFIX: ClassVar[str] = "${env."
     PROFILE_PREFIX: ClassVar[str] = "${profile."
+    SECRET_URL_PREFIX: ClassVar[str] = "secret://"
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> SecretRef:
@@ -746,18 +750,32 @@ class SecretRef:
         if not cls.is_valid_ref(ref):
             raise ValueError(
                 f"secret {data['name']!r} ref {ref!r} must use a known resolver: "
-                f"${{env.X}} or ${{profile.X.Y}}"
+                f"${{env.X}}, ${{profile.X.Y}}, or secret://<scheme>/<path>[#<field>]"
             )
         return cls(name=str(data["name"]), ref=ref)
 
     @classmethod
     def is_valid_ref(cls, ref: str) -> bool:
-        """Whether ``ref`` uses one of the two supported resolver forms.
+        """Whether ``ref`` uses one of the three supported resolver forms.
 
         This is the syntax check the engine applies at discovery (docs/03 §7
         step 5: "every ``secrets[].ref`` uses a known resolver form").
+
+        Three forms accepted (stage 9a):
+
+        * ``${env.X}`` — read environment variable ``X`` (universal, built-in).
+        * ``${profile.X.Y}`` — read profiles.yml key (built-in).
+        * ``secret://<scheme>/<path>[#<field>]`` — pluggable secret manager
+          (docs/08 §3; the registered resolvers, not the URL syntax, are
+          plugin-loaded). The deep URL grammar (valid scheme characters,
+          non-empty path) is validated at resolution time by
+          :func:`det.secrets.resolve_secret_url` — this surface check only
+          gates the prefix so an obvious typo (``vault:/foo``) fails at
+          discovery with a clear hint.
         """
         ref = ref.strip()
+        if ref.startswith(cls.SECRET_URL_PREFIX):
+            return True
         if not ref.endswith("}"):
             return False
         return ref.startswith(cls.ENV_PREFIX) or ref.startswith(cls.PROFILE_PREFIX)

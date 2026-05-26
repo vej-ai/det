@@ -24,6 +24,7 @@ is the runtime unit (chapter 12).
 acme_el/
 ├── det_project.yml         # project config (the dbt_project.yml analog)
 ├── profiles.yml            # per-destination connection params (NOT committed)
+├── det_plugins.py          # OPTIONAL — project-local secret-resolver plugins (stage 9a)
 ├── .gitignore
 │
 ├── sources/                # custom SOURCE connectors (kind: source)
@@ -52,6 +53,8 @@ acme_el/
     │   └── run-2026-05-21T09-30-00.log
     └── cache/
 ```
+
+The optional **`det_plugins.py`** file (stage 9a) sits next to `det_project.yml`. If present, det imports it once at engine startup so the file's `det.register_secret_resolver(...)` calls register custom `secret://` schemes for the project. The file is arbitrary Python — same trust model as the connector folders. See [08 — Security §3](./08-security.md) for the resolver protocol and the registration pattern.
 
 Stage 8.B split the old single `connectors/` directory into **`sources/`** and
 **`destinations/`** (one per kind, no more guessing by `register.yaml` `kind:`),

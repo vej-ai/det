@@ -61,6 +61,7 @@ from det.cli._scaffold import (
     scaffold_project,
     scaffold_source,
 )
+from det.cli._secrets import check_project as _check_secrets_project
 from det.cli._state import StateError, list_state, reset_state
 from det.engine import ConfigError, DiscoveryError, EngineError
 from det.engine import config as cfg
@@ -1122,6 +1123,109 @@ def runs_show_cmd(
             if event_color:
                 rendered = click.style(rendered, fg=event_color)
         click.echo(rendered)
+
+
+# ---------------------------------------------------------------------------
+# secrets
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def secrets() -> None:
+    """Verify secret resolution (env vars, profiles, secret:// references)."""
+
+
+@secrets.command(name="test")
+@click.option(
+    "-p",
+    "--conf",
+    "config",
+    default=None,
+    metavar="CONFIG",
+    help="Only check this config's references. Default: every discoverable config.",
+)
+@click.option(
+    "--target",
+    "target",
+    default=None,
+    help="Override the config's target for resolution (uniform across configs).",
+)
+@click.option(
+    "--project-dir",
+    "project_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Project root. Defaults to the current directory.",
+)
+def secrets_test(
+    config: str | None,
+    target: str | None,
+    project_dir: Path | None,
+) -> None:
+    """Resolve every declared secret reference and report ✓ / ✗.
+
+    Walks every config in the project (or just one, with ``-p <name>``)
+    and resolves every ``register.yaml`` ``secrets[].ref`` on the source
+    and the destination through the same machinery the engine uses at run
+    start: ``${env.X}``, ``${profile.X.Y}``, and ``secret://<scheme>/...``.
+
+    Exit codes:
+
+    \b
+      0  every reference resolved (or no references to check).
+      1  at least one reference failed to resolve.
+      2  CLI usage error (unknown config, no project found).
+
+    Output is one line per reference. The resolved VALUE is never printed
+    — only the reference URL string (the value the operator wrote in
+    profiles.yml / register.yaml, which is itself non-sensitive).
+    """
+    try:
+        checks, ok_count, fail_count = _check_secrets_project(
+            project_dir=project_dir,
+            config_name=config,
+            target_override=target,
+        )
+    except _FRIENDLY_ERRORS as exc:
+        _fail(str(exc), code=2)
+        return  # unreachable.
+
+    if not checks:
+        # No references at all — the project has neither sources nor
+        # destinations declaring secrets[]. Exit 0 with a clean line so the
+        # operator knows the command ran (not silent).
+        click.echo("no secret references to resolve")
+        return
+
+    for check in checks:
+        if check.ok:
+            click.echo(
+                f"{click.style('✓', fg='green')} {check.config}  "
+                f"{check.connector}={check.connector_name}  "
+                f"{check.secret_name}={check.ref}"
+            )
+        else:
+            click.echo(
+                f"{click.style('✗', fg='red')} {check.config}  "
+                f"{check.connector}={check.connector_name}  "
+                f"{check.secret_name}={check.ref}  "
+                f"-- {check.error}"
+            )
+
+    click.echo()
+    if fail_count:
+        click.echo(
+            click.style(
+                f"{fail_count} of {len(checks)} reference(s) failed to resolve",
+                fg="red",
+            ),
+            err=True,
+        )
+        raise SystemExit(1)
+    click.echo(
+        click.style(
+            f"all {ok_count} reference(s) resolved", fg="green"
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

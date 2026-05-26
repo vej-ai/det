@@ -18,6 +18,7 @@ from __future__ import annotations
 import shutil
 import textwrap
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -993,3 +994,288 @@ def test_run_tag_parallel_output_has_progress_lines(
     assert "done echo_prod" in out
     # And the rollup table still printed last.
     assert "TAG test:" in out
+
+
+# ==========================================================================
+# det secrets test — stage 9a
+# ==========================================================================
+
+
+@pytest.fixture
+def _isolate_resolvers() -> Iterator[None]:
+    """Wipe the secrets module registry around CLI secrets tests."""
+    from det.secrets import _reset_resolvers_for_testing
+
+    _reset_resolvers_for_testing()
+    try:
+        yield
+    finally:
+        _reset_resolvers_for_testing()
+
+
+def test_secrets_help_shows_test(runner: CliRunner) -> None:
+    """``det secrets --help`` lists the ``test`` subcommand."""
+    result = runner.invoke(cli, ["secrets", "--help"])
+    assert result.exit_code == 0, _show(result)
+    assert "test" in result.output
+
+
+def test_secrets_test_no_references_exits_zero(
+    runner: CliRunner, cli_project: Path, _isolate_resolvers: None
+) -> None:
+    """The echo fixture declares no secrets — output reports that, exit 0."""
+    result = runner.invoke(
+        cli,
+        ["secrets", "test", "--project-dir", str(cli_project)],
+    )
+    assert result.exit_code == 0, _show(result)
+    assert "no secret references" in result.output
+
+
+def test_secrets_test_env_var_resolves(
+    runner: CliRunner,
+    cli_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_resolvers: None,
+) -> None:
+    """A source with a ``${env.X}`` secret resolves cleanly when the env var
+    is set; the printed line includes ✓ and the reference URL, never the
+    resolved value."""
+    monkeypatch.setenv("MY_SECRET_VALUE", "super-secret-credential-xyz")
+    # Author a source with a single env-var secret. The source's @stream
+    # implementation can be a no-op — secrets test only walks register.yaml.
+    src_dir = cli_project / "sources" / "with_secret"
+    src_dir.mkdir(parents=True)
+    (src_dir / "register.yaml").write_text(
+        textwrap.dedent(
+            """
+            name: with_secret
+            kind: source
+            version: "1.0.0"
+            secrets:
+              - name: api_token
+                ref: ${env.MY_SECRET_VALUE}
+            streams:
+              - name: things
+                table: things
+                schema:
+                  - {name: id, type: INTEGER}
+            """
+        ).strip()
+    )
+    (src_dir / "source.py").write_text(
+        textwrap.dedent(
+            """
+            from det import stream
+
+            @stream(name="things")
+            def things():
+                yield []
+            """
+        ).strip()
+    )
+    # And a config pointing at it.
+    (cli_project / "configs" / "with_secret.yml").write_text(
+        textwrap.dedent(
+            """
+            name: with_secret_cfg
+            source: with_secret
+            destination: duckdb
+            target: dev
+            """
+        ).strip()
+    )
+
+    result = runner.invoke(
+        cli,
+        ["secrets", "test", "-p", "with_secret_cfg", "--project-dir", str(cli_project)],
+    )
+    assert result.exit_code == 0, _show(result)
+    assert "✓" in result.output
+    assert "${env.MY_SECRET_VALUE}" in result.output
+    # The resolved value MUST NOT appear anywhere in the output.
+    assert "super-secret-credential-xyz" not in result.output
+
+
+def test_secrets_test_missing_env_var_fails(
+    runner: CliRunner,
+    cli_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_resolvers: None,
+) -> None:
+    """A missing env var surfaces as ✗ + a message; exit 1."""
+    monkeypatch.delenv("MY_MISSING_VAR", raising=False)
+    src_dir = cli_project / "sources" / "with_missing"
+    src_dir.mkdir(parents=True)
+    (src_dir / "register.yaml").write_text(
+        textwrap.dedent(
+            """
+            name: with_missing
+            kind: source
+            version: "1.0.0"
+            secrets:
+              - name: api_token
+                ref: ${env.MY_MISSING_VAR}
+            streams:
+              - name: things
+                table: things
+                schema:
+                  - {name: id, type: INTEGER}
+            """
+        ).strip()
+    )
+    (src_dir / "source.py").write_text(
+        textwrap.dedent(
+            """
+            from det import stream
+
+            @stream(name="things")
+            def things():
+                yield []
+            """
+        ).strip()
+    )
+    (cli_project / "configs" / "with_missing.yml").write_text(
+        textwrap.dedent(
+            """
+            name: with_missing_cfg
+            source: with_missing
+            destination: duckdb
+            target: dev
+            """
+        ).strip()
+    )
+
+    result = runner.invoke(
+        cli,
+        ["secrets", "test", "-p", "with_missing_cfg", "--project-dir", str(cli_project)],
+    )
+    assert result.exit_code == 1, _show(result)
+    assert "✗" in result.output
+    assert "MY_MISSING_VAR" in result.output
+
+
+def test_secrets_test_unknown_scheme_fails(
+    runner: CliRunner, cli_project: Path, _isolate_resolvers: None
+) -> None:
+    """A ``secret://unknown/...`` ref fails with ✗ + exit 1; value never printed."""
+    src_dir = cli_project / "sources" / "with_url"
+    src_dir.mkdir(parents=True)
+    (src_dir / "register.yaml").write_text(
+        textwrap.dedent(
+            """
+            name: with_url
+            kind: source
+            version: "1.0.0"
+            secrets:
+              - name: api_token
+                ref: secret://unknown-scheme/projects/x/secrets/y
+            streams:
+              - name: things
+                table: things
+                schema:
+                  - {name: id, type: INTEGER}
+            """
+        ).strip()
+    )
+    (src_dir / "source.py").write_text(
+        textwrap.dedent(
+            """
+            from det import stream
+
+            @stream(name="things")
+            def things():
+                yield []
+            """
+        ).strip()
+    )
+    (cli_project / "configs" / "with_url.yml").write_text(
+        textwrap.dedent(
+            """
+            name: with_url_cfg
+            source: with_url
+            destination: duckdb
+            target: dev
+            """
+        ).strip()
+    )
+
+    result = runner.invoke(
+        cli,
+        ["secrets", "test", "-p", "with_url_cfg", "--project-dir", str(cli_project)],
+    )
+    assert result.exit_code == 1, _show(result)
+    assert "✗" in result.output
+    assert "unknown-scheme" in result.output
+    assert "no resolver" in result.output
+
+
+def test_secrets_test_secret_url_with_project_plugin(
+    runner: CliRunner, cli_project: Path, _isolate_resolvers: None
+) -> None:
+    """A ``det_plugins.py`` registering a ``secret://`` scheme makes that
+    scheme resolvable from ``det secrets test``."""
+    (cli_project / "det_plugins.py").write_text(
+        textwrap.dedent(
+            """
+            from typing import ClassVar
+            import det
+
+            class P:
+                scheme: ClassVar[str] = 'plugin'
+                def resolve(self, path, field):
+                    return f'val-for-{path}'
+
+            det.register_secret_resolver('plugin', P)
+            """
+        ).strip()
+    )
+    src_dir = cli_project / "sources" / "plugin_user"
+    src_dir.mkdir(parents=True)
+    (src_dir / "register.yaml").write_text(
+        textwrap.dedent(
+            """
+            name: plugin_user
+            kind: source
+            version: "1.0.0"
+            secrets:
+              - name: api_token
+                ref: secret://plugin/some/path
+            streams:
+              - name: things
+                table: things
+                schema:
+                  - {name: id, type: INTEGER}
+            """
+        ).strip()
+    )
+    (src_dir / "source.py").write_text(
+        textwrap.dedent(
+            """
+            from det import stream
+
+            @stream(name="things")
+            def things():
+                yield []
+            """
+        ).strip()
+    )
+    (cli_project / "configs" / "plugin_user.yml").write_text(
+        textwrap.dedent(
+            """
+            name: plugin_user_cfg
+            source: plugin_user
+            destination: duckdb
+            target: dev
+            """
+        ).strip()
+    )
+    result = runner.invoke(
+        cli,
+        ["secrets", "test", "-p", "plugin_user_cfg", "--project-dir", str(cli_project)],
+    )
+    assert result.exit_code == 0, _show(result)
+    assert "✓" in result.output
+    # The reference URL is printed; the resolved value is not.
+    assert "secret://plugin/some/path" in result.output
+    assert "val-for-some/path" not in result.output

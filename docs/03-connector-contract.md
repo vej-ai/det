@@ -227,14 +227,16 @@ secrets:
 | SecretRef key | Type | Required | Purpose |
 |---|---|---|---|
 | `name` | string | **Yes** | Logical name. The body reads it as `config.secrets["api_token"]`. |
-| `ref` | string | **Yes** | Resolution expression. `${env.X}` reads env var `X`; `${profile.X.Y}` reads key `Y` of profile block `X` (chapter 06). |
+| `ref` | string | **Yes** | Resolution expression. `${env.X}` reads env var `X`; `${profile.X.Y}` reads key `Y` of profile block `X` (chapter 06); `secret://<scheme>/<path>[#<field>]` dispatches to a pluggable resolver (chapter 08 §3, stage 9a). |
 
 The engine resolves refs lazily and never logs secret values.
 
-> [Open question: should `${env.X}` and `${profile.X.Y}` be the only two
-> resolvers, or do we also need a `${vault...}` form for teams on a secret
-> manager? Leaning toward keeping just two and letting the profile point at a
-> manager-backed file.]
+The `secret://` form (stage 9a) is the **third** resolver — added without
+removing the original two. The two `${...}` forms stay built-in and
+universal; the `secret://` URL is the plugin surface for cloud secret
+managers (GCP, AWS, Vault) — see [08 §3](./08-security.md) for the protocol
+and the registration pattern (entry-points or a project-local
+`det_plugins.py`).
 
 ### 2.6 `schedule` — a hint, not a scheduler
 
@@ -687,7 +689,7 @@ or `det list`), it validates **before importing any connector Python**:
    appears in that schema.
 5. **Reference resolution** — `destination.connector` names a discoverable
    `kind: destination` connector; every `secrets[].ref` uses a known resolver
-   form (`${env...}` / `${profile...}`).
+   form (`${env...}` / `${profile...}` / `secret://...`).
 6. **`requires` well-formedness** — every declared dependency string parses as
    a PEP 440 requirement specifier (a syntax check; actual installation happens
    at build time, not discovery).
