@@ -1,0 +1,99 @@
+# Postgres source — extract rows from a Postgres database into detx.
+#
+# Each declared stream maps to a table (or a SQL query coded in source.py); rows
+# are paginated by keyset (cursor + primary key) or by a server-side cursor —
+# never `LIMIT N OFFSET M`, which scales O(N²) on large tables.
+#
+# # NOTE: per-stream Postgres details (schema_name, table_name, query) live in
+# source.py as hardcoded arguments to the shared `extract_*` helpers, NOT under
+# a YAML stream `params:` block. The engine builds one Config per connector
+# (detx/engine/config.py::build_config) and injects only that into a
+# `@stream` function — `stream_def.params` is parsed by the manifest reader but
+# never merged into the per-call Config. So per-stream knobs are code, not
+# YAML. The YAML still carries the contract every stream needs the engine to
+# know about: name, table, primary_key, write_disposition, incremental, schema.
+# This mirrors the ShipHero example in docs/04 — its `GRAPHQL_QUERY` and
+# `FIELD_PATH` likewise live in code, not YAML.
+name: postgres
+kind: source
+version: "1.0.0"
+summary: Extract rows from a Postgres database via keyset pagination or server-side cursors.
+tags: [database, postgres, sql]
+
+# Connector-level connection params (docs/03 §2.4). One `Config` per run.
+params:
+  host:
+    type: string
+    required: true
+    description: Postgres host (e.g. "db.example.com" or "127.0.0.1").
+  port:
+    type: int
+    default: 5432
+    description: Postgres TCP port.
+  database:
+    type: string
+    required: true
+    description: Database name to connect to.
+  user:
+    type: string
+    required: true
+    description: Username to authenticate as.
+  sslmode:
+    type: string
+    default: prefer
+    description: libpq sslmode (disable, allow, prefer, require, verify-ca, verify-full).
+  application_name:
+    type: string
+    default: detx
+    description: Reported to Postgres as application_name — useful in pg_stat_activity.
+  connect_timeout_seconds:
+    type: int
+    default: 30
+    description: Seconds to wait for a TCP connection before giving up.
+  batch_size:
+    type: int
+    default: 5000
+    description: Rows fetched per server round-trip; also the connector's yield batch size.
+
+# Secrets are *referenced*, never inlined (docs/03 §2.5). Exactly two resolver
+# forms are valid — ``${env.X}`` and ``${profile.X.Y}`` — a locked decision.
+secrets:
+  - name: password
+    ref: ${env.POSTGRES_PASSWORD}
+
+# Two example incremental streams. Both are uniformly `(config, cursor, log)` —
+# the engine only injects `cursor` for streams that declare an `incremental`
+# block (docs/03 §3.2), so both example streams declare one. A non-incremental
+# variant is a one-line change in source.py (drop `cursor` from the signature)
+# plus dropping `incremental:` from this YAML — see source.py's docstring.
+streams:
+  - name: users
+    table: pg_users
+    primary_key: id
+    write_disposition: merge
+    incremental:
+      cursor_field: updated_at
+      cursor_type: timestamp
+      lookback: 1h
+      initial_value: "1970-01-01T00:00:00"
+    schema:
+      - {name: id,         type: INTEGER, mode: REQUIRED}
+      - {name: email,      type: STRING}
+      - {name: full_name,  type: STRING}
+      - {name: created_at, type: TIMESTAMP}
+      - {name: updated_at, type: TIMESTAMP, mode: REQUIRED}
+
+  - name: events
+    table: pg_events
+    primary_key: id
+    write_disposition: merge
+    incremental:
+      cursor_field: occurred_at
+      cursor_type: timestamp
+      initial_value: "1970-01-01T00:00:00"
+    schema:
+      - {name: id,          type: INTEGER, mode: REQUIRED}
+      - {name: user_id,     type: INTEGER}
+      - {name: kind,        type: STRING}
+      - {name: payload,     type: JSON}
+      - {name: occurred_at, type: TIMESTAMP, mode: REQUIRED}

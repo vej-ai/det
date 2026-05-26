@@ -15,7 +15,7 @@ connector *contains*; one is something the connector *targets*.
 | **Source** | The logic that reads records from the outside world. The body of a `kind: source` connector. | `source.py` (`@stream` functions) |
 | **Stream** | One output table. A source produces one or more streams. Each maps to a `streams[]` entry in `register.yaml`. | One `@stream` function per stream |
 | **Destination** | The logic that writes records to a warehouse/file/db. The body of a `kind: destination` connector. | `destination.py` (`@destination` hooks) |
-| **State** | Per-stream persisted memory — incremental cursors plus free-form scratch space — that survives between runs. | The `_det_state` table in the destination |
+| **State** | Per-stream persisted memory — incremental cursors plus free-form scratch space — that survives between runs. | The `_detx_state` table in the destination |
 
 The relationship in one sentence:
 
@@ -35,7 +35,7 @@ decoupling.
 
 The engine imposes only one rule: a `register.yaml` plus at least one `.py` that
 defines the decorated functions. Everything below is **convention** — the layout
-`det new` scaffolds and the layout the handbook recommends.
+`detx new` scaffolds and the layout the handbook recommends.
 
 ### A source connector
 
@@ -158,14 +158,14 @@ returned, with no framework wrapper in the way.
 
 The engine's only contributions to a record are:
 
-- It appends `_det_synced_at` (`TIMESTAMP`) to every record at load time.
+- It appends `_detx_synced_at` (`TIMESTAMP`) to every record at load time.
 - It validates each record against the stream's declared `schema` (when one is
   declared) before handing the batch to the destination.
 
 ### Nested data
 
 The baked ShipHero connector stores `shipping_labels` and `line_items` as
-`JSON` columns rather than flattening them into child tables. det supports
+`JSON` columns rather than flattening them into child tables. detx supports
 both: declare the column as `type: JSON` to keep nested structure, or shape
 it flat in `schema.py` to spread it across columns. The handbook default is
 **JSON column for nested objects** — it is simplest and keeps one stream =
@@ -191,7 +191,7 @@ body:
   outlives a run, a high-water id the API exposes instead of a timestamp). The
   connector reads and writes it freely; the engine persists it as `state_blob`.
 
-Both are scoped **per stream**, keyed `(connector, stream)` in `_det_state`.
+Both are scoped **per stream**, keyed `(connector, stream)` in `_detx_state`.
 Two streams in one connector have independent state and can be at different
 cursor positions.
 
@@ -273,7 +273,7 @@ def page_info(response: dict) -> dict:
 ```python
 """ShipHero source: the @stream functions the engine discovers and runs."""
 from datetime import timedelta
-from det import stream
+from detx import stream
 
 from .client import refresh_access_token, execute_graphql
 from .schema import SHIPMENTS_QUERY, extract_nodes, page_info
@@ -329,14 +329,14 @@ def shipments(config, state, cursor, log):
 
 ### What lives where
 
-| Concern | det location |
+| Concern | detx location |
 |---|---|
 | Per-table extraction config | `register.yaml` `streams[]` |
 | Connector knobs (`page_size`, `step_days`, …) | `register.yaml` `params` (defaults) |
 | API auth & HTTP / GraphQL plumbing | `client.py` (plain module) |
 | Record shaping (`extract_records`, `field_path` walk) | `schema.py` (plain module) |
 | The per-stream extraction loop | `source.py` `@stream` function |
-| Checkpoint read / write | the engine, via `cursor` + `_det_state` |
+| Checkpoint read / write | the engine, via `cursor` + `_detx_state` |
 | Table creation & MERGE / upsert | the destination connector (e.g. `bigquery`) |
 | Resolving `write_disposition: merge` to SQL | the engine + the destination |
 

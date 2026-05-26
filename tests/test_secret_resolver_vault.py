@@ -1,9 +1,9 @@
-"""Tests for :class:`det.secrets._vault.VaultResolver` — stage 9c.
+"""Tests for :class:`detx.secrets._vault.VaultResolver` — stage 9c.
 
 Two paths:
 
 * **Unit tests** (always run): substitute a fake ``hvac`` module via
-  ``monkeypatch.setattr(det.secrets._vault, "_lazy_import_hvac", ...)``
+  ``monkeypatch.setattr(detx.secrets._vault, "_lazy_import_hvac", ...)``
   and a fake ``hvac.exceptions`` module via the same lever on
   ``_lazy_import_hvac_exceptions``. The fakes record calls and serve
   canned responses; no network, no live Vault.
@@ -14,11 +14,11 @@ Two paths:
 
 To set up the integration test (one-time, on a Vault dev server)::
 
-    vault kv put secret/det-it-secret det_test_field=hello-from-det-test
+    vault kv put secret/detx-it-secret det_test_field=hello-from-detx-test
     # then in the shell that runs pytest:
     export VAULT_ADDR=http://127.0.0.1:8200
     export VAULT_TOKEN=<your-token>
-    export DET_VAULT_TEST_PATH=secret/data/det-it-secret    # KV v2 path
+    export DET_VAULT_TEST_PATH=secret/data/detx-it-secret    # KV v2 path
     export DET_VAULT_TEST_FIELD=det_test_field
 """
 
@@ -30,13 +30,13 @@ from typing import Any
 
 import pytest
 
-from det.secrets import (
+from detx.secrets import (
     SecretResolutionError,
     _reset_resolvers_for_testing,
     resolve_secret_url,
 )
-from det.secrets import _vault as vault_resolver_mod
-from det.secrets._vault import VaultResolver
+from detx.secrets import _vault as vault_resolver_mod
+from detx.secrets._vault import VaultResolver
 
 
 @pytest.fixture(autouse=True)
@@ -199,7 +199,7 @@ def test_resolves_via_full_secret_url_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end through :func:`resolve_secret_url` after manual registration."""
-    from det.secrets import register_secret_resolver
+    from detx.secrets import register_secret_resolver
 
     fake = _install_fake_sdk(monkeypatch)
     _set_env(monkeypatch)
@@ -446,14 +446,14 @@ def test_missing_sdk_raises_import_error_with_install_hint(
     def _missing() -> Any:
         raise ImportError(
             "the Vault resolver needs `hvac`; "
-            "install with `pip install det[vault]`"
+            "install with `pip install detx[vault]`"
         )
 
     monkeypatch.setattr(vault_resolver_mod, "_lazy_import_hvac", _missing)
     resolver = VaultResolver()
     with pytest.raises(ImportError) as exc_info:
         resolver.resolve("secret/data/warehouse", "password")
-    assert "pip install det[vault]" in str(exc_info.value)
+    assert "pip install detx[vault]" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -462,9 +462,9 @@ def test_missing_sdk_raises_import_error_with_install_hint(
 
 
 def test_entry_point_registration_populates_registry() -> None:
-    """``det`` installed with stage 9c's ``pyproject.toml`` block exposes
-    ``vault`` under the ``det.secret_resolvers`` group."""
-    from det.secrets.resolvers import _RESOLVERS, _load_entry_points
+    """``detx`` installed with stage 9c's ``pyproject.toml`` block exposes
+    ``vault`` under the ``detx.secret_resolvers`` group."""
+    from detx.secrets.resolvers import _RESOLVERS, _load_entry_points
 
     assert "vault" not in _RESOLVERS
     _load_entry_points()

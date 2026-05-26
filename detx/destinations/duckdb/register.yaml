@@ -1,0 +1,27 @@
+# DuckDB destination — the detx zero-config dev default (docs/05 §2).
+#
+# A destination connector is a folder with the same manifest format as a
+# source (docs/05 §1): kind: destination, no `streams`, no `destination`
+# binding. The routing/credential knobs it needs are declared as `params`
+# (docs/04 "A destination connector").
+name: duckdb
+kind: destination
+version: "1.0.0"
+summary: Loads batches into a local DuckDB file (append / merge / replace). Tier A — hosts its own state.
+tags: [warehouse, duckdb, local, tier-a]
+
+params:
+  # The .duckdb database file. Default is project-local and dot-prefixed so it
+  # sorts away from project files and is trivial to .gitignore. ":memory:" is
+  # accepted for ephemeral / test runs. docs/05 §2: "Zero-config dev default."
+  path:
+    type: string
+    default: ".detx/warehouse.duckdb"
+    description: Path to the .duckdb file, or ":memory:" for an ephemeral database.
+  # Optional DuckDB schema name. When set, every loaded table and the
+  # _detx_state table live inside this schema (created if absent). Supplied
+  # per-source via the `destination:` binding's routing params (docs/03 §2.3).
+  dataset:
+    type: string
+    required: false
+    description: Optional DuckDB schema to create tables in; default schema when unset.

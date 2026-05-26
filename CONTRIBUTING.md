@@ -1,13 +1,13 @@
-# Contributing to det
+# Contributing to detx
 
-Thanks for your interest in det. This is a short stub — it will grow as the
+Thanks for your interest in detx. This is a short stub — it will grow as the
 project does. The governing principle is in the
 [design handbook](./docs/00-vision-and-naming.md): **keep it as simple as
 possible.**
 
 ## Dev setup
 
-det targets Python 3.11+. Clone the repo, then create a virtual environment
+detx targets Python 3.11+. Clone the repo, then create a virtual environment
 and install the package in editable mode with the `dev` extras:
 
 ```sh
@@ -26,7 +26,7 @@ pytest -q
 
 ```sh
 ruff check .
-mypy det
+mypy detx
 ```
 
 Please make sure `pytest`, `ruff check`, and `mypy` all pass before opening a
@@ -42,9 +42,9 @@ This avoids re-litigating handbook ambiguities at every stage.
 
 Worked examples already in the tree:
 
-- `det/types.py::StateRecord` defines the canonical `_det_state` schema
+- `detx/types.py::StateRecord` defines the canonical `_detx_state` schema
   (docs/03 §3.5 and docs/05 §5.1 follow it).
 - **Configs are the runtime unit.** The CLI's `-p / --conf` arg and
-  `det.run(config=...)` library entry point both take a *config name* —
+  `detx.run(config=...)` library entry point both take a *config name* —
   there is no source-alone selector. Documents `06`, `07`, and `12` follow
   this.

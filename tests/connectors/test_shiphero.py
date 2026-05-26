@@ -15,7 +15,7 @@ Coverage maps to the spec in the task description:
 * field-path extraction with ``*`` wildcard unwraps edges/node shape
 * incremental cursor: first run uses ``initial_value``; second run resumes
   from persisted value minus lookback
-* end-to-end ``det.run`` into a tmp DuckDB
+* end-to-end ``detx.run`` into a tmp DuckDB
 * secrets: refresh token from ``${env.SHIPHERO_REFRESH_TOKEN}``; access token
   never appears in captured logs.
 """
@@ -36,16 +36,16 @@ from typing import Any
 import duckdb
 import pytest
 
-import det
-from det import Config, Cursor
-from det.sources.shiphero.client import ShipHeroClient, derive_auth_url
-from det.sources.shiphero.pagination import (
+import detx
+from detx import Config, Cursor
+from detx.sources.shiphero.client import ShipHeroClient, derive_auth_url
+from detx.sources.shiphero.pagination import (
     extract_records,
     paginate,
     walk_field_path,
 )
-from det.sources.shiphero.source import extract_stream
-from det.sources.shiphero.windows import (
+from detx.sources.shiphero.source import extract_stream
+from detx.sources.shiphero.windows import (
     compute_start,
     date_windows,
     to_utc_dt,
@@ -612,7 +612,7 @@ def test_extract_stream_first_run_starts_from_initial_value(
     )
     cursor = Cursor(
         cursor_field="created_date",
-        cursor_type=det.CursorType.TIMESTAMP,
+        cursor_type=detx.CursorType.TIMESTAMP,
         start_value=datetime(2024, 1, 1, tzinfo=UTC),
     )
     batches = list(extract_stream("shipments", config, cursor, _silent_log()))
@@ -639,7 +639,7 @@ def test_extract_stream_resume_subtracts_lookback(
     persisted = "2024-06-15T12:00:00+00:00"
     cursor = Cursor(
         cursor_field="created_date",
-        cursor_type=det.CursorType.TIMESTAMP,
+        cursor_type=detx.CursorType.TIMESTAMP,
         start_value=persisted,
     )
     list(extract_stream("shipments", config, cursor, _silent_log()))
@@ -659,7 +659,7 @@ def test_extract_stream_observes_cursor_values(
     config = _build_config(api_url)
     cursor = Cursor(
         cursor_field="created_date",
-        cursor_type=det.CursorType.TIMESTAMP,
+        cursor_type=detx.CursorType.TIMESTAMP,
         start_value=datetime(2024, 1, 1, tzinfo=UTC),
     )
     list(extract_stream("shipments", config, cursor, _silent_log()))
@@ -671,19 +671,19 @@ def test_extract_stream_observes_cursor_values(
 
 
 # --------------------------------------------------------------------------
-# End-to-end: det.run against a stubbed server, into a tmp DuckDB
+# End-to-end: detx.run against a stubbed server, into a tmp DuckDB
 # --------------------------------------------------------------------------
 
 
 @pytest.fixture
 def shiphero_project(tmp_path: Path) -> Path:
-    """Build a throwaway det project that runs the shiphero baked source.
+    """Build a throwaway detx project that runs the shiphero baked source.
 
-    Writes det_project.yml (post-8.B keys), a destination-keyed profiles.yml
+    Writes detx_project.yml (post-8.B keys), a destination-keyed profiles.yml
     with a `dev` duckdb target, and a `shiphero_dev` config binding
     shiphero → duckdb → dev (docs/12).
     """
-    (tmp_path / "det_project.yml").write_text(
+    (tmp_path / "detx_project.yml").write_text(
         textwrap.dedent(
             """\
             name: shiphero_test_project
@@ -701,7 +701,7 @@ def shiphero_project(tmp_path: Path) -> Path:
               default_target: dev
               targets:
                 dev:
-                  path: ".det/warehouse.duckdb"
+                  path: ".detx/warehouse.duckdb"
             """
         )
     )
@@ -726,7 +726,7 @@ def test_end_to_end_run_lands_shipments_into_duckdb(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``det.run`` discovers shiphero, runs all 3 streams, lands rows.
+    """``detx.run`` discovers shiphero, runs all 3 streams, lands rows.
 
     Each stream sees the same stub response queue (the stub cycles through
     `_PAGES`), so each stream lands the same 4 records — the test asserts
@@ -739,7 +739,7 @@ def test_end_to_end_run_lands_shipments_into_duckdb(
     # The stub serves the same 3-page sequence per stream. Reset between streams
     # is not necessary because the stub cycles through its `pages` list — each
     # stream gets fresh pages from the start.
-    result = det.run(
+    result = detx.run(
         config="shiphero_dev",
         project_dir=str(shiphero_project),
         params_override={
@@ -775,14 +775,14 @@ def test_end_to_end_run_lands_shipments_into_duckdb(
             "SELECT DISTINCT id FROM shipments ORDER BY id"
         ).fetchall()
         assert shipments == [("s1",), ("s2",), ("s3",), ("s4",)]
-        # _det_synced_at populated.
+        # _detx_synced_at populated.
         nulls = conn.execute(
-            "SELECT count(*) FROM shipments WHERE _det_synced_at IS NULL"
+            "SELECT count(*) FROM shipments WHERE _detx_synced_at IS NULL"
         ).fetchone()
         assert nulls is not None and nulls[0] == 0
         # State table records the advanced cursor.
         state_rows = conn.execute(
-            "SELECT cursor_value FROM _det_state "
+            "SELECT cursor_value FROM _detx_state "
             "WHERE connector = 'shiphero' AND stream = 'shipments'"
         ).fetchall()
         assert len(state_rows) == 1
@@ -815,7 +815,7 @@ def test_end_to_end_refresh_token_not_logged(
     monkeypatch.setenv("SHIPHERO_REFRESH_TOKEN", refresh_token)
     db_path = str(tmp_path / "out.duckdb")
 
-    det.run(
+    detx.run(
         config="shiphero_dev",
         project_dir=str(shiphero_project),
         params_override={
@@ -853,7 +853,7 @@ def test_secrets_resolved_from_env_var(
     different failure — the network call to the unreachable URL).
     """
     monkeypatch.delenv("SHIPHERO_REFRESH_TOKEN", raising=False)
-    bad = det.run(
+    bad = detx.run(
         config="shiphero_dev",
         project_dir=str(shiphero_project),
         params_override={"api_url": "http://127.0.0.1:1/graphql"},  # unreachable port

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "det"
+name = "detx"
 version = "0.1.0"
-description = "det (data extraction tool) — an open-source Python EL tool: pipelines as configs, connectors as folders, CLI-first."
+description = "detx (data extraction tool) — an open-source Python EL tool: pipelines as configs, connectors as folders, CLI-first."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -26,8 +26,8 @@ classifiers = [
 ]
 # Base install includes everything needed for the baked connectors to work
 # at full capacity. Specifying extras to use a *baked* destination (e.g.
-# BigQuery, which det ships and tests in its own repo) is backwards; the
-# baked toolkit should Just Work after `pip install det`.
+# BigQuery, which detx ships and tests in its own repo) is backwards; the
+# baked toolkit should Just Work after `pip install detx`.
 #
 # Genuine extras remain for opt-in cloud paths that are NOT required for a
 # connector's basic operation:
@@ -74,29 +74,29 @@ aws-secrets = ["boto3>=1.28"]
 vault = ["hvac>=2.0"]
 
 [project.scripts]
-det = "det.cli:main"
+detx = "detx.cli:main"
 
-[project.entry-points."det.secret_resolvers"]
-gcp-secret-manager = "det.secrets._gcp:GcpSecretManagerResolver"
-aws-secrets-manager = "det.secrets._aws:AwsSecretsManagerResolver"
-vault = "det.secrets._vault:VaultResolver"
+[project.entry-points."detx.secret_resolvers"]
+gcp-secret-manager = "detx.secrets._gcp:GcpSecretManagerResolver"
+aws-secrets-manager = "detx.secrets._aws:AwsSecretsManagerResolver"
+vault = "detx.secrets._vault:VaultResolver"
 
 [project.urls]
-Homepage = "https://github.com/albinasplesnys/det"
-Documentation = "https://github.com/albinasplesnys/det/tree/main/docs"
-Source = "https://github.com/albinasplesnys/det"
+Homepage = "https://github.com/albinasplesnys/detx"
+Documentation = "https://github.com/albinasplesnys/detx/tree/main/docs"
+Source = "https://github.com/albinasplesnys/detx"
 
 [tool.hatch.build]
 include = [
-    "det/**",
+    "detx/**",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["det"]
+packages = ["detx"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "det/**",
+    "detx/**",
     "docs/**",
     "tests/**",
     "README.md",

@@ -1,9 +1,9 @@
-"""Tests for :class:`det.secrets._aws.AwsSecretsManagerResolver` — stage 9c.
+"""Tests for :class:`detx.secrets._aws.AwsSecretsManagerResolver` — stage 9c.
 
 Two paths:
 
 * **Unit tests** (always run): substitute a fake ``boto3`` module via
-  ``monkeypatch.setattr(det.secrets._aws, "_lazy_import_boto3", ...)``
+  ``monkeypatch.setattr(detx.secrets._aws, "_lazy_import_boto3", ...)``
   and a fake ``botocore.exceptions`` module via the same lever on
   ``_lazy_import_botocore_exceptions``. The fakes record calls and
   serve canned responses; no network, no live AWS.
@@ -17,12 +17,12 @@ To set up the integration test (one-time, on an AWS account the
 runner's credential chain can access)::
 
     aws secretsmanager create-secret \\
-        --name det-it-secret \\
-        --secret-string 'hello-from-det-test' \\
+        --name detx-it-secret \\
+        --secret-string 'hello-from-detx-test' \\
         --region us-east-1
     # then in the shell that runs pytest:
     export DET_AWS_SECRETS_TEST_REGION=us-east-1
-    export DET_AWS_SECRETS_TEST_SECRET_ID=det-it-secret
+    export DET_AWS_SECRETS_TEST_SECRET_ID=detx-it-secret
 """
 
 from __future__ import annotations
@@ -34,13 +34,13 @@ from typing import Any
 
 import pytest
 
-from det.secrets import (
+from detx.secrets import (
     SecretResolutionError,
     _reset_resolvers_for_testing,
     resolve_secret_url,
 )
-from det.secrets import _aws as aws_resolver_mod
-from det.secrets._aws import AwsSecretsManagerResolver
+from detx.secrets import _aws as aws_resolver_mod
+from detx.secrets._aws import AwsSecretsManagerResolver
 
 
 @pytest.fixture(autouse=True)
@@ -282,7 +282,7 @@ def test_resolves_via_full_secret_url_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end through :func:`resolve_secret_url` after manual registration."""
-    from det.secrets import register_secret_resolver
+    from detx.secrets import register_secret_resolver
 
     _install_fake_sdk(monkeypatch)
     register_secret_resolver(
@@ -509,14 +509,14 @@ def test_missing_sdk_raises_import_error_with_install_hint(
     def _missing() -> Any:
         raise ImportError(
             "the AWS Secrets Manager resolver needs `boto3`; "
-            "install with `pip install det[aws-secrets]`"
+            "install with `pip install detx[aws-secrets]`"
         )
 
     monkeypatch.setattr(aws_resolver_mod, "_lazy_import_boto3", _missing)
     resolver = AwsSecretsManagerResolver()
     with pytest.raises(ImportError) as exc_info:
         resolver.resolve("us-east-1/mysecret", None)
-    assert "pip install det[aws-secrets]" in str(exc_info.value)
+    assert "pip install detx[aws-secrets]" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -525,10 +525,10 @@ def test_missing_sdk_raises_import_error_with_install_hint(
 
 
 def test_entry_point_registration_populates_registry() -> None:
-    """``det`` installed with stage 9c's ``pyproject.toml`` block exposes
-    ``aws-secrets-manager`` under the ``det.secret_resolvers`` group.
+    """``detx`` installed with stage 9c's ``pyproject.toml`` block exposes
+    ``aws-secrets-manager`` under the ``detx.secret_resolvers`` group.
     """
-    from det.secrets.resolvers import _RESOLVERS, _load_entry_points
+    from detx.secrets.resolvers import _RESOLVERS, _load_entry_points
 
     assert "aws-secrets-manager" not in _RESOLVERS
     _load_entry_points()

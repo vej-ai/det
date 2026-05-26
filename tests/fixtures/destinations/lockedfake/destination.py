@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from det import (
+from detx import (
     Batch,
     Capability,
     Config,
@@ -221,7 +221,7 @@ def commit_state(conn: LockedConn, run_id: str, records: list[StateRecord]) -> N
         for record in records:
             existing = _state_store.setdefault(record.connector, [])
             # Replace any prior record for the same stream — same upsert
-            # semantic as a real destination's _det_state.
+            # semantic as a real destination's _detx_state.
             existing[:] = [r for r in existing if r.stream != record.stream]
             existing.append(record)
 

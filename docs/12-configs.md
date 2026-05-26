@@ -1,6 +1,6 @@
 # 12. Configs — the runtime unit
 
-A **config** is the runtime unit of det. One config = one pipeline. It names:
+A **config** is the runtime unit of detx. One config = one pipeline. It names:
 
 - which **source** to run,
 - which **destination** to write to,
@@ -69,7 +69,7 @@ A config must declare:
 
 | key | meaning |
 |---|---|
-| `name` | The config's identifier — what `det run -p <name>` matches. |
+| `name` | The config's identifier — what `detx run -p <name>` matches. |
 | `source` | The source connector's name (resolved project-local-first, then baked — docs/03 §5). |
 | `destination` | The destination connector's name (same resolution rule). |
 
@@ -87,7 +87,7 @@ Unknown top-level keys are a hard error (catches typos like `destintion`).
 | `partition_overrides` | `{}` | Per-stream physical-partition overrides — wins over the source's `register.yaml` `partition_by` (docs/05 §3.3). |
 | `select` | `[]` (= all streams) | Streams to run. Empty means every stream. |
 | `schedule` | `null` | Advisory cron expression. The engine itself never acts on it (docs/03 §2.6). |
-| `tags` | `[]` | Bare list of strings used by `det run --tag <tag>` to select every matching config (and by `det list --tag` for catalog filtering). Lowercased + deduplicated at parse time (see §3.2). |
+| `tags` | `[]` | Bare list of strings used by `detx run --tag <tag>` to select every matching config (and by `detx list --tag` for catalog filtering). Lowercased + deduplicated at parse time (see §3.2). |
 
 ### 3.1 Worked example — `partition_overrides:`
 
@@ -114,9 +114,9 @@ partition_overrides:
 
 `partition_overrides:` is a mapping `{stream_name: partition_spec}`. Each entry accepts both the short string form and the long-form mapping. A stream not named here keeps whatever the source's `register.yaml` declared (or the cursor-based auto-default if nothing was declared — docs/05 §3.3).
 
-### 3.2 Tag-based multi-run — `tags:` + `det run --tag`
+### 3.2 Tag-based multi-run — `tags:` + `detx run --tag`
 
-A config carries an optional `tags:` field — a bare list of strings, shape-equivalent to dbt's model `tags:`. `det run --tag <tag>` then runs every config whose `tags:` list contains that tag.
+A config carries an optional `tags:` field — a bare list of strings, shape-equivalent to dbt's model `tags:`. `detx run --tag <tag>` then runs every config whose `tags:` list contains that tag.
 
 ```yaml
 # configs/hourly.yml
@@ -139,7 +139,7 @@ configs:
 ```
 
 ```
-$ det run --tag hourly
+$ detx run --tag hourly
 ... (per-config output for each of the three) ...
 
 TAG hourly: ran 3 config(s), 3 succeeded, 0 failed in 12.4s
@@ -155,11 +155,11 @@ Semantics:
 * **Continue-on-failure** — a per-config failure does NOT stop the rest. The CLI exits `1` if any run failed, `0` if all succeeded.
 * **Zero matches** — exit `2` with a `no configs match tag '<tag>'` message (usage error).
 * **Mutual exclusion** — `-p/--conf` and `--tag` cannot be combined; exactly one selector per invocation.
-* **Uniform args** — `--target`, `--destination-param`, `--full-refresh`, `--select` all apply to every matched config. `--param` is NOT supported with `--tag` (a source param override would silently apply to every config whether or not its source declares it; use `det run -p <config> --param k=v` for per-config knobs).
+* **Uniform args** — `--target`, `--destination-param`, `--full-refresh`, `--select` all apply to every matched config. `--param` is NOT supported with `--tag` (a source param override would silently apply to every config whether or not its source declares it; use `detx run -p <config> --param k=v` for per-config knobs).
 
 Tags are normalized to lowercase at parse time and deduplicated, so `tags: [Hourly, hourly]` parses to `("hourly",)` and `--tag Hourly` matches `tags: [hourly]`. Selection is by exact match (no glob/regex).
 
-Tags on a source's or destination's `register.yaml` are a separate namespace — they describe what the connector IS (catalog metadata for `det list --tag`); they never drive `det run --tag`, which is strictly about configs.
+Tags on a source's or destination's `register.yaml` are a separate namespace — they describe what the connector IS (catalog metadata for `detx list --tag`); they never drive `detx run --tag`, which is strictly about configs.
 
 ## 4. Target resolution
 
@@ -178,7 +178,7 @@ Step 4 is a convenience: a destination with only a `dev` row needs no `default_t
 For a **source param** (lowest → highest):
 
 1. The source's `register.yaml` `params[].default`.
-2. The project's `det_project.yml` `vars:` block.
+2. The project's `detx_project.yml` `vars:` block.
 3. The active config's `params:` block.
 4. The environment variable `SIMPLE_E_PARAM_<NAME>`.
 5. The CLI `--param k=v` flag / library `params_override=` kwarg.
@@ -186,7 +186,7 @@ For a **source param** (lowest → highest):
 For a **destination param** (lowest → highest):
 
 1. The destination's `register.yaml` `params[].default`.
-2. The project's `det_project.yml` `vars:` block (a project-wide knob that happens to share the param name).
+2. The project's `detx_project.yml` `vars:` block (a project-wide knob that happens to share the param name).
 3. The destination's `profiles.yml[<destination>].targets[<target>]` row.
 4. The active config's `destination_params:` block.
 5. The environment variable `SIMPLE_E_PARAM_<NAME>`.
@@ -196,7 +196,7 @@ The CLI `--select` flag **replaces** (not unions) the config's `select:` — it 
 
 ## 6. State + configs
 
-`_det_state` rows are keyed by the **source** name, not the config name. A different config that points at the same source will resume off the same cursor rows — state is a property of where the data was extracted from, not which pipeline ran the extract.
+`_detx_state` rows are keyed by the **source** name, not the config name. A different config that points at the same source will resume off the same cursor rows — state is a property of where the data was extracted from, not which pipeline ran the extract.
 
 This is intentional: a `shiphero_dev` and a `shiphero_prod` config pointing at the same ShipHero account will both see the same incremental cursor advance. Two pipelines that need independent state should bind to different source folders (a project-local fork is the usual way).
 
@@ -204,11 +204,11 @@ This is intentional: a `shiphero_dev` and a `shiphero_prod` config pointing at t
 
 | function | purpose |
 |---|---|
-| `det.engine.configs.discover_configs(project_root, config_paths)` | Walks each `config_paths` dir, parses every `*.yml`/`*.yaml`, returns `{name: PipelineConfig}`. Hard-errors on duplicate names. |
-| `det.engine.configs.load_config(name, project_root, config_paths)` | Returns the named `PipelineConfig` or raises a clear `ConfigError` listing the configs the project does define. |
+| `detx.engine.configs.discover_configs(project_root, config_paths)` | Walks each `config_paths` dir, parses every `*.yml`/`*.yaml`, returns `{name: PipelineConfig}`. Hard-errors on duplicate names. |
+| `detx.engine.configs.load_config(name, project_root, config_paths)` | Returns the named `PipelineConfig` or raises a clear `ConfigError` listing the configs the project does define. |
 
 The engine calls `load_config` in step 1 (DISCOVER) of the run lifecycle (docs/02).
 
 ## 8. The runtime type
 
-The parsed config is exposed as `det.types.PipelineConfig` — a frozen dataclass. The engine builds one of these per run; connector authors never construct them. Re-exported as `det.PipelineConfig` for advanced library use.
+The parsed config is exposed as `detx.types.PipelineConfig` — a frozen dataclass. The engine builds one of these per run; connector authors never construct them. Re-exported as `detx.PipelineConfig` for advanced library use.

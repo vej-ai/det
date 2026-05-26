@@ -15,6 +15,6 @@ build/
 .mypy_cache/
 .ruff_cache/
 
-# det local state
+# detx local state
 .duckdb
-.det/
+.detx/

@@ -1,3 +1,5 @@
+> Archived 2026-05; written when the tool was called `det`. Renamed to `detx` after PyPI name collision. Body preserved as-is.
+>
 > Archived: research note that informed the Stripe connector design. Kept for historical context; not user documentation.
 
 # Stripe Connector — Research & Design Note

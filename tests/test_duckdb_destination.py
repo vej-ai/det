@@ -1,12 +1,12 @@
 """Direct unit tests of the DuckDB destination hooks — docs/05.
 
-Exercises ``det/destinations/duckdb/`` hook by hook, without an engine:
+Exercises ``detx/destinations/duckdb/`` hook by hook, without an engine:
 ``capabilities`` / ``open`` / ``ensure_schema`` / ``write_batch`` (all three
 write dispositions) / ``read_state`` / ``commit_state`` / ``close``, plus
 schema evolution, JSON columns and identifier safety.
 
 The hooks are obtained the way the engine will obtain them — from the
-:class:`~det.registry.ConnectorRegistry` the connector folder's decorators
+:class:`~detx.registry.ConnectorRegistry` the connector folder's decorators
 populated (loaded via the ``conftest`` harness).
 """
 
@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from det import (
+from detx import (
     Capability,
     Config,
     CursorType,
@@ -33,7 +33,7 @@ from det import (
     StreamResult,
     WriteDisposition,
 )
-from det.destinations.duckdb.ddl import (
+from detx.destinations.duckdb.ddl import (
     duckdb_type,
     qualified_table,
     quote_identifier,
@@ -139,9 +139,9 @@ def test_identifier_validation_rejects_injection() -> None:
 
 
 def test_identifier_validation_allows_underscore_prefixed() -> None:
-    """Engine-owned names (_det_state, _det_synced_at) are valid."""
-    assert validate_identifier("_det_state", kind="table") == "_det_state"
-    assert validate_identifier("_det_synced_at", kind="column") == "_det_synced_at"
+    """Engine-owned names (_detx_state, _detx_synced_at) are valid."""
+    assert validate_identifier("_detx_state", kind="table") == "_detx_state"
+    assert validate_identifier("_detx_synced_at", kind="column") == "_detx_synced_at"
 
 
 def test_quote_identifier_and_qualified_table() -> None:
@@ -161,7 +161,7 @@ def test_ensure_schema_creates_table_with_synced_at(
     duckdb_path: str,
     query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
 ) -> None:
-    """ensure_schema creates the table and appends _det_synced_at."""
+    """ensure_schema creates the table and appends _detx_synced_at."""
     hooks = _hooks(duckdb_destination)
     conn = _open(duckdb_destination, duckdb_path)
     hooks["ensure_schema"](conn, _events_meta())
@@ -246,7 +246,7 @@ def test_write_batch_stamps_synced_at(
     duckdb_path: str,
     query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
 ) -> None:
-    """write_batch fills _det_synced_at when a record lacks it — docs/03 §2.2.1."""
+    """write_batch fills _detx_synced_at when a record lacks it — docs/03 §2.2.1."""
     hooks = _hooks(duckdb_destination)
     conn = _open(duckdb_destination, duckdb_path)
     hooks["ensure_schema"](conn, _events_meta())
@@ -430,7 +430,7 @@ def test_json_column_round_trip(
 
 
 # --------------------------------------------------------------------------
-# read_state / commit_state — the _det_state table — docs/05 §5
+# read_state / commit_state — the _detx_state table — docs/05 §5
 # --------------------------------------------------------------------------
 
 
@@ -449,7 +449,7 @@ def test_state_table_has_eight_canonical_columns(
     duckdb_path: str,
     query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
 ) -> None:
-    """_det_state has exactly the 8 columns of StateRecord.to_row()."""
+    """_detx_state has exactly the 8 columns of StateRecord.to_row()."""
     hooks = _hooks(duckdb_destination)
     conn = _open(duckdb_destination, duckdb_path)
     hooks["read_state"](conn, "echo")  # lazily creates the table
@@ -460,7 +460,7 @@ def test_state_table_has_eight_canonical_columns(
         for r in query_duckdb(
             duckdb_path,
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = '_det_state'",
+            "WHERE table_name = '_detx_state'",
         )
     }
     assert cols == set(
@@ -569,7 +569,7 @@ def test_commit_state_upserts_on_connector_stream_key(
 
     rows = query_duckdb(
         duckdb_path,
-        "SELECT cursor_value, rows_total FROM _det_state "
+        "SELECT cursor_value, rows_total FROM _detx_state "
         "WHERE connector = 'echo' AND stream = 'items'",
     )
     # One row, not two — upserted on (connector, stream).
@@ -635,7 +635,7 @@ def test_dataset_param_places_tables_in_schema(
 
 
 # --------------------------------------------------------------------------
-# write_run_record — _det_runs audit table — docs/09 §4
+# write_run_record — _detx_runs audit table — docs/09 §4
 # --------------------------------------------------------------------------
 
 
@@ -673,7 +673,7 @@ def test_write_run_record_creates_table_and_inserts_row(
     duckdb_path: str,
     query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
 ) -> None:
-    """write_run_record lazily creates _det_runs and writes one row per RunRecord."""
+    """write_run_record lazily creates _detx_runs and writes one row per RunRecord."""
     hooks = _hooks(duckdb_destination)
     conn = _open(duckdb_destination, duckdb_path)
     streams = (
@@ -686,7 +686,7 @@ def test_write_run_record_creates_table_and_inserts_row(
     rows = query_duckdb(
         duckdb_path,
         "SELECT run_id, config, source, destination, target, status, "
-        "rows_loaded, full_refresh, duration_s, error_type FROM _det_runs",
+        "rows_loaded, full_refresh, duration_s, error_type FROM _detx_runs",
     )
     assert len(rows) == 1
     row = rows[0]
@@ -715,7 +715,7 @@ def test_write_run_record_persists_streams_json(
     hooks["close"](conn)
 
     name = query_duckdb(
-        duckdb_path, "SELECT streams_json->>'$[0].name' FROM _det_runs"
+        duckdb_path, "SELECT streams_json->>'$[0].name' FROM _detx_runs"
     )[0][0]
     assert name == "items"
 
@@ -732,7 +732,7 @@ def test_write_run_record_is_idempotent_on_run_id(
     hooks["write_run_record"](conn, _build_record(rows_loaded=99))
     hooks["close"](conn)
 
-    rows = query_duckdb(duckdb_path, "SELECT count(*), max(rows_loaded) FROM _det_runs")
+    rows = query_duckdb(duckdb_path, "SELECT count(*), max(rows_loaded) FROM _detx_runs")
     assert rows[0] == (1, 99)
 
 
@@ -757,6 +757,6 @@ def test_write_run_record_persists_error_fields_on_failure(
 
     row = query_duckdb(
         duckdb_path,
-        "SELECT status, error_type, error_message FROM _det_runs",
+        "SELECT status, error_type, error_message FROM _detx_runs",
     )[0]
     assert row == ("failed", "HTTPError", "boom")

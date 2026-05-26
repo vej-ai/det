@@ -1,4 +1,4 @@
-"""Tests for ``det.engine.configs`` — the configs/*.yml parser (docs/12).
+"""Tests for ``detx.engine.configs`` — the configs/*.yml parser (docs/12).
 
 Stage 8.B introduced ``configs/`` as the runtime unit. This module focuses on
 the parser's contracts: the two accepted file shapes, the error paths, the
@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from det.engine import configs as cfgs
-from det.engine.config import ConfigError
-from det.types import PipelineConfig
+from detx.engine import configs as cfgs
+from detx.engine.config import ConfigError
+from detx.types import PipelineConfig
 
 # --------------------------------------------------------------------------
 # Single-config file shape
@@ -305,7 +305,7 @@ def test_custom_config_paths(tmp_path: Path) -> None:
 
 def test_partition_overrides_short_form_per_stream(tmp_path: Path) -> None:
     """A short-form (string) per-stream override parses into a PartitionConfig."""
-    from det.types import PartitionConfig, PartitionType, TimeGranularity
+    from detx.types import PartitionConfig, PartitionType, TimeGranularity
 
     (tmp_path / "configs").mkdir()
     (tmp_path / "configs" / "p.yml").write_text(
@@ -330,7 +330,7 @@ def test_partition_overrides_short_form_per_stream(tmp_path: Path) -> None:
 
 def test_partition_overrides_long_form_range(tmp_path: Path) -> None:
     """A long-form range entry under partition_overrides parses correctly."""
-    from det.types import PartitionRange, PartitionType
+    from detx.types import PartitionRange, PartitionType
 
     (tmp_path / "configs").mkdir()
     (tmp_path / "configs" / "p.yml").write_text(
@@ -355,7 +355,7 @@ def test_partition_overrides_long_form_range(tmp_path: Path) -> None:
 
 def test_partition_overrides_mixed_short_and_long(tmp_path: Path) -> None:
     """A single partition_overrides block accepts both forms simultaneously."""
-    from det.types import PartitionType
+    from detx.types import PartitionType
 
     (tmp_path / "configs").mkdir()
     (tmp_path / "configs" / "p.yml").write_text(

@@ -1,10 +1,10 @@
-"""Tests for :class:`det.secrets._gcp.GcpSecretManagerResolver` — stage 9b.
+"""Tests for :class:`detx.secrets._gcp.GcpSecretManagerResolver` — stage 9b.
 
 Two paths:
 
 * **Unit tests** (always run): substitute a fake
   ``google.cloud.secretmanager`` module via
-  ``monkeypatch.setattr(det.secrets._gcp, "_lazy_import_gcp_secrets", ...)``
+  ``monkeypatch.setattr(detx.secrets._gcp, "_lazy_import_gcp_secrets", ...)``
   and a fake ``google.api_core.exceptions`` module via the same lever on
   ``_lazy_import_google_exceptions``. The fakes record calls and serve
   canned responses; no network, no live GCP.
@@ -16,13 +16,13 @@ Two paths:
 To set up the integration test (one-time, on a project the runner's ADC
 can access)::
 
-    gcloud secrets create det-it-secret --replication-policy=automatic \\
+    gcloud secrets create detx-it-secret --replication-policy=automatic \\
         --project=$DET_GCP_SECRETS_TEST_PROJECT
-    echo -n "hello-from-det-test" | gcloud secrets versions add det-it-secret \\
+    echo -n "hello-from-detx-test" | gcloud secrets versions add detx-it-secret \\
         --data-file=- --project=$DET_GCP_SECRETS_TEST_PROJECT
     # then in the shell that runs pytest:
     export DET_GCP_SECRETS_TEST_PROJECT=<your-gcp-project>
-    export DET_GCP_SECRETS_TEST_SECRET=det-it-secret
+    export DET_GCP_SECRETS_TEST_SECRET=detx-it-secret
 """
 
 from __future__ import annotations
@@ -34,13 +34,13 @@ from typing import Any
 
 import pytest
 
-from det.secrets import (
+from detx.secrets import (
     SecretResolutionError,
     _reset_resolvers_for_testing,
     resolve_secret_url,
 )
-from det.secrets import _gcp as gcp_resolver_mod
-from det.secrets._gcp import GcpSecretManagerResolver
+from detx.secrets import _gcp as gcp_resolver_mod
+from detx.secrets._gcp import GcpSecretManagerResolver
 
 
 @pytest.fixture(autouse=True)
@@ -204,7 +204,7 @@ def test_resolves_via_full_secret_url_dispatch(monkeypatch: pytest.MonkeyPatch) 
     We register the resolver by hand here instead of relying on the
     entry-point so this test stays isolated from the install state.
     """
-    from det.secrets import register_secret_resolver
+    from detx.secrets import register_secret_resolver
 
     _install_fake_sdk(monkeypatch)
     register_secret_resolver("gcp-secret-manager", GcpSecretManagerResolver)
@@ -412,7 +412,7 @@ def test_field_is_ignored_with_one_warning_per_pair(
     resolver = GcpSecretManagerResolver()
 
     path = "projects/p/secrets/s/versions/latest"
-    with caplog.at_level(logging.WARNING, logger="det.secrets"):
+    with caplog.at_level(logging.WARNING, logger="detx.secrets"):
         v1 = resolver.resolve(path, "token")
         v2 = resolver.resolve(path, "token")  # same pair — no second warning
         v3 = resolver.resolve(path, "other")  # different field — new warning
@@ -422,7 +422,7 @@ def test_field_is_ignored_with_one_warning_per_pair(
     # Two distinct (path, field) pairs → exactly two warning records.
     warnings = [
         r for r in caplog.records
-        if r.name == "det.secrets" and r.levelno == logging.WARNING
+        if r.name == "detx.secrets" and r.levelno == logging.WARNING
     ]
     assert len(warnings) == 2
     # The warning names the field that was ignored.
@@ -450,7 +450,7 @@ def test_missing_sdk_raises_import_error_with_install_hint(
     def _missing() -> Any:
         raise ImportError(
             "the GCP Secret Manager resolver needs `google-cloud-secret-manager`; "
-            "install with `pip install det[gcp-secrets]`"
+            "install with `pip install detx[gcp-secrets]`"
         )
 
     monkeypatch.setattr(
@@ -459,7 +459,7 @@ def test_missing_sdk_raises_import_error_with_install_hint(
     resolver = GcpSecretManagerResolver()
     with pytest.raises(ImportError) as exc_info:
         resolver.resolve("projects/p/secrets/s/versions/latest", None)
-    assert "pip install det[gcp-secrets]" in str(exc_info.value)
+    assert "pip install detx[gcp-secrets]" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -468,12 +468,12 @@ def test_missing_sdk_raises_import_error_with_install_hint(
 
 
 def test_entry_point_registration_populates_registry() -> None:
-    """When ``det`` is installed (editable or otherwise) with stage 9b's
+    """When ``detx`` is installed (editable or otherwise) with stage 9b's
     ``pyproject.toml`` block, ``importlib.metadata.entry_points`` exposes
-    ``gcp-secret-manager`` under the ``det.secret_resolvers`` group, and
+    ``gcp-secret-manager`` under the ``detx.secret_resolvers`` group, and
     stage 9a's :func:`_load_entry_points` walks it into the registry.
     """
-    from det.secrets.resolvers import _RESOLVERS, _load_entry_points
+    from detx.secrets.resolvers import _RESOLVERS, _load_entry_points
 
     # The autouse fixture has already reset everything; nothing is loaded yet.
     assert "gcp-secret-manager" not in _RESOLVERS

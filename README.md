@@ -1,6 +1,6 @@
-# det
+# detx
 
-**det** ("data extraction tool") is an open-source, self-hosted Python
+**detx** ("data extraction tool") is an open-source, self-hosted Python
 **extract-load (EL)** tool. It moves data from a **source** (an API, a
 database, a file drop) into a **destination** (a warehouse, a database, an
 object store) — and nothing more. Transformation is dbt's job.
@@ -12,37 +12,37 @@ principle is to keep it as simple as possible.
 ## Install
 
 ```sh
-pip install det                          # every baked connector, ready
-pip install 'det[gcs,s3]'                # add gs:// / s3:// filesystem reads
-pip install 'det[gcp-secrets]'           # add the GCP Secret Manager resolver
-pip install 'det[aws-secrets]'           # add the AWS Secrets Manager resolver
-pip install 'det[vault]'                 # add the HashiCorp Vault resolver
+pip install detx                          # every baked connector, ready
+pip install 'detx[gcs,s3]'                # add gs:// / s3:// filesystem reads
+pip install 'detx[gcp-secrets]'           # add the GCP Secret Manager resolver
+pip install 'detx[aws-secrets]'           # add the AWS Secrets Manager resolver
+pip install 'detx[vault]'                 # add the HashiCorp Vault resolver
 ```
 
-`pip install det` ships every baked source and destination — DuckDB,
+`pip install detx` ships every baked source and destination — DuckDB,
 BigQuery, the filesystem source's local + Parquet path, the REST / Postgres
 / ShipHero / Stripe sources, the engine, the CLI. Extras stay opt-in for the
 cloud-storage paths of the filesystem source (`gs://` / `s3://`) and for
 secret managers (only relevant if your `profiles.yml` uses `secret://` URLs).
 
-det requires Python 3.11+. It installs both a CLI (`det`) and an importable
-library (`import det`).
+detx requires Python 3.11+. It installs both a CLI (`detx`) and an importable
+library (`import detx`).
 
 ## Usage
 
 ```sh
-det init my_project                      # scaffold a project
+detx init my_project                      # scaffold a project
 cd my_project
-det new source my_api                    # scaffold a source connector
-det new config my_pipeline               # scaffold a pipeline config
-det validate                             # check everything
-det run -p my_pipeline                   # run the pipeline
-det runs list -p my_pipeline             # show recent run history
+detx new source my_api                    # scaffold a source connector
+detx new config my_pipeline               # scaffold a pipeline config
+detx validate                             # check everything
+detx run -p my_pipeline                   # run the pipeline
+detx runs list -p my_pipeline             # show recent run history
 ```
 
 A *pipeline* is one config file binding a source + a destination + a target +
-params. Run it with `det run -p <config>`. The library equivalent is
-`det.run(config="my_pipeline")` and returns a structured `RunResult`.
+params. Run it with `detx run -p <config>`. The library equivalent is
+`detx.run(config="my_pipeline")` and returns a structured `RunResult`.
 
 ## Pre-baked connectors
 
@@ -56,7 +56,7 @@ params. Run it with `det run -p <config>`. The library equivalent is
 MERGE upserts, cursor-based partitioning).
 
 **Engine:** per-stream commit + atomic transactions (rollback on failure),
-state in the destination's `_det_state` table, run records in `_det_runs`,
+state in the destination's `_detx_state` table, run records in `_detx_runs`,
 structured JSON-lines logs per run, secret redaction, schema evolution
 (`evolve` default, `strict` opt-in), pipeline-level parallelism with
 per-destination caps.

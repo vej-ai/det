@@ -1,6 +1,6 @@
 # 06 — Project Anatomy
 
-A det **project** is the directory a user creates to run extract-load
+A detx **project** is the directory a user creates to run extract-load
 pipelines. It is modelled on a dbt project: a small declarative root file, a
 credentials file kept separate from code, folders of components, and a
 disposable working directory. Sources, destinations, and pipeline *configs*
@@ -9,22 +9,22 @@ unit (chapter 12).
 
 ## The dbt analogy at a glance
 
-| dbt | det | Purpose |
+| dbt | detx | Purpose |
 |---|---|---|
-| `dbt_project.yml` | `det_project.yml` | Project config: name, paths, project-wide vars. Committed. |
+| `dbt_project.yml` | `detx_project.yml` | Project config: name, paths, project-wide vars. Committed. |
 | `~/.dbt/profiles.yml` | `profiles.yml` | Per-destination connection params, per target. **Not committed.** |
 | `models/` | `sources/` + `destinations/` + `configs/` | The work the project does. Committed. |
-| `target/` | `.det/` | Disposable build/cache/log output. Git-ignored. |
-| `dbt run --select my_model` | `det run -p my_pipeline` | Run one pipeline. |
+| `target/` | `.detx/` | Disposable build/cache/log output. Git-ignored. |
+| `dbt run --select my_model` | `detx run -p my_pipeline` | Run one pipeline. |
 | `dbt outputs` in `profiles.yml` | top-level destination blocks in `profiles.yml` | Per-environment connection rows. |
 
 ## A complete project tree
 
 ```
 acme_el/
-├── det_project.yml         # project config (the dbt_project.yml analog)
+├── detx_project.yml         # project config (the dbt_project.yml analog)
 ├── profiles.yml            # per-destination connection params (NOT committed)
-├── det_plugins.py          # OPTIONAL — project-local secret-resolver plugins
+├── detx_plugins.py          # OPTIONAL — project-local secret-resolver plugins
 ├── .gitignore
 │
 ├── sources/                # custom SOURCE connectors (kind: source)
@@ -47,27 +47,27 @@ acme_el/
 │   ├── shiphero_prod.yml
 │   └── internal.yml        # ...OR many under a `configs:` list per file
 │
-└── .det/                   # working dir (git-ignored — the target/ analog)
+└── .detx/                   # working dir (git-ignored — the target/ analog)
     ├── manifest.json
     ├── logs/
     │   └── run-2026-05-21T09-30-00.log
     └── cache/
 ```
 
-The optional **`det_plugins.py`** file sits next to `det_project.yml`. If present, det imports it once at engine startup so the file's `det.register_secret_resolver(...)` calls register custom `secret://` schemes for the project. The file is arbitrary Python — same trust model as the connector folders. See [08 — Security §3](./08-security.md) for the resolver protocol and the registration pattern.
+The optional **`detx_plugins.py`** file sits next to `detx_project.yml`. If present, detx imports it once at engine startup so the file's `detx.register_secret_resolver(...)` calls register custom `secret://` schemes for the project. The file is arbitrary Python — same trust model as the connector folders. See [08 — Security §3](./08-security.md) for the resolver protocol and the registration pattern.
 
 Sources and destinations live in their own top-level folders (`sources/` for
 `kind: source`, `destinations/` for `kind: destination`); `configs/` holds the
 pipeline configs that bind a source to a destination. Configs are the
-runtime unit: `det run -p <name>` names a config, not a connector.
+runtime unit: `detx run -p <name>` names a config, not a connector.
 
-## `det_project.yml` — the project config
+## `detx_project.yml` — the project config
 
 The root file. Committed to version control. Pure declaration — no logic, no
 credentials.
 
 ```yaml
-# det_project.yml
+# detx_project.yml
 name: acme_el
 version: "1.0.0"
 
@@ -98,7 +98,7 @@ vars:
 | `destination_paths` | list[string] | No | `["destinations"]` | Directories scanned for project-local destinations. |
 | `config_paths` | list[string] | No | `["configs"]` | Directories scanned for pipeline configs (chapter 12). |
 | `vars` | map[string → scalar] | No | `{}` | Project-wide param overrides applied to every connector. |
-| `working_dir` | string | No | `.det` | Where the engine writes the manifest cache, logs, and scratch. |
+| `working_dir` | string | No | `.detx` | Where the engine writes the manifest cache, logs, and scratch. |
 
 > There is no `default_destination` key (a source's `register.yaml` does not
 > declare a destination; a config does) and no top-level `default_target`
@@ -125,7 +125,7 @@ source-secret rows so `${profile.<block>.<key>}` refs resolve (chapter 03 §2.5)
 
 # Project-wide pipeline-level concurrency budget. Default 1 (sequential —
 # opt in to parallelism). dbt's `threads:` knob, same semantics. Honoured
-# by `det run --tag <T>`; each destination's @destination.max_concurrent_writes
+# by `detx run --tag <T>`; each destination's @destination.max_concurrent_writes
 # hook caps further. See chapter 02 §Concurrency model + chapter 07 §`--threads`.
 threads: 4
 
@@ -134,9 +134,9 @@ duckdb:
   default_target: dev
   targets:
     dev:
-      path: ".det/warehouse.duckdb"
+      path: ".detx/warehouse.duckdb"
     prod:
-      path: "/var/data/det/warehouse.duckdb"
+      path: "/var/data/detx/warehouse.duckdb"
 
 # A second destination — illustrative.
 bigquery:
@@ -170,7 +170,7 @@ profiles:
 
 | Top-level key | Type | Purpose |
 |---|---|---|
-| `threads` | positive integer | Pipeline-level concurrency budget for `det run --tag`. Default 1. Each destination's `@destination.max_concurrent_writes` caps further. dbt-style. |
+| `threads` | positive integer | Pipeline-level concurrency budget for `detx run --tag`. Default 1. Each destination's `@destination.max_concurrent_writes` caps further. dbt-style. |
 | `<destination name>` | mapping with `targets:` (+ optional `default_target:`) | One block per destination connector. The block's `targets.<name>` rows supply the destination's connection params for each named environment. |
 | `profiles` | map[string → map[string → map]] | Per-target source-secret blocks. `profiles.<target>.<block>.<key>` is what `${profile.<block>.<key>}` resolves to (after the engine picks the active target from the config). |
 
@@ -183,7 +183,7 @@ A `.duckdb` database file is protected by a single OS-level file lock —
 two writer connections on the same file at the same time would corrupt
 it. The DuckDB destination therefore declares
 `@destination.max_concurrent_writes() -> 1`, and the engine honors that
-cap unconditionally: a user with `threads: 8` running `det run --tag X`
+cap unconditionally: a user with `threads: 8` running `detx run --tag X`
 against an all-DuckDB project gets serial execution against the DuckDB
 file, even while other destinations in the same sweep run in parallel.
 This is the destination's honesty about its own model, not a soft hint —
@@ -228,9 +228,9 @@ configs:
 The CLI's primary selector is the config name:
 
 ```bash
-det run -p shiphero_prod
-det run --conf shiphero_prod          # --conf is the long-form alias
-det run -p shiphero_dev --target prod # override the config's target
+detx run -p shiphero_prod
+detx run --conf shiphero_prod          # --conf is the long-form alias
+detx run -p shiphero_dev --target prod # override the config's target
 ```
 
 ## Baked and custom components coexisting
@@ -241,14 +241,14 @@ A project draws each kind of component from two places, resolved by name
 1. **Custom** — folders under `source_paths` / `destination_paths`
    (`sources/`, `destinations/`). Authored and version-controlled by the
    user.
-2. **Pre-baked** — folders shipped inside the installed `det` package
-   (`det/sources/…`, `det/destinations/…`). Maintained by the det project.
+2. **Pre-baked** — folders shipped inside the installed `detx` package
+   (`detx/sources/…`, `detx/destinations/…`). Maintained by the detx project.
 
 **Project-local wins on a name collision.** To customize a baked component —
 fix a bug, add a stream, change pagination — copy it into
 `sources/<same_name>/` (or `destinations/<same_name>/`) and edit. The engine
 finds the project-local copy first and the baked one is shadowed. No fork of
-the `det` package, no patching: overriding is just a folder.
+the `detx` package, no patching: overriding is just a folder.
 
 ## Target selection
 
@@ -263,11 +263,11 @@ The active environment is chosen per invocation, with this precedence
    destination *does* define.
 
 ```bash
-det run -p shiphero_prod                    # uses config's target:
-det run -p shiphero_prod --target staging   # overrides
+detx run -p shiphero_prod                    # uses config's target:
+detx run -p shiphero_prod --target staging   # overrides
 ```
 
-## The `.det/` working directory
+## The `.detx/` working directory
 
 The disposable build directory — the `target/` analog. Created and owned by
 the engine, **git-ignored**, safe to delete at any time (the next run rebuilds
@@ -275,14 +275,14 @@ it).
 
 | Path | Purpose |
 |---|---|
-| `.det/manifest.json` | Cached, validated catalog of every discovered connector. |
-| `.det/logs/` | Per-run structured log files, timestamped. |
-| `.det/cache/` | Per-run scratch. |
+| `.detx/manifest.json` | Cached, validated catalog of every discovered connector. |
+| `.detx/logs/` | Per-run structured log files, timestamped. |
+| `.detx/cache/` | Per-run scratch. |
 
-Nothing in `.det/` is a source of truth. Incremental **state** is *not*
-here — it lives in the destination's `_det_state` table (chapter 03 §3.5),
+Nothing in `.detx/` is a source of truth. Incremental **state** is *not*
+here — it lives in the destination's `_detx_state` table (chapter 03 §3.5),
 so a fresh checkout on a new machine resumes correctly with an empty
-`.det/`.
+`.detx/`.
 
 ## Recommended `.gitignore`
 
@@ -291,23 +291,23 @@ so a fresh checkout on a new machine resumes correctly with an empty
 profiles.yml
 
 # disposable working directory
-.det/
+.detx/
 ```
 
 ## Creating a project
 
 ```bash
-det init acme_el
+detx init acme_el
 ```
 
-Scaffolds the tree above: `det_project.yml`, a destination-keyed
+Scaffolds the tree above: `detx_project.yml`, a destination-keyed
 `profiles.yml` template with a single `duckdb`/`dev` target, empty
 `sources/` and `destinations/` folders, a `configs/` folder seeded with one
 `example.yml` stub, and the `.gitignore`. From there:
 
 ```bash
-det new source shiphero        # scaffold a custom source folder
-det new config shiphero_dev    # scaffold a configs/shiphero_dev.yml stub
-det validate                   # discovery-time validation
-det run -p shiphero_dev        # run it
+detx new source shiphero        # scaffold a custom source folder
+detx new config shiphero_dev    # scaffold a configs/shiphero_dev.yml stub
+detx validate                   # discovery-time validation
+detx run -p shiphero_dev        # run it
 ```

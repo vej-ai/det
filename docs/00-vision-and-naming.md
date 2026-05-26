@@ -1,12 +1,12 @@
 # 00 — Vision & Naming
 
-> Part of the **det** design handbook. This file sets the north star. Files
+> Part of the **detx** design handbook. This file sets the north star. Files
 > 01 (landscape) and 02 (architecture) build on the vocabulary and the
 > simplicity test defined here.
 
-## What det is
+## What detx is
 
-**det** ("data extraction tool") is an open-source Python extract-load (EL) tool. It
+**detx** ("data extraction tool") is an open-source Python extract-load (EL) tool. It
 moves data from a **source** (an API, a database, a file drop) into a
 **destination** (a warehouse, a database, an object store) and nothing more.
 Transformation is somebody else's job — dbt's, specifically.
@@ -16,19 +16,19 @@ The mental model is **a dbt-shaped extract-load tool**:
 - **Connectors are ordinary Python** — generator functions decorated with
   `@stream` / `@resource`. No subclasses to learn, no plugin system to fight.
 - **Pipeline state lives in the destination**, not in a control plane —
-  `_det_state` is a row in your warehouse alongside the data it tracks.
+  `_detx_state` is a row in your warehouse alongside the data it tracks.
 - **You work in a project folder** of plain files, run it with a CLI
-  (`det run`), select work with **configs**, and configure environments with
+  (`detx run`), select work with **configs**, and configure environments with
   **profiles** — same shape as a dbt project. The engine is a pip-installable
   library; the project is yours and lives in your repo, under version control,
   reviewable in a PR.
 
-det has three faces, and they are equal first-class citizens:
+detx has three faces, and they are equal first-class citizens:
 
 | Face | Analogy | What it is |
 |------|---------|-----------|
-| **Engine / library** | `dbt-core` | The `det` Python package: the run loop, the connector contract, baked connectors, the importable API. |
-| **CLI** | the `dbt` binary | `det` — installs via pip, runs a project folder. |
+| **Engine / library** | `dbt-core` | The `detx` Python package: the run loop, the connector contract, baked connectors, the importable API. |
+| **CLI** | the `dbt` binary | `detx` — installs via pip, runs a project folder. |
 | **Project** | a dbt project | A user-owned folder of connector definitions, profiles, and config. |
 
 A connector — source **or** destination — is a **folder**: a mandatory
@@ -39,38 +39,38 @@ generators that **yield** records, destinations expose `@destination`-hooked
 functions that **accept** them. A class form is a documented escape hatch but is
 never mandatory.
 
-det **ships pre-baked** connectors and destinations inside the `det`
+detx **ships pre-baked** connectors and destinations inside the `detx`
 package (`connector="meta_ads"`). Users also write **custom** ones in their own
 project folder (`connector="custom"`). Same contract for both.
 
 Runs are **synchronous** — "run, wait until it succeeds, exit." That makes
-det trivially easy to wrap in an orchestrator (Dagster, Airflow, cron) later,
+detx trivially easy to wrap in an orchestrator (Dagster, Airflow, cron) later,
 because a synchronous process with an exit code is the universal contract.
 
 ## Non-goals
 
-det does one job — extract-load — and explicitly does not do several adjacent
+detx does one job — extract-load — and explicitly does not do several adjacent
 ones:
 
-- **det does not provide a UI.** Connectors are code in a repo, not rows in a
+- **detx does not provide a UI.** Connectors are code in a repo, not rows in a
   database edited through a web form. The source of truth is the filesystem.
-- **det does not run connectors out-of-process.** Connectors are imported and
+- **detx does not run connectors out-of-process.** Connectors are imported and
   executed as in-process Python — no JSON-over-stdio protocol, no
   container-per-connector, real stack traces. Singer and Airbyte shuttle
-  `RECORD` / `SCHEMA` / `STATE` messages between separate OS processes; det
+  `RECORD` / `SCHEMA` / `STATE` messages between separate OS processes; detx
   does not.
-- **det does not express stream *logic* in YAML.** YAML is the manifest
+- **detx does not express stream *logic* in YAML.** YAML is the manifest
   (metadata, declared streams, config schema) and only the manifest. The
   *logic* of a stream is a Python generator. YAML that needs an `if` is a
   programming language with the safety removed.
-- **det does not host a control plane.** State lives in your destination
-  (`_det_state`), not in a det-managed service. There is no det backend,
+- **detx does not host a control plane.** State lives in your destination
+  (`_detx_state`), not in a detx-managed service. There is no detx backend,
   no scheduler daemon, no telemetry endpoint.
-- **det does not transform data.** Use dbt.
-- **det is not an orchestrator, a reverse-ETL platform, a catalog, or a
+- **detx does not transform data.** Use dbt.
+- **detx is not an orchestrator, a reverse-ETL platform, a catalog, or a
   managed SaaS.**
 
-What det *keeps* from the Airbyte / Singer world: a **YAML manifest**
+What detx *keeps* from the Airbyte / Singer world: a **YAML manifest**
 (`register.yaml`) for declarative *metadata and config* — analogous in spirit
 to Airbyte's `metadata.yaml`, not its `manifest.yaml`. Declaring *what a
 connector is* in YAML is good. Encoding *what a connector does* in YAML is the
@@ -85,7 +85,7 @@ The #1 principle is **keep it as simple as possible.** This is not a slogan
 — it is a **test** applied to every design decision:
 
 > **The simplicity test.** For any proposed feature or abstraction, ask:
-> 1. Can a competent data engineer who has never seen det read a connector
+> 1. Can a competent data engineer who has never seen detx read a connector
 >    folder and understand it in under five minutes?
 > 2. Does this add a *concept the user must learn*? If yes, does it remove at
 >    least one other concept, or unlock something genuinely impossible without it?
@@ -96,7 +96,7 @@ The #1 principle is **keep it as simple as possible.** This is not a slogan
 
 A feature that fails the test is cut or demoted to an escape hatch. When two
 designs are both correct, **the one with fewer concepts wins** — even if it is
-less powerful. Power that costs comprehension is, for det, a net loss.
+less powerful. Power that costs comprehension is, for detx, a net loss.
 
 This is why connectors are folders of plain Python: a data engineer already
 knows folders, YAML, and generators. It is why state lives in the destination:
@@ -106,27 +106,32 @@ synchronous: no scheduler, no queue, no daemon — just a process.
 ## Naming & branding
 
 The product, the CLI binary, the Python package, and the import name are all
-spelled the same way: **`det`** — lowercase, three letters, like `dbt`. It
+spelled the same way: **`detx`** — lowercase, three letters, like `dbt`. It
 stands for "data extraction tool."
 
 | Thing | Form | Notes |
 |-------|------|-------|
-| Product name | **det** | Always lowercase. "data extraction tool." |
-| CLI binary | `det` | `det run -p shiphero_prod` — the `-p / --conf` arg names a pipeline config (chapter 12). |
-| Python package / import | `det` | `import det` / `from det import run`. |
+| Product name | **detx** | Always lowercase. "data extraction tool." |
+| CLI binary | `detx` | `detx run -p shiphero_prod` — the `-p / --conf` arg names a pipeline config (chapter 12). |
+| Python package / import | `detx` | `import detx` / `from detx import run`. |
 | Runtime unit | **config** | A pipeline (one source + one destination + one target + params). Lives under `configs/` (chapter 12). |
-| State table | `_det_state` | Underscore-prefixed, lives in the destination. |
-| Project config | `det_project.yml` | The dbt-style project manifest at the project root. |
+| State table | `_detx_state` | Underscore-prefixed, lives in the destination. |
+| Project config | `detx_project.yml` | The dbt-style project manifest at the project root. |
 | Per-destination connection params | `profiles.yml` | dbt-outputs style: top-level keys are destination names, each with `default_target:` + `targets:`. |
-| Working dir | `.det/` | Disposable build/cache/log output. Git-ignored. The `target/` analog. |
-| Synced-at column | `_det_synced_at` | Engine-appended load timestamp on every loaded table. |
+| Working dir | `.detx/` | Disposable build/cache/log output. Git-ignored. The `target/` analog. |
+| Synced-at column | `_detx_synced_at` | Engine-appended load timestamp on every loaded table. |
 
 Rationale: one identifier for everything is the simplest thing. Borrowing the
 dbt convention (`dbt` the binary, `dbt` the package, `dbt_project.yml`) keeps
 the analogy clean for the target user (see §Target user below). Underscore-
-prefixed names (`_det_state`, `_det_synced_at`, `_det_runs`) mark the
+prefixed names (`_detx_state`, `_detx_synced_at`, `_detx_runs`) mark the
 engine-owned namespace inside the destination so it sorts away from user
 tables and columns.
+
+> Provenance: the tool was briefly called `detx` (stage 8.A) before this rename
+> to `detx`, forced by a PyPI name collision — `pip install detx` already
+> resolves to an unrelated LLM-analysis framework. The shape of the
+> identifier convention is unchanged; only the three letters changed.
 
 ## Target user
 
@@ -135,12 +140,12 @@ scripts** — the person with a `scripts/` folder full of `pull_stripe.py`,
 `sync_hubspot.py`, each re-implementing pagination, retries, incremental
 cursors, and "where did I leave off" bookkeeping slightly differently.
 
-det offers that person a deal: **keep writing Python generators — that part
+detx offers that person a deal: **keep writing Python generators — that part
 was never the problem — and we will take the boilerplate.** State, schema
 inference, batching, retries, the destination write, the run record: handled. In
 exchange they adopt one contract (folder + `register.yaml` + decorators).
 
-det is **not** aimed at non-technical users (that is Airbyte's UI market) or
+detx is **not** aimed at non-technical users (that is Airbyte's UI market) or
 at teams who want a managed SaaS with an SLA (that is Fivetran's market). It is
 aimed at engineers who want their EL layer to look like their dbt layer:
 plain files, in a repo, in a PR, run from a CLI.
@@ -150,8 +155,8 @@ plain files, in a repo, in a PR, run from a CLI.
 v1 scope is **CLI + library only**. Explicitly out of scope for v1:
 
 - **No UI.** No web app, no connector builder. (Possible far-future; not v1.)
-- **No built-in scheduler / orchestrator.** det runs once and exits.
-  Scheduling is cron's or Dagster's job. det's contribution is being a
+- **No built-in scheduler / orchestrator.** detx runs once and exits.
+  Scheduling is cron's or Dagster's job. detx's contribution is being a
   clean synchronous process that an orchestrator can wrap.
 - **No transformation / T layer.** EL only. Hand off to dbt.
 - **No reverse-ETL framing.** A warehouse→SaaS sync is just a connector pair, but
@@ -161,7 +166,7 @@ v1 scope is **CLI + library only**. Explicitly out of scope for v1:
   within the `@stream` contract is a v2 question — see
   [chapter 10](./10-roadmap-and-scope.md) and [chapter 11 Q5](./11-open-questions.md).
 - **No distributed / multi-node execution.** Single process, single host.
-- **No data catalog, lineage graph, or column-level metadata store.** det
+- **No data catalog, lineage graph, or column-level metadata store.** detx
   emits a **run record**; it is not a metadata platform.
 - **No connector marketplace.** Baked connectors ship in the package; everything
   else is custom and lives in the user's project. A registry may come later.

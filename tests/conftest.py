@@ -2,9 +2,9 @@
 
 The engine (stage 5) does not exist yet, so these tests have to do for
 themselves the one thing the engine will do: import a connector folder's
-``.py`` files *inside* a :func:`~det.registry.registration_scope` so the
+``.py`` files *inside* a :func:`~detx.registry.registration_scope` so the
 ``@stream`` / ``@destination`` decorators register into one
-:class:`~det.registry.ConnectorRegistry`.
+:class:`~detx.registry.ConnectorRegistry`.
 
 :func:`load_connector` is that harness. The DuckDB destination and the ``echo``
 fixture source are both loaded through it — exactly the path the engine's
@@ -24,8 +24,8 @@ import duckdb
 import pytest
 import yaml
 
-from det.registry import ConnectorRegistry, registration_scope
-from det.types import ConnectorManifest
+from detx.registry import ConnectorRegistry, registration_scope
+from detx.types import ConnectorManifest
 
 # --------------------------------------------------------------------------
 # Connector-folder locations
@@ -33,7 +33,7 @@ from det.types import ConnectorManifest
 
 # The pre-baked DuckDB destination folder, inside the installed package.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-DUCKDB_CONNECTOR_DIR = _REPO_ROOT / "det" / "destinations" / "duckdb"
+DUCKDB_CONNECTOR_DIR = _REPO_ROOT / "detx" / "destinations" / "duckdb"
 # The echo fixture source folder, under tests/. Stage 8.B split connectors/
 # into sources/ + destinations/ — the echo source lives at tests/fixtures/
 # sources/echo/ (the test project's own source_paths: [sources]).
@@ -88,7 +88,7 @@ def _import_module_from_path(path: Path) -> None:
     no-op. The module is registered in ``sys.modules`` before execution so any
     intra-module ``from . import`` style reference resolves.
     """
-    unique_name = f"_det_test_connector_{path.stem}_{uuid.uuid4().hex}"
+    unique_name = f"_detx_test_connector_{path.stem}_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(unique_name, path)
     if spec is None or spec.loader is None:  # pragma: no cover — defensive.
         raise ImportError(f"cannot load connector module from {path}")
@@ -146,27 +146,27 @@ def echo_source() -> Iterator[LoadedConnector]:
     yield load_connector(ECHO_CONNECTOR_DIR)
 
 
-# The committed fixture project (`tests/fixtures/`) is a real det project, so
-# tests that call ``det.run(project_dir=str(FIXTURES_DIR), ...)`` cause the
-# engine to write its per-run JSONL log into ``tests/fixtures/.det/logs/``
-# (stage 8a, docs/09 §3.2 — project-rooted by design). ``.det/`` is
+# The committed fixture project (`tests/fixtures/`) is a real detx project, so
+# tests that call ``detx.run(project_dir=str(FIXTURES_DIR), ...)`` cause the
+# engine to write its per-run JSONL log into ``tests/fixtures/.detx/logs/``
+# (stage 8a, docs/09 §3.2 — project-rooted by design). ``.detx/`` is
 # gitignored, but accumulated cruft over many runs is ugly. This autouse
 # fixture wipes it before *and* after each test, keeping the committed tree
 # spotless. Tests that copy the fixture into ``tmp_path`` are unaffected.
-_FIXTURE_DET_DIR = (
-    Path(__file__).resolve().parent / "fixtures" / ".det"
+_FIXTURE_DETX_DIR = (
+    Path(__file__).resolve().parent / "fixtures" / ".detx"
 )
 
 
 @pytest.fixture(autouse=True)
-def _clean_fixture_det_dir() -> Iterator[None]:
-    """Remove ``tests/fixtures/.det/`` around each test (engine writes leak there)."""
+def _clean_fixture_detx_dir() -> Iterator[None]:
+    """Remove ``tests/fixtures/.detx/`` around each test (engine writes leak there)."""
     import shutil as _sh
 
-    if _FIXTURE_DET_DIR.exists():
-        _sh.rmtree(_FIXTURE_DET_DIR, ignore_errors=True)
+    if _FIXTURE_DETX_DIR.exists():
+        _sh.rmtree(_FIXTURE_DETX_DIR, ignore_errors=True)
     try:
         yield
     finally:
-        if _FIXTURE_DET_DIR.exists():
-            _sh.rmtree(_FIXTURE_DET_DIR, ignore_errors=True)
+        if _FIXTURE_DETX_DIR.exists():
+            _sh.rmtree(_FIXTURE_DETX_DIR, ignore_errors=True)

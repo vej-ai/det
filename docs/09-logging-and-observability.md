@@ -1,8 +1,8 @@
 # 09 — Logging and Observability
 
-> Part of the det design handbook. See [README.md](./README.md) for the full table of contents.
+> Part of the detx design handbook. See [README.md](./README.md) for the full table of contents.
 
-The operator's requirement is plain: **"I want to know exactly what is happening."** det meets it with one mechanism — structured per-run logging — used two ways: a JSON-lines file every run writes to disk, and a `_det_runs` audit row the destination persists. There is no separate metrics system, no agent, no telemetry. Logs *are* the observability layer.
+The operator's requirement is plain: **"I want to know exactly what is happening."** detx meets it with one mechanism — structured per-run logging — used two ways: a JSON-lines file every run writes to disk, and a `_detx_runs` audit row the destination persists. There is no separate metrics system, no agent, no telemetry. Logs *are* the observability layer.
 
 ---
 
@@ -10,15 +10,15 @@ The operator's requirement is plain: **"I want to know exactly what is happening
 
 - **Structured first.** Every event is a JSON object. Human-readable text is a *rendering* of that object for a TTY, not a separate code path.
 - **Per-run scoped.** Every event carries the `run_id`. One run's story is fully reconstructable from its log file alone.
-- **Self-hosted, no phone-home.** Logs are written to the local filesystem and (optionally) the destination. det sends nothing anywhere.
-- **Two surfaces, one source of truth.** The JSONL file is the *narrative* (forensics). The `_det_runs` table is the *receipt* (queryability). The engine builds the table row from the same `RunResult` it returned to the caller.
+- **Self-hosted, no phone-home.** Logs are written to the local filesystem and (optionally) the destination. detx sends nothing anywhere.
+- **Two surfaces, one source of truth.** The JSONL file is the *narrative* (forensics). The `_detx_runs` table is the *receipt* (queryability). The engine builds the table row from the same `RunResult` it returned to the caller.
 - **Redaction is a property of the bus, not the call.** Both surfaces scrub through one shared redactor. Adding a secret value masks it everywhere from the next event onward.
 
 ---
 
 ## 2. Run lifecycle events (the JSONL taxonomy)
 
-The engine emits a fixed, ordered set of events to `.det/logs/<run_id>/run.jsonl`. This is the contract a UI or alerting rule can rely on.
+The engine emits a fixed, ordered set of events to `.detx/logs/<run_id>/run.jsonl`. This is the contract a UI or alerting rule can rely on.
 
 | Event | When | Key fields |
 |---|---|---|
@@ -42,20 +42,20 @@ The `user` event is the bridge between a connector author's `log.info(...)` and 
 
 ### 3.1 stdout
 
-While `det run` blocks (it always runs synchronously — see [07 §3](./07-cli-and-library-api.md)), it streams stdlib log records to stderr in the usual format:
+While `detx run` blocks (it always runs synchronously — see [07 §3](./07-cli-and-library-api.md)), it streams stdlib log records to stderr in the usual format:
 
 ```
-2026-05-25 14:32:01,123 [INFO] det: running stream 'items'
+2026-05-25 14:32:01,123 [INFO] detx: running stream 'items'
 ```
 
 A future `--log-level debug|info|warn|error` flag will control stdout verbosity; v1 ships at INFO.
 
 ### 3.2 The per-run JSONL log file
 
-Independent of stdout verbosity, **every run writes a complete JSON-lines file** under the project's `.det/` directory:
+Independent of stdout verbosity, **every run writes a complete JSON-lines file** under the project's `.detx/` directory:
 
 ```
-.det/
+.detx/
   logs/
     run-a1b9f3.../          # one directory per run_id
       run.jsonl             # every event, JSON-lines
@@ -63,7 +63,7 @@ Independent of stdout verbosity, **every run writes a complete JSON-lines file**
       run.jsonl
 ```
 
-`.det/logs/` is project-rooted (the engine creates it under the directory holding `det_project.yml`), so `det runs show` from any sub-directory finds the right file.
+`.detx/logs/` is project-rooted (the engine creates it under the directory holding `detx_project.yml`), so `detx runs show` from any sub-directory finds the right file.
 
 A line from `run.jsonl`:
 
@@ -73,13 +73,13 @@ A line from `run.jsonl`:
 
 The file is opened with line-buffering and each write ends with `\n`, so a crash mid-run leaves a partial-but-readable line-terminated file. The full traceback for a failed run lives here (in the `stream_failed` event) — it is the forensics surface for "what happened to this run".
 
-Log retention is the operator's call: `.det/logs/` is gitignored. det does not auto-delete logs in v1; a future `--keep-logs N` flag is tracked as a v2 quality-of-life item.
+Log retention is the operator's call: `.detx/logs/` is gitignored. detx does not auto-delete logs in v1; a future `--keep-logs N` flag is tracked as a v2 quality-of-life item.
 
 ---
 
-## 4. The `_det_runs` audit table
+## 4. The `_detx_runs` audit table
 
-Where the JSONL file is the *narrative*, the `_det_runs` row is the *receipt* — the structured summary one row carries per run, queryable with plain SQL.
+Where the JSONL file is the *narrative*, the `_detx_runs` row is the *receipt* — the structured summary one row carries per run, queryable with plain SQL.
 
 The destination owns this table. A destination declaring `Capability.RUN_RECORDS` implements `@destination.write_run_record(conn, record)`; the engine calls it once per run, after streams finish and before `close`, with a fully-built `RunRecord`.
 
@@ -108,12 +108,12 @@ The logical schema (destination-agnostic):
 
 ### 4.2 What is deliberately NOT here
 
-- **Traceback** — the full traceback is verbose, embeds filesystem paths, and bloats `_det_runs` in a way that confounds SQL filtering. It lives in the JSONL `stream_failed` event (the forensics surface).
+- **Traceback** — the full traceback is verbose, embeds filesystem paths, and bloats `_detx_runs` in a way that confounds SQL filtering. It lives in the JSONL `stream_failed` event (the forensics surface).
 - **The `error` object itself** — the `RunResult.error` is a live Python exception; only its string projection (`error_type`, `error_message`) crosses the table boundary. The JSONL also has the traceback.
 
 ### 4.3 Tier-A only, for now
 
-`_det_runs` is hosted by the destination, in the same store as `_det_state` and the loaded data — so "show me every failed `echo_dev` run this week" is one `SELECT`. Both baked destinations (DuckDB and BigQuery) declare `Capability.RUN_RECORDS`. A destination that does NOT declare the capability is fully valid — the engine simply skips the table write and the JSONL log file remains the durable record.
+`_detx_runs` is hosted by the destination, in the same store as `_detx_state` and the loaded data — so "show me every failed `echo_dev` run this week" is one `SELECT`. Both baked destinations (DuckDB and BigQuery) declare `Capability.RUN_RECORDS`. A destination that does NOT declare the capability is fully valid — the engine simply skips the table write and the JSONL log file remains the durable record.
 
 A destination that *does* declare `Capability.RUN_RECORDS` but does not implement `@destination.write_run_record` is rejected at run start with a clear `EngineError` — same conditional-mandatory pattern as `@destination.transaction` under `Capability.TRANSACTIONAL_LOAD` (see [05 §1](./05-destinations-and-state.md)).
 
@@ -128,25 +128,25 @@ A destination that *does* declare `Capability.RUN_RECORDS` but does not implemen
 | `warn` | Recoverable issues: a retried request, a skipped stream, a deprecated config key. |
 | `error` | A failure that ends the run or fails a stream. |
 
-**Redaction is enforced in the logging layer**, per the security contract in [08 §6](./08-security.md). Both sinks (stdlib + JSONL) share one `Redactor`: any value marked `secret: true` or resolved from `${env.X}` / `${profile.X.Y}` is replaced with `***` in *every* sink. Redaction is value-based: det scrubs known secret values out of the final rendered text (a stdlib message; a serialized JSONL line) before writing, so a secret accidentally interpolated into a URL, an HTTP error body, or a structured field is also caught.
+**Redaction is enforced in the logging layer**, per the security contract in [08 §6](./08-security.md). Both sinks (stdlib + JSONL) share one `Redactor`: any value marked `secret: true` or resolved from `${env.X}` / `${profile.X.Y}` is replaced with `***` in *every* sink. Redaction is value-based: detx scrubs known secret values out of the final rendered text (a stdlib message; a serialized JSONL line) before writing, so a secret accidentally interpolated into a URL, an HTTP error body, or a structured field is also caught.
 
 The JSONL writer redacts *after* serialization — the entire JSON line is run through the redactor — so a secret in a nested field (`{"event":"user","message":"...","extra":{"token":"..."}}` ) is masked, not just one at the top level. This is best-effort against a hostile connector ([08 §7](./08-security.md)) but a reliable guard against accidental leakage.
 
 ---
 
-## 6. The `det runs` CLI
+## 6. The `detx runs` CLI
 
 Two commands read this layer back:
 
-### `det runs list -p <config> [--limit N]`
+### `detx runs list -p <config> [--limit N]`
 
-Show recent runs from the destination's `_det_runs`. `-p <config>` is **required** — run records are per-destination, and the config disambiguates which destination's table to query. (In a project where every config targets the same destination, this redundancy is the price for not inventing a multi-destination union that v1 cannot honour. A future `--destination <name>` flag is the natural relaxation.) A target without `_det_runs` yet (a brand-new project) prints "no run records".
+Show recent runs from the destination's `_detx_runs`. `-p <config>` is **required** — run records are per-destination, and the config disambiguates which destination's table to query. (In a project where every config targets the same destination, this redundancy is the price for not inventing a multi-destination union that v1 cannot honour. A future `--destination <name>` flag is the natural relaxation.) A target without `_detx_runs` yet (a brand-new project) prints "no run records".
 
-### `det runs show <run_id> -p <config>`
+### `detx runs show <run_id> -p <config>`
 
-Show one run's full record + every event in its `.det/logs/<run_id>/run.jsonl`. Accepts the short id (`abc123def...`) or the long form (`run-abc123def...`). On a TTY, events are colored by type; piped output is plain.
+Show one run's full record + every event in its `.detx/logs/<run_id>/run.jsonl`. Accepts the short id (`abc123def...`) or the long form (`run-abc123def...`). On a TTY, events are colored by type; piped output is plain.
 
-Both commands open the destination via its own `@destination.open` / `@destination.close` hooks (same pattern as `det state list`) and run a parameterized `SELECT` on the connection. Like `det state reset`, this reaches past the destination hook contract — there is no `read_run_records` hook in v1, and SQL-direct querying is the v1 limitation. The two baked Tier-A destinations (DuckDB and BigQuery) both declare `Capability.RUN_RECORDS`; future Tier-A destinations follow the same pattern (the table is the contract; the implementation hands back rows the CLI shapes).
+Both commands open the destination via its own `@destination.open` / `@destination.close` hooks (same pattern as `detx state list`) and run a parameterized `SELECT` on the connection. Like `detx state reset`, this reaches past the destination hook contract — there is no `read_run_records` hook in v1, and SQL-direct querying is the v1 limitation. The two baked Tier-A destinations (DuckDB and BigQuery) both declare `Capability.RUN_RECORDS`; future Tier-A destinations follow the same pattern (the table is the contract; the implementation hands back rows the CLI shapes).
 
 ---
 
@@ -154,16 +154,16 @@ Both commands open the destination via its own `@destination.open` / `@destinati
 
 The structured design is what makes deferring the UI (see [10 — Roadmap](./10-roadmap-and-scope.md)) safe — the data is already there when the UI arrives:
 
-- **A future UI** reads `_det_runs` and `_det_state` straight from the destination, plus `run.jsonl` for drill-down. No new collection layer, no agent — the UI is a *reader* of data det already writes.
-- **Orchestrators** consume the `RunResult` returned by `det.run()` ([07 §4.1](./07-cli-and-library-api.md)) — `run_id`, per-stream counts, `log_path`, the populated `error` on failure — and attach it as native run metadata.
-- **Alerting** is just a query: a scheduled check over `_det_runs` for `status = 'failed'`, or a CI step that inspects the exit code ([07 §3](./07-cli-and-library-api.md)).
+- **A future UI** reads `_detx_runs` and `_detx_state` straight from the destination, plus `run.jsonl` for drill-down. No new collection layer, no agent — the UI is a *reader* of data detx already writes.
+- **Orchestrators** consume the `RunResult` returned by `detx.run()` ([07 §4.1](./07-cli-and-library-api.md)) — `run_id`, per-stream counts, `log_path`, the populated `error` on failure — and attach it as native run metadata.
+- **Alerting** is just a query: a scheduled check over `_detx_runs` for `status = 'failed'`, or a CI step that inspects the exit code ([07 §3](./07-cli-and-library-api.md)).
 
 One mechanism — structured per-run logs plus a run record — serves the operator today and the UI and orchestrators later. That is the simplicity bar, met.
 
 ### Reference
 
-- `RunResult` / `RunRecord` / `StreamResult` shapes → `det/types.py` (the source of truth)
-- State lifecycle, capability tiers, `.det/` layout → [05 — Destinations and State](./05-destinations-and-state.md)
+- `RunResult` / `RunRecord` / `StreamResult` shapes → `detx/types.py` (the source of truth)
+- State lifecycle, capability tiers, `.detx/` layout → [05 — Destinations and State](./05-destinations-and-state.md)
 - The `@destination` hook namespace + `write_run_record` → [03 — The Connector Contract](./03-connector-contract.md) §3.4
 - Redaction and the secret model → [08 — Security](./08-security.md)
 - Deferred UI and orchestrator integration → [10 — Roadmap and Scope](./10-roadmap-and-scope.md)
