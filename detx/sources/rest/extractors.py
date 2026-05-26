@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Field-path extraction — turn a parsed JSON response into a list of records.
 
 A REST API rarely returns a top-level JSON array. The records the connector

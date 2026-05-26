@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """BigQuery + GCS client wrapper for the BigQuery destination — docs/05 §2.
 
 Lifts every SDK import into *lazy* accessors so the rest of detx

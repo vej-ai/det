@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Per-format streaming readers — CSV / JSONL / Parquet.
 
 Each reader takes a streaming binary handle (the kind a :class:`Backend`

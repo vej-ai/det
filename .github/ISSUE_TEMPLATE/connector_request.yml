@@ -1,0 +1,69 @@
+name: Connector request
+description: Request a new baked source or destination connector.
+title: "[Connector]: "
+labels: ["connector-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        detx makes it cheap to write a **project-local** connector (a folder
+        of plain Python under `connectors/`, see
+        [`docs/03`](https://github.com/vej-ai/detx/blob/main/docs/03-connector-contract.md)
+        and [`docs/04`](https://github.com/vej-ai/detx/blob/main/docs/04-connector-body.md)). The
+        bar for *baking* a connector into the engine is higher: the source
+        needs to be widely useful, durably maintained, and well-shaped to
+        the contract. The strongest version of this request is a **PR
+        that implements it** — a request alone is fine, but a PR is the
+        path to a yes.
+
+  - type: input
+    id: connector-name
+    attributes:
+      label: Source / destination name
+      description: e.g. "Shopify (source)", "Snowflake (destination)".
+    validations:
+      required: true
+
+  - type: input
+    id: api-docs
+    attributes:
+      label: Link to the upstream API / driver docs
+      description: Where would a connector author start reading?
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-baked
+    attributes:
+      label: Why baked (rather than project-local)?
+      description: |
+        What makes this one general enough to ship inside detx, vs. living
+        in your own repo as a project-local connector?
+    validations:
+      required: true
+
+  - type: textarea
+    id: scale
+    attributes:
+      label: Expected volume and latency
+      description: |
+        Rows / GB per run, expected end-to-end time, batch vs. near-real-time,
+        any rate-limit gotchas. Helps assess the right shape (paginated REST
+        vs. bulk export vs. CDC).
+
+  - type: dropdown
+    id: willing-to-implement
+    attributes:
+      label: Are you willing to implement this?
+      options:
+        - "Yes — I will open a PR."
+        - "Maybe — with guidance on the contract."
+        - "No — I am requesting it for someone else to pick up."
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Links to similar connectors in other tools, edge cases, related issues.

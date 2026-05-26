@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """GCP Secret Manager resolver — the first ``secret://`` plugin (stage 9b).
 
 Provides :class:`GcpSecretManagerResolver`, the concrete adapter for

@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a new capability or behavior change in detx.
+title: "[Feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for thinking about how detx should grow. Before filing, please
+        confirm the idea is not already on the roadmap or deferred-by-design.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have checked [`docs/10-roadmap-and-scope.md`](https://github.com/vej-ai/detx/blob/main/docs/10-roadmap-and-scope.md) and [`docs/11-open-questions.md`](https://github.com/vej-ai/detx/blob/main/docs/11-open-questions.md) to confirm this is not already planned or deliberately deferred.
+          required: true
+        - label: I have searched the existing issues for a duplicate.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What are you trying to do that detx currently makes harder than it should be?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        Concrete is better than abstract. Sketch the CLI flag, the config
+        key, the API surface, or the connector hook you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you weigh, and why is the proposed one preferable?
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links to related issues, docs, or upstream patterns from other tools.

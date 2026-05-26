@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Generic REST source — the @stream functions the engine discovers and runs.
 
 This module pairs with ``register.yaml``. The contract (docs/03 §3.1, §7 rule 7)

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """ShipHero source — the @stream entry points the engine discovers.
 
 One @stream per declared stream in ``register.yaml``. Each is a thin wrapper

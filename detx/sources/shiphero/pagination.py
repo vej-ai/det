@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """GraphQL `pageInfo { hasNextPage endCursor }` pagination — main.py 386-446.
 
 ShipHero uses Relay-style cursor pagination: each `data` block carries an

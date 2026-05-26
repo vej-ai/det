@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Source / destination / config enumeration helpers for the CLI.
 
 ``detx list`` and ``detx validate`` need an "enumerate every discoverable

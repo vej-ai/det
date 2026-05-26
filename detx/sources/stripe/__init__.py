@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Stripe baked source connector — resource-as-stream over the v1 REST API.
 
 See ``register.yaml`` for the manifest and ``source.py`` for the ``@stream``

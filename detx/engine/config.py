@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Config resolution — stage 2 (RESOLVE) of the run lifecycle (docs/02, docs/03 §6).
 
 This module merges every config layer into the frozen

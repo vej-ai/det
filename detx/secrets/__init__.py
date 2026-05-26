@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Pluggable secret resolvers — the ``secret://<scheme>/<path>[#<field>]`` plugin surface.
 
 docs/08 §3 specifies a typed reference syntax — ``secret://<resolver>/<path>``

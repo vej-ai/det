@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """HashiCorp Vault resolver — the third ``secret://`` plugin (stage 9c).
 
 Provides :class:`VaultResolver`, the concrete adapter for

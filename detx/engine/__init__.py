@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """The detx engine — discovery, config resolution, the run lifecycle.
 
 This package is stage 5 of the detx build: the engine that turns a connector

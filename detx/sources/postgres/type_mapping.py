@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Postgres type → :class:`~detx.types.FieldType` mapping + schema introspection.
 
 docs/03 §2.2.1 fixes the detx :class:`~detx.types.FieldType` set; this

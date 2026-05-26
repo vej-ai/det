@@ -82,9 +82,11 @@ aws-secrets-manager = "detx.secrets._aws:AwsSecretsManagerResolver"
 vault = "detx.secrets._vault:VaultResolver"
 
 [project.urls]
-Homepage = "https://github.com/albinasplesnys/detx"
-Documentation = "https://github.com/albinasplesnys/detx/tree/main/docs"
-Source = "https://github.com/albinasplesnys/detx"
+Homepage = "https://github.com/vej-ai/detx"
+Documentation = "https://github.com/vej-ai/detx/tree/main/docs"
+Source = "https://github.com/vej-ai/detx"
+"Bug Tracker" = "https://github.com/vej-ai/detx/issues"
+Changelog = "https://github.com/vej-ai/detx/blob/main/CHANGELOG.md"
 
 [tool.hatch.build]
 include = [

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Generic REST source connector — a paginated HTTP/JSON API to any destination.
 
 A baked source connector for any paginated REST/JSON API. The connector body's

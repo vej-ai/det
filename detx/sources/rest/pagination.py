@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """HTTP pagination strategies for the Generic REST source connector.
 
 A pagination strategy decides three things, and only three things:

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Project + connector + config scaffolding for ``detx init`` / ``detx new``.
 
 These functions write the starter files docs/06 describes (post-8.B):

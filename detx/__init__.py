@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """detx — a simple, open-source Python extract-load (EL) tool.
 
 detx moves data from a **source** into a **destination** and nothing more.

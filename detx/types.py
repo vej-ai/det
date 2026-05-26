@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """detx contract types — the core type definitions every module imports.
 
 This module (``detx/types.py``) is the authoritative, in-code expression

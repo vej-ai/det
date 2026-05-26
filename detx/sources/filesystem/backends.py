@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """URI-scheme dispatched read backends — local / GCS / S3.
 
 Each backend exposes two operations:

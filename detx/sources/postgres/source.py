@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Postgres source — ``@stream`` functions, one per declared example stream.
 
 Each ``@stream`` function is a thin wrapper that delegates to a shared

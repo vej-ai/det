@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Date-window stepping — port of v2/main.py lines 363-376 / 351 lookback math.
 
 The ShipHero GraphQL API has hard server-side limits on how large a single

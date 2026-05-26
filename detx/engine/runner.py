@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """The run loop — the 6-stage run lifecycle (docs/02 §Run lifecycle).
 
 This module is the engine's keystone: :func:`run` executes one synchronous pass

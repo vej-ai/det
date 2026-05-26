@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Filesystem baked source connector — flat files (CSV / JSONL / Parquet).
 
 See ``register.yaml`` for the manifest and ``source.py`` for the entry points.

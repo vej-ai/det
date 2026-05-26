@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """DDL + identifier helpers for the DuckDB destination — docs/05 §3.
 
 Keeps ``destination.py`` focused on the lifecycle hooks. This module owns:

@@ -1,5 +1,10 @@
 # detx
 
+[![PyPI version](https://img.shields.io/pypi/v/detx.svg)](https://pypi.org/project/detx/)
+[![Python versions](https://img.shields.io/pypi/pyversions/detx.svg)](https://pypi.org/project/detx/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![CI](https://github.com/vej-ai/detx/actions/workflows/ci.yml/badge.svg)](https://github.com/vej-ai/detx/actions/workflows/ci.yml)
+
 **detx** ("data extraction tool") is an open-source, self-hosted Python
 **extract-load (EL)** tool. It moves data from a **source** (an API, a
 database, a file drop) into a **destination** (a warehouse, a database, an
@@ -72,6 +77,13 @@ The full design handbook lives in [`docs/`](./docs/README.md). Start with
 [06 — Project Anatomy](./docs/06-project-anatomy.md),
 [12 — Configs](./docs/12-configs.md), and
 [10 — Roadmap and Scope](./docs/10-roadmap-and-scope.md).
+
+## Security · Contributing · Code of Conduct
+
+- [Security policy](./SECURITY.md) — how to report a vulnerability.
+- [Contributing](./CONTRIBUTING.md) — dev setup, PR process, how to add a connector.
+- [Code of Conduct](./CODE_OF_CONDUCT.md).
+- [Changelog](./CHANGELOG.md).
 
 ## License
 

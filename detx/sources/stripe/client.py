@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Stripe HTTP client — Bearer auth, retries, backoff, and rate limiting.
 
 A small, dependency-free wrapper around :mod:`requests` that the Stripe

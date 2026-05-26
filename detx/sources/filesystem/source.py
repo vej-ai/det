@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """The filesystem source — the ``@stream`` entry point.
 
 One ``@stream`` (``files``) that enumerates files via the URI-dispatched

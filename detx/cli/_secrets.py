@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """``detx secrets test`` — verify that every declared secret reference resolves.
 
 Stage 9a CLI surface (docs/07). The command resolves every

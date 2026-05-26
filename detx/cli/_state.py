@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Incremental-state inspection + reset for ``detx state``.
 
 detx keeps incremental state in the destination's ``_detx_state`` table

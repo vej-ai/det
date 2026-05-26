@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Stripe source — the ``@stream`` functions the engine discovers and runs.
 
 One ``@stream`` per declared resource (``charges`` / ``invoices`` /

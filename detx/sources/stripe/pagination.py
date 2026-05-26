@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Stripe cursor pagination — ``starting_after`` + ``has_more`` loop.
 
 This is the canonical Stripe pagination idiom and the **reference**

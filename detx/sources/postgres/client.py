@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Postgres connection + safe-SQL helpers for the detx Postgres connector.
 
 Connection management, identifier quoting, and pagination-SQL construction —

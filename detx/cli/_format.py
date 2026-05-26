@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Human-readable output helpers for the ``detx`` CLI.
 
 The CLI is a thin shell over the engine; these functions turn the engine's

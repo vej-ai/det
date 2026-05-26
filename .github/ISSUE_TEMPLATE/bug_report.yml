@@ -1,0 +1,102 @@
+name: Bug report
+description: Something in detx is broken, behaves incorrectly, or surprises you.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The more concrete the
+        report, the faster we can act on it. **Security vulnerabilities
+        should be reported privately — see
+        [SECURITY.md](https://github.com/vej-ai/detx/blob/main/SECURITY.md).**
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched the existing issues for a duplicate.
+          required: true
+        - label: I have read the relevant chapter(s) in `docs/` and the README.
+          required: true
+
+  - type: input
+    id: detx-version
+    attributes:
+      label: detx version
+      description: Output of `detx --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+      placeholder: "3.11.9"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: e.g. macOS 14.5, Ubuntu 22.04, Windows 11 (WSL2).
+    validations:
+      required: true
+
+  - type: input
+    id: connector
+    attributes:
+      label: Source / destination connector involved
+      description: e.g. `postgres -> bigquery`, `rest -> duckdb`, or "engine only".
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Be specific. Include the config file (with secrets redacted),
+        the exact command you ran, and any relevant environment.
+      placeholder: |
+        1. `detx init my_project && cd my_project`
+        2. ...
+        3. `detx run -p my_pipeline`
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The actual output / error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and traceback
+      description: |
+        Paste the full traceback if any. If the failure is mid-run, attach
+        the relevant lines from `.detx/logs/<run_id>/run.jsonl`. Redact
+        anything sensitive — the run log redacts secrets automatically but
+        connector-side `print()`s are not redacted.
+      render: shell
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Anything else that might be relevant — recent changes, related issues, workarounds you have tried.

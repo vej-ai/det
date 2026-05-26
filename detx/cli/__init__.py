@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """The ``detx`` command-line interface — a thin shell over the engine.
 
 docs/07 §The CLI is a thin shell over a real Python library: every command here

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """AWS Secrets Manager resolver — the second ``secret://`` plugin (stage 9c).
 
 Provides :class:`AwsSecretsManagerResolver`, the concrete adapter for

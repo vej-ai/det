@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Discovery — stage 1 of the run lifecycle (docs/02 §Run lifecycle).
 
 Discovery answers three questions before any data moves:

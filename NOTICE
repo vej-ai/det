@@ -1,0 +1,18 @@
+detx
+Copyright 2026 Albinas Plesnys
+
+This product includes software developed by Albinas Plesnys and contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this product except in compliance with the License. A copy of the License
+is included in the LICENSE file at the root of this repository, and is also
+available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Portions of the ShipHero source connector (detx/sources/shiphero/) were
+ported from a hand-written internal extract-load script.
+
+This product depends on third-party Python packages declared in
+pyproject.toml. Each dependency is distributed under its own license; their
+notices accompany their respective distributions.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Run-history inspection for ``detx runs`` — docs/09 §4, stage 8a.
 
 ``detx runs list`` queries the destination's ``_detx_runs`` audit table; ``detx

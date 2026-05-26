@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """ShipHero GraphQL HTTP client — port of v2/main.py lines 49-111.
 
 A plain module: no decorators, no detx contract. Owns three things:

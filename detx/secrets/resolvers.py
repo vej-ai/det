@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """``SecretResolver`` Protocol + ``secret://`` URL parser + plugin registry.
 
 The concrete implementation behind :mod:`detx.secrets`. Three things live here:

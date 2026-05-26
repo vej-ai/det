@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """The structured logger injected into ``@stream`` functions — docs/03 §3.1, docs/09.
 
 Two cooperating sinks share one redaction policy:

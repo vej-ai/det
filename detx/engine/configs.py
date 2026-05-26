@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """Configs — stage 8.B's parser for ``configs/*.yml`` (docs/06, docs/12).
 
 A *config* is the runtime unit: one config = one pipeline (source +

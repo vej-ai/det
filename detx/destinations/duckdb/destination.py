@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """The DuckDB destination connector body — the ``@destination`` hooks.
 
 docs/05 §2 catalog row: "DuckDB — Local ``.duckdb`` file; ``INSERT`` /

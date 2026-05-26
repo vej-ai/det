@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """GraphQL query strings for each ShipHero stream — docs/04 "schema.py" role.
 
 One constant per declared stream. Ported verbatim from the v2 reference's

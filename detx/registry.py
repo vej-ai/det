@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """detx connector registry — the decorator + registration layer.
 
 This module (``detx/registry.py``) is the **author-facing decorator API**

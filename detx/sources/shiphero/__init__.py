@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """ShipHero baked source connector — ecommerce/fulfillment data via GraphQL.
 
 See ``register.yaml`` for the manifest and ``source.py`` for the entry points.

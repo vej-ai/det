@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Albinas Plesnys
+
 """The pre-baked BigQuery destination connector — docs/05 §2.
 
 A connector is a *folder* (docs/03 §1), not an importable API: the engine
