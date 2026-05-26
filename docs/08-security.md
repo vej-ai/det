@@ -102,8 +102,8 @@ class SecretResolver(Protocol):
 | Profiles.yml lookup | `${profile.X.Y}` (built-in syntax) | **v1** |
 | `secret://` plugin surface | `secret://<scheme>/...` (protocol + parser) | **v1 (stage 9a)** |
 | GCP Secret Manager | `secret://gcp-secret-manager/projects/<p>/secrets/<n>/versions/<v>` (plugin) | **v1 (stage 9b)** |
-| AWS Secrets Manager | `secret://aws-secrets-manager/...` (plugin) | v2 (9c) |
-| HashiCorp Vault | `secret://vault/...` (plugin) | v2 |
+| AWS Secrets Manager | `secret://aws-secrets-manager/<region>/<secret-id>[:<version-stage>][#<json-field>]` (plugin) | **v1 (stage 9c)** |
+| HashiCorp Vault | `secret://vault/<mount-path>/<kv-path>#<field>` (plugin) | **v1 (stage 9c)** |
 
 ### GCP Secret Manager — setup
 
@@ -135,6 +135,81 @@ The `gcp-secret-manager` resolver auto-registers via entry-point when the option
    ```
 
 Authentication uses Application Default Credentials — set `GOOGLE_APPLICATION_CREDENTIALS` or run `gcloud auth application-default login`. The `#field` URL fragment is ignored (GCP returns a single opaque blob per version); a one-time warning is logged per unique `(path, field)` pair.
+
+### AWS Secrets Manager — setup
+
+The `aws-secrets-manager` resolver auto-registers via entry-point when the optional extra is installed. One-time setup on an AWS account:
+
+1. **Create the secret** with the AWS CLI (single string or JSON):
+
+   ```sh
+   # plain string
+   aws secretsmanager create-secret --name my-stripe-key \
+       --secret-string 'sk_live_xxx' --region us-east-1
+   # JSON for structured credentials (db username/password)
+   aws secretsmanager create-secret --name my-db-creds \
+       --secret-string '{"username":"u","password":"p"}' --region us-east-1
+   ```
+
+2. **Grant `secretsmanager:GetSecretValue`** on the secret's ARN to the IAM principal det runs as.
+
+3. **Install the extra**: `pip install 'det[aws-secrets]'`.
+
+4. **Reference it in `profiles.yml`**:
+
+   ```yaml
+   stripe:
+     prod:
+       api_key: secret://aws-secrets-manager/us-east-1/my-stripe-key
+   warehouse:
+     prod:
+       # #field extracts a key from a JSON SecretString
+       password: secret://aws-secrets-manager/us-east-1/my-db-creds#password
+   ```
+
+URL format: `secret://aws-secrets-manager/<region>/<secret-id>[:<version-stage>][#<json-field>]`. The version stage defaults to `AWSCURRENT`; `AWSPENDING` and `AWSPREVIOUS` are the other AWS-defined labels. The `#field` URL fragment is honored when the `SecretString` is JSON (a common AWS idiom — Secrets Manager itself stores Postgres credentials as `{"username":..., "password":...}`). Binary `SecretBinary` payloads are not supported in v1.
+
+Authentication uses boto3's standard credential chain (env vars → `~/.aws/credentials` → IAM role) — no det-side credential argument is passed. Each region creates its own client (cached per-process per-region).
+
+### HashiCorp Vault — setup
+
+The `vault` resolver auto-registers via entry-point when the optional extra is installed. One-time setup against a Vault deployment:
+
+1. **Create the secret** with the Vault CLI:
+
+   ```sh
+   # KV v2 (default for modern Vault)
+   vault kv put secret/warehouse username=u password=p
+   # KV v1 (legacy)
+   vault kv put -mount=secret/legacy warehouse username=u password=p
+   ```
+
+2. **Grant a policy** with `read` capability on the secret path to the token det runs as.
+
+3. **Install the extra**: `pip install 'det[vault]'`.
+
+4. **Export Vault env vars** in the shell / container det runs in (these are the same env vars the official Vault CLI consults):
+
+   ```sh
+   export VAULT_ADDR=https://vault.example.com:8200
+   export VAULT_TOKEN=<your-token>
+   ```
+
+5. **Reference it in `profiles.yml`**:
+
+   ```yaml
+   warehouse:
+     prod:
+       # KV v2 — the URL path includes the /data/ segment
+       user:     secret://vault/secret/data/warehouse#username
+       password: secret://vault/secret/data/warehouse#password
+       # KV v1 — no /data/ segment
+       legacy:   secret://vault/secret/legacy/warehouse#password
+   ```
+
+URL format: `secret://vault/<mount-path>/<kv-path>#<field>`. The `#field` URL fragment is **required** for Vault — its KV engines always return a JSON object, and the resolver cannot guess which key the operator wanted. The resolver auto-detects KV v1 vs v2 from the response shape (KV v2 nests an extra `data` map under the outer `data`).
+
+Authentication is **token-based only in v1**: the resolver reads `VAULT_ADDR` and `VAULT_TOKEN` from the environment. AppRole, Kubernetes auth, and the other Vault auth methods need additional login flows that the resolver protocol does not currently model; they are deferred.
 
 The `SecretResolver` protocol and `secret://` parsing exist so a manager can be added as a small package or a project-local plugin **without an engine change** — the same extensibility philosophy as the `StateBackend` in [05](./05-destinations-and-state.md). Resolved secret values are held only in memory for the duration of the run and are subject to the redaction rules in §6.
 

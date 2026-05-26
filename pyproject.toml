@@ -66,12 +66,20 @@ s3 = ["boto3>=1.28"]
 # Secret-manager resolvers — only needed if profiles.yml uses `secret://`
 # URLs for the matching scheme. ${env.X} works for everyone without these.
 gcp-secrets = ["google-cloud-secret-manager>=2.20"]
+# NOTE: `boto3>=1.28` is ALSO declared under the `s3` extra (the
+# filesystem connector's S3 backend). Duplicating across extras is
+# harmless — pip dedupes. Removing it from either side would break
+# that extra's standalone install path.
+aws-secrets = ["boto3>=1.28"]
+vault = ["hvac>=2.0"]
 
 [project.scripts]
 det = "det.cli:main"
 
 [project.entry-points."det.secret_resolvers"]
 gcp-secret-manager = "det.secrets._gcp:GcpSecretManagerResolver"
+aws-secrets-manager = "det.secrets._aws:AwsSecretsManagerResolver"
+vault = "det.secrets._vault:VaultResolver"
 
 [project.urls]
 Homepage = "https://github.com/albinasplesnys/det"

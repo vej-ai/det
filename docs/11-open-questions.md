@@ -182,6 +182,15 @@ per run, or always fetch fresh.
   under `secret://gcp-secret-manager/...`. The deferred caching question is
   unchanged — 9b honors fresh-every-run; its SDK client init is the only
   thing cached (per-process).
+- **Stage 9c status:** the remaining two production adapters ship — AWS
+  Secrets Manager (`secret://aws-secrets-manager/<region>/<secret-id>[:<stage>][#<json-field>]`)
+  and HashiCorp Vault (`secret://vault/<mount-path>/<kv-path>#<field>`).
+  The secret-resolver protocol's adapter set is now **v1-complete**: three
+  production resolvers (GCP, AWS, Vault) plus the project-local plugin
+  surface for everything else. The deferred caching question (Q11) is
+  unchanged — every 9c adapter honors fresh-every-run; only the per-process
+  SDK client is cached (per-region for AWS, single-client for Vault and
+  GCP). On-disk caching remains deferred until a real cost problem surfaces.
 - **Stakes:** Run latency vs. attack surface at high invocation rates.
 - **Decide by:** revisit only if round-trip cost becomes real.
 

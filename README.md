@@ -14,6 +14,8 @@ simple as possible.
 pip install det                          # every baked connector, ready
 pip install 'det[gcs,s3]'                # add gs:// / s3:// filesystem reads
 pip install 'det[gcp-secrets]'           # add the GCP Secret Manager resolver
+pip install 'det[aws-secrets]'           # add the AWS Secrets Manager resolver
+pip install 'det[vault]'                 # add the HashiCorp Vault resolver
 ```
 
 `pip install det` ships every baked source and destination — DuckDB,

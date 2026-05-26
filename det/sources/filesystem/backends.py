@@ -341,7 +341,13 @@ def _glob_matches(name: str, pattern: str) -> bool:
 def _lazy_import_boto3() -> Any:
     """Import :mod:`boto3` on first use, or raise a clear ImportError."""
     try:
-        import boto3  # type: ignore[import-not-found]
+        # NOTE: stage 9c added the ``aws-secrets`` extra and its
+        # verify checklist installs ``[s3,aws-secrets]`` together, so
+        # mypy sees boto3 as installed-but-unstubbed
+        # (``import-untyped``) rather than missing
+        # (``import-not-found``). Updated to match the current install
+        # state.
+        import boto3  # type: ignore[import-untyped]
     except ImportError as exc:  # pragma: no cover — tested via monkeypatch.
         raise ImportError(
             "the filesystem connector needs `boto3` to read s3:// URIs; "
