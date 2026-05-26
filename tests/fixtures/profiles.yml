@@ -1,10 +1,15 @@
-# det profiles for the engine test suite (docs/06 post-8.B).
+# det profiles for the engine test suite (docs/06 post-8.B + stage 8e).
 #
 # Normally NOT committed — here it is a test fixture, so it carries no real
 # secrets. Top-level keys are destination connector names (each carries its
 # own `default_target` + `targets:` connection params). A parallel top-level
 # `profiles:` block, keyed by target name, carries source-secret rows so
 # ${profile.<block>.<key>} still resolves under the locked two-form contract.
+
+# Project-wide pipeline-level concurrency budget (stage 8e). Default 1 in
+# real projects; the fixture sets 4 so the verification step exercises the
+# parallel branch (DuckDB's cap=1 then re-serializes the actual loads).
+threads: 4
 
 # The pre-baked DuckDB destination. Engine tests override `path` per-test via
 # run(destination_params_override={"path": ...}), so the values here are the

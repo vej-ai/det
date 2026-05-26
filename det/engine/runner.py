@@ -39,13 +39,17 @@ Locked decisions honored here:
 from __future__ import annotations
 
 import logging
+import sys
+import threading
 import traceback as _tb
 import uuid
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import UTC, date, datetime
+from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from det.engine import config as cfg
 from det.engine import configs as cfgs
@@ -676,12 +680,16 @@ def run_tag(
     destination_params_override: Mapping[str, Any] | None = None,
     full_refresh: bool = False,
     select: tuple[str, ...] = (),
+    threads: int | None = None,
 ) -> list[RunResult]:
     """Run every config whose ``tags:`` list contains ``tag`` — docs/12 §Tags.
 
     Multi-run sibling of :func:`run`. The runtime unit is still one config
     per ``run()``; ``run_tag`` is a thin wrapper that discovers every
-    matching config and drives them sequentially through :func:`run`.
+    matching config and drives them through :func:`run` either sequentially
+    (the default; ``threads=1`` or omitted ⇒ today's stage 8d behavior) or
+    in parallel via a :class:`~concurrent.futures.ThreadPoolExecutor`
+    (stage 8e, ``threads>1`` or ``profiles.threads>1``).
 
     Semantics:
 
@@ -693,7 +701,10 @@ def run_tag(
     * **Order**: alphabetical by config name. Predictable, stable across
       runs, independent of filesystem walk order. Reuses
       :func:`det.cli._discovery.discover_all_configs` which already returns
-      sorted output, so the order matches ``det list --kind config``.
+      sorted output, so the order matches ``det list --kind config``. The
+      returned list also preserves this order in parallel mode — futures
+      complete in any order, but the returned list is rebuilt by
+      ``matching`` so output ordering is independent of completion order.
     * **Continue-on-failure**: each config runs through the same
       :func:`run` the CLI's ``-p`` path uses (which never raises — it
       returns a FAILED :class:`RunResult`). A failure in one config does
@@ -704,6 +715,17 @@ def run_tag(
       / ``full_refresh`` / ``select`` apply to EVERY matched config. That
       is the right semantic for the common case ("run hourly with prod
       target" should apply prod to every hourly pipeline).
+    * **Parallelism (stage 8e)**: ``threads`` is the project-wide
+      concurrency budget. ``None`` (default) reads
+      :attr:`Profiles.threads` from ``profiles.yml``; explicit
+      ``threads=N`` (CLI ``--threads N`` or kwarg) overrides. Effective
+      value is clamped to ``max(1, ...)``. The engine ALSO consults each
+      destination's ``@destination.max_concurrent_writes`` hook (one call
+      per unique destination, cached) and narrows per-destination
+      concurrency via a :class:`threading.Semaphore` keyed by destination
+      name. DuckDB returns 1, so a tag-sweep that targets DuckDB
+      serializes even at ``threads=8`` — the destination's
+      file-lock honesty wins.
 
     Returns ``[]`` when no config matches — the caller (usually the CLI)
     treats that as a usage error. Never raises on a connector or
@@ -730,6 +752,15 @@ def run_tag(
     # The verification step ``det run --tag test
     # --destination-param path=/tmp/det_8d_demo.duckdb`` depends on this
     # threading.
+
+    # NOTE (stage 8e parallel-path design): the sequential branch is kept
+    # as a literal ``for cfg in matching: run(...)`` even though it could
+    # be expressed as ``ThreadPoolExecutor(max_workers=1)``. The reason is
+    # debuggability — a stack trace from a sequential run is the user's
+    # own thread, not a worker thread, and ``pdb`` / ``breakpoint()`` in
+    # the engine path Just Works. The parallel branch is opt-in
+    # (``threads>1``), so it should not regress the default debugging
+    # experience.
     """
     normalized = tag.strip().lower()
     # Call the engine-layer discoverer directly. Sorting by name lives
@@ -739,24 +770,345 @@ def run_tag(
     # dependency graph and force a deferred import to break the cycle.
     project_root = disc.find_project_root(project_dir)
     project = cfg.ProjectConfig.load(project_root)
+    profiles = cfg.Profiles.load(project_root)
     discovered = cfgs.discover_configs(project_root, list(project.config_paths))
     matching = sorted(
         (pc for pc in discovered.values() if normalized in pc.tags),
         key=lambda pc: pc.name,
     )
 
-    results: list[RunResult] = []
-    for pipeline in matching:
-        result = run(
-            pipeline.name,
-            project_dir=project_root,
-            target_override=target_override,
-            destination_params_override=destination_params_override,
-            full_refresh=full_refresh,
-            select=select,
+    # Resolve effective thread count: explicit arg wins, else profiles.yml,
+    # else 1. Clamp to at least 1 — a zero or negative value is degenerate.
+    effective_threads = threads if threads is not None else profiles.threads
+    effective_threads = max(1, int(effective_threads))
+
+    if not matching:
+        return []
+
+    # The sequential (threads=1) path is a clean literal loop — see the
+    # design NOTE above. Empty match list also short-circuits here.
+    if effective_threads == 1 or len(matching) == 1:
+        results: list[RunResult] = []
+        for pipeline in matching:
+            result = run(
+                pipeline.name,
+                project_dir=project_root,
+                target_override=target_override,
+                destination_params_override=destination_params_override,
+                full_refresh=full_refresh,
+                select=select,
+            )
+            results.append(result)
+        return results
+
+    return _run_tag_parallel(
+        matching=matching,
+        project_root=project_root,
+        project=project,
+        profiles=profiles,
+        target_override=target_override,
+        destination_params_override=destination_params_override,
+        full_refresh=full_refresh,
+        select=select,
+        threads=effective_threads,
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_tag parallel branch — stage 8e
+# ---------------------------------------------------------------------------
+
+
+# Fallback per-destination cap when the destination either does not declare
+# ``@destination.max_concurrent_writes`` or the hook itself fails at the
+# planning stage. ``sys.maxsize`` is effectively unlimited — the semaphore
+# becomes a no-op for that destination, and the project ``threads:`` budget
+# is the only ceiling.
+_UNLIMITED_CONCURRENCY = sys.maxsize
+
+
+# Stash for the most-recent ``run_tag`` invocation's parallelism summary.
+# The CLI reads + clears this so the "parallelism: clamped to K for X"
+# line lands at the END of the multi-run summary (the natural place a user
+# expects status info). Reading is single-process, single-flight: each
+# ``det run --tag`` invocation is one process from the user's shell, so
+# the global is safe.
+#
+# # NOTE: design decision — the strongest alternative is making
+# ``run_tag`` return a richer object (``RunTagResult``) with both
+# ``results`` and ``clamps``. That's a breaking API change at the library
+# layer, and library callers DON'T care about display niceties — the
+# data they need (per-run status, errors, rows) already lives on
+# RunResult. A library-side caller wanting clamp info can call
+# ``last_run_tag_clamps()`` itself. The CLI does, in print_multi_run_summary.
+_LAST_RUN_TAG_PARALLELISM: dict[str, int] = {}
+_LAST_RUN_TAG_THREADS: int = 1
+
+
+def last_run_tag_parallelism() -> tuple[int, dict[str, int]]:
+    """Return ``(threads, clamps)`` for the most recent ``run_tag`` call.
+
+    ``threads`` is the effective project-wide pool size; ``clamps`` maps
+    destination name → its per-destination cap, but ONLY for destinations
+    whose cap was strictly less than ``threads`` (i.e. the cap narrowed
+    the budget). Empty dict ⇒ nothing got clamped.
+
+    Sequential ``run_tag`` calls (``threads=1``) leave the stash at its
+    default: threads=1, clamps={}. Reading clears the stash so a second
+    read in the same process gets the empty state — preventing a stale
+    notice from a prior tag-sweep leaking into a later single-run output.
+    """
+    global _LAST_RUN_TAG_THREADS, _LAST_RUN_TAG_PARALLELISM
+    threads = _LAST_RUN_TAG_THREADS
+    clamps = dict(_LAST_RUN_TAG_PARALLELISM)
+    _LAST_RUN_TAG_THREADS = 1
+    _LAST_RUN_TAG_PARALLELISM = {}
+    return threads, clamps
+
+
+def _destination_concurrency_cap(
+    pipeline: PipelineConfig,
+    project_root: Path,
+    project: cfg.ProjectConfig,
+    profiles: cfg.Profiles,
+    target_override: str | None,
+    destination_params_override: Mapping[str, Any] | None,
+) -> int:
+    """Resolve one destination's ``max_concurrent_writes`` cap — stage 8e.
+
+    Called once per unique destination across the matched configs (the
+    result is cached by destination name in :func:`_run_tag_parallel`). The
+    destination's :class:`Config` is built using ``pipeline`` as the
+    representative — the first matching pipeline for that destination —
+    because the hook is destination-wide but the ``Config`` it receives
+    needs to be a real, fully-resolved one (BigQuery reads
+    ``max_concurrent_writes`` from its params, which themselves layer
+    through profiles + the config's ``destination_params``).
+
+    # NOTE: design decision — if destination resolution or hook execution
+    # fails at PLANNING time (e.g. the destination's open hook is fine but
+    # validating its register.yaml during ``resolve_destination`` raises),
+    # we fall back to unlimited cap and let the per-pipeline ``run()``
+    # surface the real error in its own ``RunResult``. The strongest
+    # long-run answer to "what happens if a planning-stage hook fails for
+    # one destination" is "the whole tag sweep does NOT fail" — that would
+    # cancel other pipelines whose destinations are perfectly healthy and
+    # invert the continue-on-failure contract. The user sees the failure
+    # per-pipeline in the rollup table, not as a meta-error.
+    """
+    try:
+        target_name = cfg.resolve_target_name(
+            target_override if target_override is not None else pipeline.target,
+            pipeline.destination,
+            profiles,
         )
-        results.append(result)
-    return results
+        dest = disc.resolve_destination(
+            pipeline.destination, project_root, list(project.destination_paths)
+        )
+        hook = dest.registry.hook("max_concurrent_writes")
+        if hook is None:
+            return _UNLIMITED_CONCURRENCY
+        dest_config = cfg.build_destination_config(
+            dest.manifest,
+            project,
+            pipeline,
+            target_name=target_name,
+            profiles=profiles,
+            overrides=dict(destination_params_override or {}),
+        )
+        cap = int(hook.func(Config(params=dict(dest_config.params))))
+        return max(1, cap)
+    except Exception:  # noqa: BLE001 — planning-stage fallback per docstring NOTE
+        return _UNLIMITED_CONCURRENCY
+
+
+def _run_tag_parallel(
+    *,
+    matching: list[PipelineConfig],
+    project_root: Path,
+    project: cfg.ProjectConfig,
+    profiles: cfg.Profiles,
+    target_override: str | None,
+    destination_params_override: Mapping[str, Any] | None,
+    full_refresh: bool,
+    select: tuple[str, ...],
+    threads: int,
+) -> list[RunResult]:
+    """The parallel branch of :func:`run_tag` — stage 8e.
+
+    Submits each matched pipeline to a
+    :class:`~concurrent.futures.ThreadPoolExecutor` sized at ``threads``,
+    with a per-destination :class:`threading.Semaphore` enforcing each
+    destination's ``@destination.max_concurrent_writes`` cap. Per-pipeline
+    stdout is buffered to a :class:`io.StringIO` and flushed to stderr
+    under a global print-lock after the pipeline completes, so engine logs
+    from different pipelines never interleave on the user's screen. The
+    per-run JSONL log writes live (separate file per pipeline) — that's
+    unchanged from sequential mode and is the forensics surface.
+
+    Returns the results in the SAME order as ``matching`` (alphabetical by
+    name), regardless of completion order — the public ordering contract.
+    """
+    # Plan per-destination caps. One hook call per unique destination, not
+    # per pipeline; multiple configs targeting the same destination share
+    # the same semaphore. Effective per-destination cap is
+    # ``min(threads, cap)`` — the semaphore is bounded above by the worker
+    # pool size anyway, so we use the cap directly and let the pool be the
+    # outer ceiling.
+    seen_dests: dict[str, PipelineConfig] = {}
+    for pipeline in matching:
+        seen_dests.setdefault(pipeline.destination, pipeline)
+
+    caps: dict[str, int] = {
+        dest_name: _destination_concurrency_cap(
+            representative,
+            project_root,
+            project,
+            profiles,
+            target_override,
+            destination_params_override,
+        )
+        for dest_name, representative in seen_dests.items()
+    }
+    # Track which destinations got clamped to less than ``threads`` so the
+    # summary can surface it ("ran with N threads, capped at K for X").
+    clamped: dict[str, int] = {
+        dest: cap for dest, cap in caps.items() if cap < threads
+    }
+    semaphores: dict[str, threading.Semaphore] = {
+        dest_name: threading.Semaphore(cap) for dest_name, cap in caps.items()
+    }
+
+    print_lock = threading.Lock()
+    # Buffered output is flushed to stderr (matching the stdlib StreamHandler
+    # default) so live progress lines interleave correctly with stderr-bound
+    # output the host process may also write. ``sys.stderr`` is captured by
+    # click's CliRunner in tests, so this is also test-observable.
+    sink = sys.stderr
+
+    def _emit(line: str) -> None:
+        """Write ``line`` to the print sink under the global print-lock."""
+        with print_lock:
+            sink.write(line)
+            if not line.endswith("\n"):
+                sink.write("\n")
+            sink.flush()
+
+    def _execute(pipeline: PipelineConfig) -> RunResult:
+        """Run one pipeline with semaphore + per-pipeline log buffer."""
+        buf = StringIO()
+        sema = semaphores.get(pipeline.destination)
+        # An emit-on-start banner is printed under the lock the moment we
+        # acquire the semaphore — so the user sees the pipeline "starting"
+        # only when it actually runs (not when the future is queued waiting
+        # behind a saturated semaphore). Strongest UX signal for "this is
+        # what's happening NOW".
+        if sema is not None:
+            sema.acquire()
+        try:
+            _emit(f"▸ starting {pipeline.name}")
+            try:
+                result = run(
+                    pipeline.name,
+                    project_dir=project_root,
+                    target_override=target_override,
+                    destination_params_override=destination_params_override,
+                    full_refresh=full_refresh,
+                    select=select,
+                    _log_stream=buf,
+                )
+            except Exception as exc:  # noqa: BLE001 — run() should never raise; belt-and-braces.
+                # Defensive: ``run()`` already folds every exception class
+                # into a FAILED RunResult. The wrapper here exists so a
+                # future change that lets one through still produces a
+                # synthetic RunResult instead of a Future-with-exception
+                # that ``as_completed`` would surface as an uncaught error.
+                result = RunResult(
+                    run_id="run-unknown",
+                    config=pipeline.name,
+                    connector=pipeline.source,
+                    target=target_override or pipeline.target or "default",
+                    destination=pipeline.destination,
+                    status=RunStatus.FAILED,
+                    started_at=datetime.now(UTC),
+                    ended_at=datetime.now(UTC),
+                    streams=[],
+                    rows_loaded=0,
+                    full_refresh=full_refresh,
+                    error=exc,
+                    log_path="",
+                )
+            # Flush the buffered stdlib-logger output + the completion banner
+            # under one lock acquisition so the two never interleave with
+            # another pipeline's output.
+            buffered = buf.getvalue()
+            if result.status is RunStatus.SUCCEEDED:
+                banner = (
+                    f"✓ done {pipeline.name} "
+                    f"({result.duration_s:.1f}s, {result.rows_loaded} rows)"
+                )
+            else:
+                err = result.error
+                err_msg = (
+                    f"{type(err).__name__}: {err}" if err is not None else "(no error)"
+                )
+                banner = (
+                    f"✗ failed {pipeline.name} "
+                    f"({result.duration_s:.1f}s, {err_msg})"
+                )
+            with print_lock:
+                if buffered:
+                    sink.write(buffered)
+                    if not buffered.endswith("\n"):
+                        sink.write("\n")
+                sink.write(banner + "\n")
+                sink.flush()
+            return result
+        finally:
+            if sema is not None:
+                sema.release()
+
+    results_by_name: dict[str, RunResult] = {}
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        future_to_name: dict[Future[RunResult], str] = {
+            pool.submit(_execute, pipeline): pipeline.name for pipeline in matching
+        }
+        for fut in as_completed(future_to_name):
+            name = future_to_name[fut]
+            try:
+                results_by_name[name] = fut.result()
+            except Exception as exc:  # noqa: BLE001 — paranoid wrapper; see _execute
+                # Should never trigger: _execute itself catches and folds
+                # every exception into a synthetic RunResult. This is the
+                # last-ditch safety net so a Future never propagates an
+                # uncaught error and breaks the iteration.
+                results_by_name[name] = RunResult(
+                    run_id="run-unknown",
+                    config=name,
+                    connector="unknown",
+                    target="unknown",
+                    destination="unknown",
+                    status=RunStatus.FAILED,
+                    started_at=datetime.now(UTC),
+                    ended_at=datetime.now(UTC),
+                    streams=[],
+                    rows_loaded=0,
+                    full_refresh=full_refresh,
+                    error=exc,
+                    log_path="",
+                )
+
+    # Stash the parallelism summary so the CLI can render it at the end of
+    # the multi-run summary block (after print_multi_run_summary). See the
+    # NOTE on _LAST_RUN_TAG_PARALLELISM for the design rationale — the
+    # alternative is a breaking API change to ``run_tag``.
+    global _LAST_RUN_TAG_THREADS, _LAST_RUN_TAG_PARALLELISM
+    _LAST_RUN_TAG_THREADS = threads
+    _LAST_RUN_TAG_PARALLELISM = dict(clamped)
+
+    # Return in matched-name order, NOT completion order — the public
+    # contract (and the regression test the sequential path satisfies).
+    return [results_by_name[p.name] for p in matching]
 
 
 def run(
@@ -768,6 +1120,7 @@ def run(
     destination_params_override: Mapping[str, Any] | None = None,
     full_refresh: bool = False,
     select: tuple[str, ...] = (),
+    _log_stream: TextIO | None = None,
 ) -> RunResult:
     """Run one config end to end — the 6-stage lifecycle (docs/02), config-driven.
 
@@ -839,7 +1192,11 @@ def run(
     # stage 2 RESOLVE) and the stdlib logger (rebuilt after secrets resolve)
     # both mask through the same mutable bag of secret values (docs/09 §5).
     redactor = Redactor()
-    log = build_logger(run_id, redactor)
+    # ``_log_stream`` is threaded through both build_logger calls so a
+    # parallel run_tag can capture each pipeline's stdlib-logger output
+    # into a per-pipeline StringIO (stage 8e). ``None`` ⇒ stderr (the
+    # default; today's behavior).
+    log = build_logger(run_id, redactor, stream=_log_stream)
 
     try:
         # -- Stage 1: DISCOVER ----------------------------------------------
@@ -852,7 +1209,7 @@ def run(
         # ``.det/logs/`` is per-project; the dir is created lazily.
         run_log = RunLog(run_id, project_root / ".det" / "logs", redactor)
         log_path = str(run_log.path)
-        log = build_logger(run_id, redactor, run_log=run_log)
+        log = build_logger(run_id, redactor, run_log=run_log, stream=_log_stream)
 
         pipeline: PipelineConfig = cfgs.load_config(
             config, project_root, list(project.config_paths)

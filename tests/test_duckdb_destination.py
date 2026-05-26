@@ -104,6 +104,14 @@ def test_all_mandatory_and_state_hooks_registered(duckdb_destination: LoadedConn
     assert "state_backend" not in names
 
 
+def test_max_concurrent_writes_is_one(duckdb_destination: LoadedConnector) -> None:
+    """DuckDB declares max_concurrent_writes = 1 — file-lock safety (stage 8e)."""
+    hook = duckdb_destination.registry.hook("max_concurrent_writes")
+    assert hook is not None
+    # The hook ignores config; pass an empty one. Any positional Config is fine.
+    assert hook.func(Config(params={})) == 1
+
+
 # --------------------------------------------------------------------------
 # ddl helpers — type mapping + identifier safety
 # --------------------------------------------------------------------------

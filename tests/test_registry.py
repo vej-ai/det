@@ -252,6 +252,10 @@ def test_destination_full_hook_set_registers() -> None:
         def write_run_record(conn, record):  # type: ignore[no-untyped-def]
             pass
 
+        @destination.max_concurrent_writes
+        def max_concurrent_writes(config):  # type: ignore[no-untyped-def]
+            return 10
+
         @destination.close
         def close(conn):  # type: ignore[no-untyped-def]
             pass
@@ -589,9 +593,11 @@ def test_constants_are_consistent() -> None:
     """The exported constant sets are internally consistent."""
     assert MANDATORY_DESTINATION_HOOKS <= DESTINATION_HOOKS
     assert STREAM_INJECTABLES == frozenset({"config", "state", "cursor", "log"})
-    assert len(DESTINATION_HOOKS) == 10
+    # Eleven hooks as of stage 8e (max_concurrent_writes added).
+    assert len(DESTINATION_HOOKS) == 11
     assert "transaction" in DESTINATION_HOOKS
     assert "write_run_record" in DESTINATION_HOOKS
+    assert "max_concurrent_writes" in DESTINATION_HOOKS
 
 
 def test_stream_registration_is_frozen() -> None:

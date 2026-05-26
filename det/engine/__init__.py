@@ -33,11 +33,17 @@ from __future__ import annotations
 
 from det.engine.config import ConfigError
 from det.engine.discovery import DiscoveryError
-from det.engine.runner import EngineError, run, run_tag
+from det.engine.runner import (
+    EngineError,
+    last_run_tag_parallelism,
+    run,
+    run_tag,
+)
 
 __all__ = [
     "run",
     "run_tag",
+    "last_run_tag_parallelism",
     "ConfigError",
     "DiscoveryError",
     "EngineError",

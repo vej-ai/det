@@ -853,3 +853,143 @@ def test_state_reset_never_run_is_clean(
     )
     assert result.exit_code == 0, _show(result)
     assert "0 cursor row(s) cleared" in result.output
+
+
+# ==========================================================================
+# Stage 8e — `det run --threads N`
+# ==========================================================================
+
+
+def test_run_tag_threads_flag_passes_through(
+    runner: CliRunner, cli_project: Path, warehouse: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run --tag test --threads 4`` reaches ``run_tag(threads=4)``."""
+    captured: dict[str, object] = {}
+
+    real_run_tag = det.run_tag
+
+    def _spy_run_tag(*args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return real_run_tag(*args, **kwargs)
+
+    monkeypatch.setattr(det, "run_tag", _spy_run_tag)
+    # The CLI module references ``det.run_tag`` via the ``det`` package, so
+    # monkeypatching on the package surface is sufficient (no second
+    # patch on det.cli needed).
+
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--tag",
+            "test",
+            "--threads",
+            "4",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 0, _show(result)
+    assert captured["kwargs"].get("threads") == 4  # type: ignore[union-attr]
+
+
+def test_run_single_config_threads_ignored(
+    runner: CliRunner, cli_project: Path, warehouse: str
+) -> None:
+    """``run -p X --threads 4`` is accepted (debug-logged ignore), still succeeds."""
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "-p",
+            "echo_dev",
+            "--threads",
+            "4",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 0, _show(result)
+    # The run itself still succeeds — --threads is silently ignored with -p.
+    assert "succeeded" in result.output
+
+
+def test_run_threads_zero_rejected(
+    runner: CliRunner, cli_project: Path, warehouse: str
+) -> None:
+    """``--threads 0`` is a click range error → exit 2."""
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--tag",
+            "test",
+            "--threads",
+            "0",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 2, _show(result)
+
+
+def test_run_threads_negative_rejected(
+    runner: CliRunner, cli_project: Path, warehouse: str
+) -> None:
+    """``--threads -2`` is a click range error → exit 2."""
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--tag",
+            "test",
+            "--threads",
+            "-2",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 2, _show(result)
+
+
+def test_run_tag_parallel_output_has_progress_lines(
+    runner: CliRunner, cli_project: Path, warehouse: str
+) -> None:
+    """``run --tag … --threads 4`` against 2 DuckDB configs prints parallel banners.
+
+    DuckDB's max_concurrent_writes=1 serializes them, but the live "▸
+    starting" / "✓ done" banners still print (they're a function of the
+    parallel branch, not the cap).
+    """
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--tag",
+            "test",
+            "--threads",
+            "4",
+            "--project-dir",
+            str(cli_project),
+            "--destination-param",
+            f"path={warehouse}",
+        ],
+    )
+    assert result.exit_code == 0, _show(result)
+    out = result.output
+    # Both per-pipeline progress banners landed.
+    assert "starting echo_dev" in out
+    assert "starting echo_prod" in out
+    assert "done echo_dev" in out
+    assert "done echo_prod" in out
+    # And the rollup table still printed last.
+    assert "TAG test:" in out

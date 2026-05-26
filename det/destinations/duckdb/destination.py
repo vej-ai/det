@@ -152,6 +152,31 @@ def capabilities() -> set[Capability]:
 
 
 # --------------------------------------------------------------------------
+# max_concurrent_writes — stage 8e (pipeline-level parallelism cap)
+# --------------------------------------------------------------------------
+
+
+@destination.max_concurrent_writes
+def max_concurrent_writes(config: Config) -> int:
+    """Cap concurrent pipelines targeting DuckDB at 1 — file-lock bound.
+
+    DuckDB uses a file lock on the ``.duckdb`` database; two writer
+    connections on the same file at the same time would corrupt it. The
+    engine's pipeline-level parallelism (``det run --tag … --threads N``,
+    stage 8e) honors whatever this hook returns and serializes pipelines
+    targeting DuckDB even when the project ``threads:`` is high.
+
+    ``config`` is ignored — DuckDB's file-lock model is destination-wide,
+    not param-tunable. Accepting the argument keeps the hook signature
+    uniform across destinations (BigQuery reads ``max_concurrent_writes``
+    from its params; this one would silently ignore the same param if a
+    user set it on a DuckDB target, which is the safer failure mode than
+    raising — the engine still serializes correctly).
+    """
+    return 1
+
+
+# --------------------------------------------------------------------------
 # transaction — docs/05 §1, §5.3 (conditional on Capability.TRANSACTIONAL_LOAD)
 # --------------------------------------------------------------------------
 

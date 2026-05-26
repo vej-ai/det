@@ -61,3 +61,12 @@ params:
     type: float
     default: 1.0
     description: Base seconds for exponential backoff between retries.
+  # Per-destination concurrency ceiling (stage 8e). The engine's pipeline-
+  # level parallelism (det run --tag … --threads N) clamps to this for
+  # any pipeline whose destination is BigQuery. Default 10 is well under
+  # BigQuery's ~50-concurrent-load-job per-project quota; operators with a
+  # raised quota can set this higher.
+  max_concurrent_writes:
+    type: int
+    default: 10
+    description: Max concurrent pipelines that may target this BigQuery destination at once.

@@ -338,12 +338,13 @@ DESTINATION_HOOKS: frozenset[str] = frozenset(
         "state_backend",
         "transaction",
         "write_run_record",
+        "max_concurrent_writes",
         "close",
     }
 )
 """Every valid ``@destination.*`` hook name — docs/03 §3.4, docs/05 §1.
 
-Ten hooks. ``@destination.<anything-else>`` (e.g. a ``write_batchs`` typo)
+Eleven hooks. ``@destination.<anything-else>`` (e.g. a ``write_batchs`` typo)
 raises :class:`AttributeError` at import time.
 
 ``transaction`` is a *conditionally* mandatory hook: a destination that
@@ -357,6 +358,19 @@ The engine calls it once per run, after streams finish and before ``close``,
 with a fully-built :class:`~det.types.RunRecord`. It is the destination's
 half of the run-record audit table (``_det_runs``); the per-run JSONL log
 file is the engine's half and is written regardless of capability.
+
+``max_concurrent_writes`` is an *optional* hook (stage 8e): when present,
+the engine reads it (with the resolved destination :class:`~det.types.Config`)
+and clamps the number of pipelines that may concurrently target this
+destination under ``det run --tag … --threads N``. Returning ``1`` (DuckDB)
+forces serial execution against this destination, however high the project
+``threads:`` is set; returning a larger number (BigQuery: 10) sets the
+per-destination ceiling. Absent ⇒ unlimited (``sys.maxsize`` — no clamp).
+The hook is NOT tied to a :class:`~det.types.Capability` flag — every
+destination is free to declare it, and the absence is its own opt-in for
+"I don't care about per-destination concurrency". Same precedent as
+``transaction`` / ``write_run_record`` (conditional hooks the engine reads
+only when relevant).
 """
 
 # NOTE: docs/03 §3.4 / docs/05 §1 mark capabilities/open/ensure_schema/

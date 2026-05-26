@@ -122,6 +122,13 @@ under the locked two-resolver-form contract (chapter 03 §2.5).
 ```yaml
 # profiles.yml  --  NOT committed to version control
 
+# Project-wide pipeline-level concurrency budget (stage 8e). Default 1
+# (sequential — opt in to parallelism). dbt's `threads:` knob, same
+# semantics. Honored by `det run --tag <T>`; each destination's
+# @destination.max_concurrent_writes hook caps further. See chapter 02
+# §Concurrency model + chapter 07 §`--threads`.
+threads: 4
+
 # The pre-baked DuckDB destination. `path` is the .duckdb file location.
 duckdb:
   default_target: dev
@@ -163,11 +170,26 @@ profiles:
 
 | Top-level key | Type | Purpose |
 |---|---|---|
+| `threads` (stage 8e) | positive integer | Pipeline-level concurrency budget for `det run --tag`. Default 1. Each destination's `@destination.max_concurrent_writes` caps further. dbt-style. |
 | `<destination name>` | mapping with `targets:` (+ optional `default_target:`) | One block per destination connector. The block's `targets.<name>` rows supply the destination's connection params for each named environment. |
 | `profiles` | map[string → map[string → map]] | Per-target source-secret blocks. `profiles.<target>.<block>.<key>` is what `${profile.<block>.<key>}` resolves to (after the engine picks the active target from the config). |
 
 Values may embed `${env.VAR}` so the file itself stays free of literal secrets —
 the recommended pattern for `prod`.
+
+### Why DuckDB clamps to 1 thread (stage 8e)
+
+A `.duckdb` database file is protected by a single OS-level file lock —
+two writer connections on the same file at the same time would corrupt
+it. The DuckDB destination therefore declares
+`@destination.max_concurrent_writes() -> 1`, and the engine honors that
+cap unconditionally: a user with `threads: 8` running `det run --tag X`
+against an all-DuckDB project gets serial execution against the DuckDB
+file, even while other destinations in the same sweep run in parallel.
+This is the destination's honesty about its own model, not a soft hint —
+the cap is enforced by a `threading.Semaphore(1)` keyed by destination
+name. Use BigQuery (or any future Tier-A warehouse with networked
+multi-writer storage) when you want real per-destination parallelism.
 
 ## Configs — `configs/<name>.yml`
 

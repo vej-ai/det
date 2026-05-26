@@ -1,0 +1,21 @@
+# A test-only destination that declares max_concurrent_writes = 1 (stage 8e).
+#
+# Used by tests/test_engine.py to exercise the per-destination semaphore
+# clamp in the parallel run_tag branch. Its write side is a no-op in-memory
+# store: ensure_schema / write_batch / commit_state record the call but do
+# not touch any filesystem or external service, so two test pipelines can
+# share the destination without I/O contention.
+name: lockedfake
+kind: destination
+version: "1.0.0"
+summary: Test fixture — fake destination declaring max_concurrent_writes = 1.
+tags: [test, fixture]
+
+params:
+  # A tunable artificial delay so per-stream load is measurable. Tests can
+  # pass --destination-param hold_ms=200 to make per-pipeline wall-clock
+  # observable when asserting on the cap.
+  hold_ms:
+    type: int
+    default: 0
+    description: Sleep this many ms inside write_batch (testing the cap timing).

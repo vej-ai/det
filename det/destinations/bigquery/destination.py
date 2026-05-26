@@ -170,6 +170,54 @@ def capabilities() -> set[Capability]:
 
 
 # --------------------------------------------------------------------------
+# max_concurrent_writes — stage 8e (pipeline-level parallelism cap)
+# --------------------------------------------------------------------------
+
+# Default per-destination concurrency ceiling — well under BigQuery's
+# per-project concurrent load-job quota (~50, region-dependent) so a
+# 10-pipeline burst leaves plenty of headroom for ad-hoc human queries +
+# unrelated jobs sharing the same project. Operators with a raised quota
+# override via the ``max_concurrent_writes`` destination param (declared
+# in register.yaml).
+_DEFAULT_MAX_CONCURRENT_WRITES = 10
+
+
+@destination.max_concurrent_writes
+def max_concurrent_writes(config: Config) -> int:
+    """Cap concurrent pipelines targeting this BigQuery destination — stage 8e.
+
+    Default :data:`_DEFAULT_MAX_CONCURRENT_WRITES` (10), overridable per
+    target via the ``max_concurrent_writes`` destination param. An operator
+    with a raised per-project load-job quota can set
+    ``destination_params.max_concurrent_writes: 20`` in a config (or the
+    same key under ``profiles.yml[bigquery].targets.<target>``) to push the
+    ceiling higher.
+
+    The engine multiplies this against the project-level ``threads:``
+    budget: effective per-destination concurrency is
+    ``min(threads, max_concurrent_writes)``. A user running
+    ``det run --tag X --threads 4`` against five BigQuery configs caps at
+    4 concurrent (the ``threads:`` budget); the same project with
+    ``threads: 20`` and this default caps at 10 (the BigQuery ceiling).
+
+    A non-positive override clamps up to 1 — that's the strongest defensive
+    interpretation of "I want serial". Returning 0 would deadlock the
+    executor on the per-destination semaphore.
+    """
+    raw = config.get("max_concurrent_writes")
+    if raw is None:
+        return _DEFAULT_MAX_CONCURRENT_WRITES
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"bigquery destination: 'max_concurrent_writes' must be a "
+            f"positive integer, got {raw!r}"
+        ) from exc
+    return max(1, value)
+
+
+# --------------------------------------------------------------------------
 # open / close — docs/05 §1
 # --------------------------------------------------------------------------
 

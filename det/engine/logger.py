@@ -29,7 +29,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, TextIO
 
 # The mask substituted for any secret value found in a log record — docs/08.
 _REDACTED = "***"
@@ -241,6 +241,7 @@ def build_logger(
     redactor: Redactor | None = None,
     *,
     run_log: RunLog | None = None,
+    stream: TextIO | None = None,
 ) -> logging.Logger:
     """Build the run logger handed to ``@stream`` functions — docs/03 §3.1, docs/09.
 
@@ -251,12 +252,28 @@ def build_logger(
     so a connector body's ``log.info(...)`` mirrors into the JSONL as a
     ``"user"`` event.
 
+    ``stream`` (stage 8e): the TextIO the stdlib :class:`StreamHandler`
+    writes to. ``None`` (default) means stderr — today's behavior. The
+    engine's parallel ``run_tag`` path passes a per-pipeline
+    :class:`io.StringIO` here so each pipeline's stdout is buffered and
+    flushed under a print-lock after the pipeline completes; interleaved
+    output across pipelines is then impossible.
+
     A single :class:`StreamHandler` is attached on first build and reused on
     a repeat call for the same ``run_id`` — the logger is never given
     duplicate stdlib handlers, so a message is emitted exactly once.
     Repeat builds replace the redacting filter and the run-log handler so
     a freshly-resolved secret set / freshly-opened JSONL is the one in
     force.
+
+    # NOTE: each ``run()`` invocation uses a fresh ``run_id`` (uuid hex,
+    # see :func:`~det.engine.run`), so ``logging.getLogger(f"det.run.{id}")``
+    # returns a fresh, handler-less logger per run — even in the parallel
+    # path. The ``if not logger.handlers`` guard therefore always takes the
+    # "attach" branch in practice; the ``stream`` argument is honored on
+    # that first attachment. A future code path that reuses a run_id (none
+    # planned) would inherit the original stream — call sites that need a
+    # fresh stream must pass a fresh run_id.
     """
     if redactor is None:
         redactor = Redactor()
@@ -268,7 +285,10 @@ def build_logger(
     logger.propagate = False
 
     if not logger.handlers:
-        handler = logging.StreamHandler()
+        # ``StreamHandler(None)`` is the explicit "stderr" signal in the
+        # stdlib — passing ``stream`` through preserves that semantic
+        # without a special case.
+        handler = logging.StreamHandler(stream) if stream is not None else logging.StreamHandler()
         handler.setFormatter(
             logging.Formatter("%(asctime)s [%(levelname)s] det: %(message)s")
         )

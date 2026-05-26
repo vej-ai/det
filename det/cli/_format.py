@@ -15,6 +15,7 @@ from typing import Any
 
 import click
 
+from det.engine import last_run_tag_parallelism
 from det.types import RunResult, RunStatus, StreamStatus
 
 # Matches ANSI SGR escape sequences (the color codes click.style emits). Used
@@ -137,6 +138,17 @@ def print_multi_run_summary(tag: str, results: list[RunResult]) -> None:
     # matching :class:`~det.types.RunResult.to_dict`. The full traceback
     # lives in the per-run JSONL log (docs/09 §3.2); the summary row is
     # the queryability surface, the JSONL is the forensics surface.
+
+    # NOTE (stage 8e): the "parallelism: ran with N threads (clamped to K
+    # for destination X)" notice is emitted by ``run_tag`` itself, not
+    # here, because only ``run_tag`` knows the effective thread count and
+    # the per-destination clamps. This summary stays purely a function of
+    # the :class:`RunResult` list — no plumbing change needed for the
+    # parallel path. The total duration line ALSO sums per-run durations
+    # rather than measuring wall-clock, so a parallel run's "total
+    # duration" reads higher than its wall-clock; that's the right
+    # number for "total CPU spent on this sweep" — the wall-clock saved
+    # by parallelism shows up as ``wall < sum`` instead.
     """
     succeeded = sum(1 for r in results if r.status is RunStatus.SUCCEEDED)
     failed = sum(1 for r in results if r.status is RunStatus.FAILED)
@@ -178,3 +190,24 @@ def print_multi_run_summary(tag: str, results: list[RunResult]) -> None:
             ["CONFIG", "STATUS", "ROWS", "DURATION", "ERROR"], rows
         )
     )
+
+    # Stage 8e: after the rollup table, render the parallelism summary if
+    # any destination got narrowed by its max_concurrent_writes cap. The
+    # engine stashed (threads, clamps) on its most recent run_tag call;
+    # last_run_tag_parallelism() reads + clears so a later non-tag run
+    # doesn't see a stale clamp line.
+    threads, clamps = last_run_tag_parallelism()
+    if clamps and threads > 1:
+        for dest_name in sorted(clamps):
+            click.echo(
+                f"  parallelism: ran with {threads} thread(s); "
+                f"clamped to {clamps[dest_name]} for destination "
+                f"{dest_name!r} ({_clamp_explanation(clamps[dest_name])})"
+            )
+
+
+def _clamp_explanation(cap: int) -> str:
+    """A one-fragment hint for the parallelism-clamp line."""
+    if cap == 1:
+        return "destination requires serialized writes"
+    return f"destination caps concurrent writes at {cap}"

@@ -169,11 +169,20 @@ class Profiles:
     ``${profile.<block>.<key>}`` still resolves under the locked two-resolver-
     forms contract (docs/03 §2.5).
 
+    Stage 8e added a top-level ``threads:`` integer — the project-wide
+    pipeline-level concurrency budget (default 1, sequential). It is read
+    by :func:`~det.engine.run_tag` to size the worker pool; the per-
+    destination cap declared by each destination's
+    ``@destination.max_concurrent_writes`` hook narrows it further. Mirrors
+    dbt's ``threads:`` knob.
+
     ``profiles.yml`` is optional: a project with only default-driven config
     (DuckDB's ``path`` defaults, no secrets) runs without one. :meth:`load`
     returns an empty :class:`Profiles` when the file is absent.
 
-    Example shape (docs/06 post-8.B)::
+    Example shape (docs/06 post-8.B + stage 8e)::
+
+        threads: 4                    # NEW (stage 8e); default 1 if omitted
 
         duckdb:                       # destination-keyed
           default_target: dev
@@ -192,6 +201,7 @@ class Profiles:
 
     destinations: Mapping[str, DestinationTargets] = ()  # type: ignore[assignment]
     secret_profiles: Mapping[str, Mapping[str, Mapping[str, Any]]] = ()  # type: ignore[assignment]
+    threads: int = 1
     path: Path | None = None
 
     # # NOTE: ``destinations`` keys are destination connector names; for each
@@ -205,19 +215,26 @@ class Profiles:
 
     @classmethod
     def load(cls, project_root: Path) -> Profiles:
-        """Parse ``<project_root>/profiles.yml`` — docs/06 post-8.B.
+        """Parse ``<project_root>/profiles.yml`` — docs/06 post-8.B + stage 8e.
 
-        Absent file ⇒ empty :class:`Profiles` (a valid state). A
-        present-but-unparseable file raises :class:`ConfigError`.
+        Absent file ⇒ empty :class:`Profiles` (a valid state, ``threads=1``).
+        A present-but-unparseable file raises :class:`ConfigError`.
 
         Top-level keys: each destination connector name (with ``targets:`` /
-        ``default_target:``) plus an optional ``profiles:`` block. Any other
-        top-level key is preserved as-is in ``destinations`` only if it carries
-        a ``targets`` sub-key — that's the duck-type for "destination block".
+        ``default_target:``); the optional ``profiles:`` block; the optional
+        ``threads:`` integer (stage 8e). Any other top-level key is rejected
+        only when it doesn't fit the destination-block shape (which itself
+        rejects scalars) — so a typo'd top-level key still surfaces clearly.
+
+        # NOTE: ``threads`` is checked BEFORE the destination-block branch
+        # because the existing branch's "value must be a dict" rule would
+        # reject a scalar (``threads: 4``) with the wrong message. Putting
+        # the threads recognition first keeps the per-destination errors
+        # untouched and the threads error precise.
         """
         path = project_root / "profiles.yml"
         if not path.is_file():
-            return cls(destinations={}, secret_profiles={}, path=None)
+            return cls(destinations={}, secret_profiles={}, threads=1, path=None)
         try:
             raw = yaml.safe_load(path.read_text()) or {}
         except yaml.YAMLError as exc:
@@ -227,7 +244,23 @@ class Profiles:
 
         destinations: dict[str, DestinationTargets] = {}
         secret_profiles: dict[str, dict[str, dict[str, Any]]] = {}
+        threads = 1
         for key, value in raw.items():
+            if key == "threads":
+                # Validate it's a positive integer — stage 8e (pipeline
+                # parallelism budget). dbt's ``threads:`` accepts the same
+                # shape; we mirror.
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ConfigError(
+                        f"{path}: 'threads' must be a positive integer "
+                        f"(got {value!r})"
+                    )
+                if value < 1:
+                    raise ConfigError(
+                        f"{path}: 'threads' must be >= 1 (got {value})"
+                    )
+                threads = value
+                continue
             if key == "profiles":
                 if value is None:
                     continue
@@ -282,6 +315,7 @@ class Profiles:
         return cls(
             destinations=destinations,
             secret_profiles=secret_profiles,
+            threads=threads,
             path=path,
         )
 

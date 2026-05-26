@@ -525,6 +525,7 @@ def close(conn):                         # flush + release — always runs
 | `@destination.state_backend` | If **not** `Capability.STATE` | Returns a companion state backend for Tier B (object-storage) destinations. |
 | `@destination.transaction` | If `Capability.TRANSACTIONAL_LOAD` | A context-manager hook the engine wraps around each stream's `write_batch`+`commit_state` block, so data and cursor flip atomically. See chapter 05 §1. |
 | `@destination.write_run_record` | If `Capability.RUN_RECORDS` | Persists one `RunRecord` row into `_det_runs` — the queryable audit table. Called once per run, after streams finish and before `close`. See chapter 09 §4. |
+| `@destination.max_concurrent_writes` | No (optional) | Returns the maximum number of pipelines that may target this destination concurrently under `det run --tag --threads N` (stage 8e). Signature `(config: Config) -> int`. Absent ⇒ unlimited. DuckDB returns 1 (file lock); BigQuery returns 10 by default. See chapter 02 §Concurrency. |
 | `@destination.close` | **Yes** | Flushes and releases resources. Runs even on failure. |
 
 The `Capability` enum referenced above (`STATE`, `MERGE`, `SCHEMA_EVOLUTION`, …)

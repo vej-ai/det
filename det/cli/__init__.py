@@ -191,6 +191,17 @@ def cli() -> None:
     metavar="KEY=VALUE",
     help="Override a destination config value for this run. Repeatable.",
 )
+@click.option(
+    "--threads",
+    "threads",
+    type=click.IntRange(min=1),
+    default=None,
+    metavar="N",
+    help="Pipeline-level concurrency for --tag (stage 8e). Overrides "
+    "profiles.yml `threads:`. Each destination's "
+    "@destination.max_concurrent_writes caps further. Meaningless with "
+    "-p (single config) — ignored with a debug log there.",
+)
 def run(
     config: str | None,
     tag: str | None,
@@ -200,6 +211,7 @@ def run(
     project_dir: Path | None,
     params: tuple[str, ...],
     destination_params: tuple[str, ...],
+    threads: int | None,
 ) -> None:
     """Extract and load — the core command, driven by a pipeline config.
 
@@ -251,6 +263,7 @@ def run(
             destination_params_override=dest_overrides or None,
             full_refresh=full_refresh,
             select=selected,
+            threads=threads,
         )
         if not results:
             _fail(f"no configs match tag {tag!r}", code=2)
@@ -269,6 +282,18 @@ def run(
 
     # -p path — the single-config invocation that's existed since stage 8.B.
     assert config is not None  # validated above
+    # --threads has no meaning with -p (one config = no parallelism). Note
+    # in the debug log per the task spec, then silently ignore — surfacing
+    # it as a user-visible warning would clutter CI output for orchestrators
+    # that always pass --threads. The debug log is enough for an operator
+    # actively investigating.
+    if threads is not None:
+        import logging as _logging
+
+        _logging.getLogger("det.cli").debug(
+            "--threads %d ignored with -p (single-config runs are not parallelizable)",
+            threads,
+        )
     src_overrides = _parse_kv("param", params)
 
     # det.run() never raises — it returns a FAILED RunResult.

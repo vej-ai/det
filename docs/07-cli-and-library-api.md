@@ -135,6 +135,7 @@ past per-config failures**. See [§ `det run --tag`](#det-run--tag-tag-multi-con
 | `--full-refresh` | Discard state for the selected streams; reload from the beginning. |
 | `--param k=v` | Override a source param. Repeatable. Top precedence (chapter 03 §6). Not supported with `--tag`. |
 | `--destination-param k=v` | Override a destination param. Repeatable. Top precedence (chapter 12 §5). |
+| `--threads N` (stage 8e) | Pipeline-level concurrency for `--tag`. Overrides `profiles.yml`'s top-level `threads:`. Each destination's `max_concurrent_writes` caps further. Meaningless with `-p` (single-config runs are not parallelizable; the flag is debug-logged and silently ignored). |
 | `--project-dir <dir>` | Project root (or any dir under it). Defaults to CWD. |
 
 #### `det run --tag <tag>` — multi-config by tag
@@ -178,6 +179,35 @@ shiphero_hourly     succeeded  1234   3.2s      -
 stripe_hourly       succeeded  567    2.1s      -
 zendesk_hourly      failed     0      7.1s      ConnectionError: ...
 ```
+
+#### Parallel output (stage 8e, `--threads > 1`)
+
+With `--threads N` (or a `threads:` set in `profiles.yml`) the engine
+runs matched pipelines through a `ThreadPoolExecutor`, sized at `N` and
+capped further per destination by each destination's
+`@destination.max_concurrent_writes` hook (chapter 05). Each pipeline's
+stdlib-logger output is buffered to a per-pipeline `StringIO`; live
+progress banners print under a global print-lock so engine logs from
+different pipelines never interleave:
+
+```
+$ det run --tag hourly --threads 4
+▸ starting shiphero_hourly
+▸ starting stripe_hourly
+2026-05-26 14:30:01 [INFO] det: running stream 'shipments'
+... (shiphero_hourly's buffered logs flushed in one block)
+✓ done shiphero_hourly (3.2s, 1234 rows)
+✓ done stripe_hourly (2.1s, 567 rows)
+  parallelism: clamped to 1 for destination 'duckdb' (project threads=4)
+```
+
+The per-run JSONL log (`.det/logs/<run_id>/run.jsonl`) writes live to its
+own file per pipeline — that's unchanged from sequential mode and is the
+forensics surface. The total-duration line in the rollup table sums
+per-run durations (the CPU spent on the sweep); wall-clock saved by
+parallelism shows up as `wall < sum`. The "clamped to K for destination
+X" line appears only when a destination's cap was lower than the project
+`threads:` (so the user sees why their sweep didn't max out).
 
 Example run output:
 

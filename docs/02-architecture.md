@@ -244,26 +244,60 @@ det's concurrency stance is deliberately minimal — concurrency is the most
 reliable place for an EL tool to acquire bugs, so v1 spends its complexity budget
 elsewhere.
 
-- **Across streams: sequential.** v1 runs selected streams one at a time, in
-  declared order. Output is deterministic; failures are easy to localize;
-  per-stream commit (above) already gives resumability without parallelism.
+- **Across pipelines: opt-in parallel** (stage 8e). `det run --tag <T>` may
+  run matched configs concurrently via a `ThreadPoolExecutor` sized by
+  `profiles.yml`'s top-level `threads:` (default 1, dbt-style) or the
+  `--threads N` CLI override. Each destination declares a per-destination
+  cap via the optional `@destination.max_concurrent_writes` hook; the
+  engine enforces `min(threads, per-destination cap)` via per-destination
+  semaphores. DuckDB returns 1 (file lock); BigQuery returns 10 (default;
+  overridable per-target). A `det run -p X` single-config invocation is
+  unaffected — the parallel path only fires for the multi-config `--tag`
+  surface. See chapter 06 §`threads:` and chapter 07 §`--threads`.
+- **Across streams: sequential.** Streams within one pipeline still run
+  one at a time, in declared order — pipeline-level parallelism does not
+  imply stream-level parallelism. Per-stream commit (above) already gives
+  resumability without parallelism, and a tag-sweep of N pipelines × M
+  streams gives plenty of concurrency without crossing the per-pipeline
+  contract.
 - **Within a stream: pipelined.** Extract, normalize, and load form a producer/
   consumer pipeline. While the destination writes batch *N*, the generator may
   already be producing batch *N+1*. This is bounded-buffer pipelining, not
   unbounded fan-out — peak memory stays a small number of in-flight batches.
-- **Where parallelism *could* go later** (documented, not built in v1):
-  1. **Independent streams in parallel** — streams touch disjoint cursors and
-     (usually) disjoint tables, so a worker pool is natural. Needs a concurrency
-     cap and per-destination connection limits.
+- **Where stream-level parallelism *could* go later** (documented, not
+  built):
+  1. **Independent streams in parallel within one pipeline** — streams
+     touch disjoint cursors and (usually) disjoint tables, so a worker
+     pool is natural. Needs a concurrency cap and per-destination
+     connection limits — both already present at the pipeline level
+     (stage 8e), so the extension is mostly engine-side.
   2. **Partitioned extract within one stream** — e.g. a date-ranged backfill
      split into sub-ranges. Requires the connector to declare partitionability.
 
   Both are additive: they change *how fast* step 5 runs, never the lifecycle or
-  the contract. v1 ships sequential-across / pipelined-within and stops there.
+  the contract. Pipeline-level parallelism shipped in stage 8e; stream-level
+  remains deferred.
 
-> [Open question: whether v1 exposes a `--threads N` flag (dbt-style) as a no-op
-> placeholder reserving the name, or omits it until parallel streams actually
-> ship. Reserving the name avoids a future breaking change.]
+### Per-destination concurrency cap (stage 8e)
+
+Each destination is its own concurrency story. DuckDB's file lock can't
+host two writers; BigQuery's per-project load-job quota tolerates ~50
+concurrent. The contract:
+
+| Destination | Cap | Source of truth |
+|---|---|---|
+| DuckDB | 1 | hardcoded (file-lock model) |
+| BigQuery | 10 (default) | overridable via `max_concurrent_writes` param |
+| Custom destinations | unlimited | declare `@destination.max_concurrent_writes` to clamp |
+
+The engine groups matched pipelines by destination, calls the hook once
+per unique destination at planning time (cached), and gates each
+pipeline's `run()` behind a `threading.Semaphore` keyed by destination
+name. A user setting `threads: 8` against an all-DuckDB project still
+serializes — the destination's cap wins. The hook signature is
+`max_concurrent_writes(config: Config) -> int`; it receives the
+resolved destination Config so BigQuery (and any future per-target
+destination) can read its own param.
 
 ## What this document does not own
 

@@ -561,6 +561,39 @@ def test_mandatory_and_state_hooks_registered(
     assert "transaction" not in names
 
 
+def test_max_concurrent_writes_defaults_to_ten(
+    bigquery_destination: LoadedConnector,
+) -> None:
+    """BigQuery declares max_concurrent_writes default 10 (stage 8e)."""
+    hook = bigquery_destination.registry.hook("max_concurrent_writes")
+    assert hook is not None
+    assert hook.func(Config(params={})) == 10
+
+
+def test_max_concurrent_writes_overridable_via_param(
+    bigquery_destination: LoadedConnector,
+) -> None:
+    """An operator with a raised quota can set max_concurrent_writes=25."""
+    hook = bigquery_destination.registry.hook("max_concurrent_writes")
+    assert hook is not None
+    assert hook.func(Config(params={"max_concurrent_writes": 25})) == 25
+    # String values (from env / YAML scalar) coerce to int.
+    assert hook.func(Config(params={"max_concurrent_writes": "15"})) == 15
+    # A non-positive override clamps up to 1 — defensive: zero would deadlock.
+    assert hook.func(Config(params={"max_concurrent_writes": 0})) == 1
+    assert hook.func(Config(params={"max_concurrent_writes": -3})) == 1
+
+
+def test_max_concurrent_writes_rejects_non_int(
+    bigquery_destination: LoadedConnector,
+) -> None:
+    """A garbage value raises a clear ValueError (not a silent fall-through)."""
+    hook = bigquery_destination.registry.hook("max_concurrent_writes")
+    assert hook is not None
+    with pytest.raises(ValueError, match="positive integer"):
+        hook.func(Config(params={"max_concurrent_writes": "ten"}))
+
+
 # --------------------------------------------------------------------------
 # ddl helpers — type mapping, mode mapping, identifier safety, MERGE SQL
 # --------------------------------------------------------------------------
