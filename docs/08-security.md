@@ -101,9 +101,40 @@ class SecretResolver(Protocol):
 | Environment variables | `${env.X}` (built-in syntax) | **v1** |
 | Profiles.yml lookup | `${profile.X.Y}` (built-in syntax) | **v1** |
 | `secret://` plugin surface | `secret://<scheme>/...` (protocol + parser) | **v1 (stage 9a)** |
-| GCP Secret Manager | `secret://gcp/...` (plugin) | v2 (9b) |
+| GCP Secret Manager | `secret://gcp-secret-manager/projects/<p>/secrets/<n>/versions/<v>` (plugin) | **v1 (stage 9b)** |
 | AWS Secrets Manager | `secret://aws-secrets-manager/...` (plugin) | v2 (9c) |
 | HashiCorp Vault | `secret://vault/...` (plugin) | v2 |
+
+### GCP Secret Manager — setup
+
+The `gcp-secret-manager` resolver auto-registers via entry-point when the optional extra is installed. One-time setup on a GCP project:
+
+1. **Create the secret + a version** (using `gcloud`):
+
+   ```sh
+   gcloud secrets create my-stripe-key --replication-policy=automatic
+   echo -n 'sk_live_xxx' | gcloud secrets versions add my-stripe-key --data-file=-
+   ```
+
+2. **Grant access** to the principal det runs as (service account in CI, your user ADC locally):
+
+   ```sh
+   gcloud secrets add-iam-policy-binding my-stripe-key \
+     --member='serviceAccount:det-runner@<proj>.iam.gserviceaccount.com' \
+     --role='roles/secretmanager.secretAccessor'
+   ```
+
+3. **Install the extra**: `pip install 'det[gcp-secrets]'`.
+
+4. **Reference it in `profiles.yml`**:
+
+   ```yaml
+   stripe:
+     prod:
+       api_key: secret://gcp-secret-manager/projects/my-proj/secrets/my-stripe-key/versions/latest
+   ```
+
+Authentication uses Application Default Credentials — set `GOOGLE_APPLICATION_CREDENTIALS` or run `gcloud auth application-default login`. The `#field` URL fragment is ignored (GCP returns a single opaque blob per version); a one-time warning is logged per unique `(path, field)` pair.
 
 The `SecretResolver` protocol and `secret://` parsing exist so a manager can be added as a small package or a project-local plugin **without an engine change** — the same extensibility philosophy as the `StateBackend` in [05](./05-destinations-and-state.md). Resolved secret values are held only in memory for the duration of the run and are subject to the redaction rules in §6.
 

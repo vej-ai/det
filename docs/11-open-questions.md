@@ -178,6 +178,10 @@ per run, or always fetch fresh.
   resolver INSTANCE is cached (a GCP SDK init only runs once per process), but
   the per-reference VALUE is re-fetched every run. No on-disk cache. Caching
   remains deferred until a real cost problem surfaces.
+- **Stage 9b status:** the first production adapter (GCP Secret Manager) ships
+  under `secret://gcp-secret-manager/...`. The deferred caching question is
+  unchanged — 9b honors fresh-every-run; its SDK client init is the only
+  thing cached (per-process).
 - **Stakes:** Run latency vs. attack surface at high invocation rates.
 - **Decide by:** revisit only if round-trip cost becomes real.
 
