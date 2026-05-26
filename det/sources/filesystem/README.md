@@ -38,16 +38,18 @@ Either way the cursor type is `string`; both lex-compare correctly.
 
 ## Supported URIs and install extras
 
-| Scheme    | Backend          | Install extra        |
-|-----------|------------------|----------------------|
-| (no scheme) / `file://` | `LocalBackend`   | — (always available) |
-| `gs://`   | `GcsBackend`     | `det[gcs]`      |
-| `s3://`   | `S3Backend`      | `det[s3]`       |
+| Scheme    | Backend          | Install                                    |
+|-----------|------------------|--------------------------------------------|
+| (no scheme) / `file://` | `LocalBackend`   | base (always available)      |
+| `gs://`   | `GcsBackend`     | `pip install 'det[gcs]'`                   |
+| `s3://`   | `S3Backend`      | `pip install 'det[s3]'`                    |
 
-Parquet files need pyarrow regardless of backend: `det[parquet]`.
+Parquet files work out of the box — `pyarrow` ships with the base install
+(the BigQuery destination also needs it).
 
-The remote / parquet imports are lazy — you only pay for what you use. A
-missing optional dep raises an `ImportError` naming the extra.
+Cloud-storage SDKs (`gs://`, `s3://`) are the only filesystem-source pieces
+behind extras, and they are lazy-imported — you only pay for what you use.
+A missing optional dep raises an `ImportError` naming the extra.
 
 ## What a malformed file looks like
 

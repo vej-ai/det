@@ -245,7 +245,12 @@ def test_parquet_local_file_streams_rows(tmp_path: Path) -> None:
 def test_parquet_missing_pyarrow_raises_with_install_hint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """If pyarrow is absent the ImportError names the install extra.
+    """If pyarrow is absent the ImportError points the user at re-installing det.
+
+    pyarrow ships in det's base install (the BigQuery destination also needs
+    it). The error path exists for environments where the package was
+    explicitly removed; the message tells the user to reinstall, not to add
+    an extra (there is no `[parquet]` extra anymore).
 
     Simulates the missing dep by injecting ``None`` into ``sys.modules`` —
     works regardless of whether the test env has pyarrow installed.
@@ -260,7 +265,7 @@ def test_parquet_missing_pyarrow_raises_with_install_hint(
 
     # Force the lazy import to fail.
     monkeypatch.setitem(sys.modules, "pyarrow.parquet", None)
-    with pytest.raises(ImportError, match=r"det\[parquet\]"):
+    with pytest.raises(ImportError, match=r"pip install det"):
         list(_run_stream(tmp_path, glob="**/*.parquet"))
 
 

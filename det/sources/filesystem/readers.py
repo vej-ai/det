@@ -194,15 +194,17 @@ def read_jsonl(
 def _lazy_import_pyarrow() -> Any:
     """Import :mod:`pyarrow.parquet` on first use, or raise a clear ImportError.
 
-    The error message names the install extra (``det[parquet]``) so the
-    fix is one ``pip install`` line.
+    pyarrow ships with det's base dependencies (the BigQuery destination
+    needs it). Reaching this error means the package was removed from the
+    active environment — reinstall with ``pip install det``.
     """
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:
         raise ImportError(
-            "the filesystem connector needs `pyarrow` to read .parquet files; "
-            "install with `pip install det[parquet]`"
+            "the filesystem connector needs `pyarrow` to read .parquet files. "
+            "pyarrow ships with `pip install det`; if you see this, the package "
+            "was removed from your environment — reinstall with `pip install det`."
         ) from exc
     return pq
 

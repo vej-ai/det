@@ -11,10 +11,16 @@ simple as possible.
 ## Install
 
 ```sh
-pip install det                          # base — DuckDB destination ready
-pip install 'det[bigquery]'              # add the BigQuery destination
-pip install 'det[parquet,gcs,s3]'        # add filesystem-source extras
+pip install det                          # every baked connector, ready
+pip install 'det[gcs,s3]'                # add gs:// / s3:// filesystem reads
+pip install 'det[gcp-secrets]'           # add the GCP Secret Manager resolver
 ```
+
+`pip install det` ships every baked source and destination — DuckDB,
+BigQuery, the filesystem source's local + Parquet path, the REST / Postgres
+/ ShipHero / Stripe sources, the engine, the CLI. Extras stay opt-in for the
+cloud-storage paths of the filesystem source (`gs://` / `s3://`) and for
+secret managers (only relevant if your `profiles.yml` uses `secret://` URLs).
 
 det requires Python 3.11+. It installs both a CLI (`det`) and an importable
 library (`import det`).

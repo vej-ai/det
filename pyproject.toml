@@ -24,12 +24,30 @@ classifiers = [
     "Topic :: Database",
     "Typing :: Typed",
 ]
+# Base install includes everything needed for the baked connectors to work
+# at full capacity. Specifying extras to use a *baked* destination (e.g.
+# BigQuery, which det ships and tests in its own repo) is backwards; the
+# baked toolkit should Just Work after `pip install det`.
+#
+# Genuine extras remain for opt-in cloud paths that are NOT required for a
+# connector's basic operation:
+#   * `gcs` / `s3`  — filesystem-source cloud backends (local paths work
+#                     without them; only needed for `gs://` / `s3://` URIs)
+#   * `gcp-secrets`, `aws-secrets`, `vault` — secret managers (most users
+#                     start with `${env.X}` and never need these)
 dependencies = [
     "pyyaml",
     "click",
     "duckdb",
     "requests>=2.31",
     "psycopg[binary]>=3.1",
+    # BigQuery destination (baked) — needs the GCP SDKs + pyarrow to stage
+    # Parquet via GCS and trigger LOAD jobs. Lazy-imported inside the
+    # destination, so a user who never touches BigQuery never pays the
+    # *initialization* cost — but the install cost is baseline.
+    "google-cloud-bigquery>=3.20",
+    "google-cloud-storage>=2.10",
+    "pyarrow>=15",
 ]
 
 [project.optional-dependencies]
@@ -41,17 +59,19 @@ dev = [
     "types-PyYAML",
     "types-requests",
 ]
-parquet = ["pyarrow>=15"]
+# Filesystem-source cloud backends — only loaded if a stream targets a
+# `gs://` or `s3://` URI. Local files work without these.
 gcs = ["google-cloud-storage>=2.10"]
 s3 = ["boto3>=1.28"]
-bigquery = [
-    "google-cloud-bigquery>=3.20",
-    "google-cloud-storage>=2.10",
-    "pyarrow>=15",
-]
+# Secret-manager resolvers — only needed if profiles.yml uses `secret://`
+# URLs for the matching scheme. ${env.X} works for everyone without these.
+gcp-secrets = ["google-cloud-secret-manager>=2.20"]
 
 [project.scripts]
 det = "det.cli:main"
+
+[project.entry-points."det.secret_resolvers"]
+gcp-secret-manager = "det.secrets._gcp:GcpSecretManagerResolver"
 
 [project.urls]
 Homepage = "https://github.com/albinasplesnys/det"

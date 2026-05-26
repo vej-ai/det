@@ -30,9 +30,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# google-cloud-bigquery + google-cloud-storage are in det's base dependencies
+# (the BigQuery destination is a baked connector). Reaching this error means
+# the SDK was removed from the active environment after install — reinstall
+# with `pip install det` (or `pip install --force-reinstall google-cloud-bigquery
+# google-cloud-storage`).
 _INSTALL_HINT = (
-    "BigQuery destination requires the [bigquery] extra; install with "
-    "`pip install det[bigquery]`"
+    "BigQuery destination requires google-cloud-bigquery + google-cloud-storage "
+    "(both ship with `pip install det`). If you see this, the SDK was removed "
+    "from your environment — reinstall with `pip install det`."
 )
 
 

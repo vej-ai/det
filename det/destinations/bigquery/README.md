@@ -11,13 +11,14 @@ for the destination contract; this README is the operator's quick reference.
 ## Install
 
 ```bash
-pip install "det[bigquery]"
+pip install det
 ```
 
-The `[bigquery]` extra pulls in `google-cloud-bigquery`, `google-cloud-storage`
-and `pyarrow`. A base `det` install does NOT load these — the BigQuery
-destination's modules import the SDKs lazily, so `import det` and the rest of
-the package work without the extra.
+The BigQuery destination is a baked connector — `google-cloud-bigquery`,
+`google-cloud-storage`, and `pyarrow` ship in det's base dependencies.
+The SDKs are still imported **lazily** at first use, so a project that
+never targets BigQuery never pays the client-init cost; the install cost
+is baseline.
 
 ## Auth
 
