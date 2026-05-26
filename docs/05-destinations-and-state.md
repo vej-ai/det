@@ -5,13 +5,12 @@
 
 This section specifies how det **loads** data and how it remembers **where it left off**. It is the architectural keystone of the tool: state is what makes incremental extraction correct, and the destination is where state lives.
 
-> # NOTE: post-8.B, the *binding* of a source to a destination lives in a
-> **pipeline config** (chapter 12), not in the source's `register.yaml`. The
-> destination contract specified in this chapter — the `@destination` hooks,
-> the capability tiers, the state design — is unchanged; only where the
-> source decides which destination to write to changed. Connection params
-> (Tier A destinations' DB endpoints and credentials) live in `profiles.yml`,
-> destination-keyed (chapter 06).
+> The *binding* of a source to a destination lives in a **pipeline config**
+> (chapter 12), not in a source's `register.yaml`. The destination contract
+> specified in this chapter — the `@destination` hooks, the capability
+> tiers, the state design — is independent of that binding. Connection
+> params for Tier A destinations (DB endpoints and credentials) live in
+> `profiles.yml`, destination-keyed (chapter 06).
 
 ---
 
@@ -86,7 +85,7 @@ def close(conn) -> None:
 
 `ensure_schema` and `write_batch` each receive a single **`StreamMeta`** — a frozen object carrying all per-stream metadata the hook needs (`table`, `write_disposition`, `schema`, `primary_key`, `partition_by`, `schema_contract`). New per-stream concerns are added as `StreamMeta` fields, never as new hook parameters, so the destination contract stays stable as the engine grows. The engine builds one `StreamMeta` per stream from the resolved `StreamDef`.
 
-Only `capabilities`, `open`, `write_batch`, `ensure_schema`, and `close` are mandatory. `commit_state` / `read_state` are mandatory **only** if the destination declares `Capability.STATE`; otherwise the engine routes state to a companion state backend (see §6). `transaction` is mandatory **only** if the destination declares `Capability.TRANSACTIONAL_LOAD`. `write_run_record` is mandatory **only** if the destination declares `Capability.RUN_RECORDS` (docs/09 §4) — the engine calls it once per run, after streams finish and before `close`, with a fully-built `RunRecord`; without the capability the engine skips it and the per-run JSONL log file remains the durable history. `max_concurrent_writes` (stage 8e) is **always optional** — when present the engine reads it (with the resolved destination `Config`) and clamps pipeline-level parallelism per destination (chapter 02 §Concurrency); when absent the destination is treated as having no cap. Eleven hooks total.
+Only `capabilities`, `open`, `write_batch`, `ensure_schema`, and `close` are mandatory. `commit_state` / `read_state` are mandatory **only** if the destination declares `Capability.STATE`; otherwise the engine routes state to a companion state backend (see §6). `transaction` is mandatory **only** if the destination declares `Capability.TRANSACTIONAL_LOAD`. `write_run_record` is mandatory **only** if the destination declares `Capability.RUN_RECORDS` (docs/09 §4) — the engine calls it once per run, after streams finish and before `close`, with a fully-built `RunRecord`; without the capability the engine skips it and the per-run JSONL log file remains the durable history. `max_concurrent_writes` is **always optional** — when present the engine reads it (with the resolved destination `Config`) and clamps pipeline-level parallelism per destination (chapter 02 §Concurrency); when absent the destination is treated as having no cap. Eleven hooks total.
 
 `@destination.transaction` is a **context-manager hook** — a destination that declares `Capability.TRANSACTIONAL_LOAD` provides it, and the engine enters it once per stream, wrapping that stream's `[write_batch… → commit_state]` block (but **not** `ensure_schema`, whose DDL may implicitly commit). On a clean exit the data and the advanced cursor flip atomically; on any exception the partial load rolls back. This is what makes an `append` stream crash-safe — without it, every mid-stream crash would leave half-written rows that the re-run duplicates. Per-stream scope matches det's per-stream commit model (§5.3).
 
@@ -170,7 +169,10 @@ det keeps schema evolution deliberately minimal. The default policy:
 
 This is governed by `Capability.SCHEMA_EVOLUTION`. A destination without it (rare) fails any run whose schema differs from the existing table.
 
-> [Open question: should additive evolution be opt-in per stream via a `schema_contract: strict|evolve` setting in `register.yaml`? dbt-style strictness argues for `strict` as the default in production. Proposal: default `evolve`, allow `strict` opt-in. Decide before v1 freeze.]
+A stream may opt out of additive evolution by setting
+`schema_contract: strict` in its `register.yaml` entry — a strict stream
+fails fast if a batch diverges from the declared schema. The default is
+`evolve`. The `SchemaContract` enum is part of the public `det.types` API.
 
 ### 3.3 Partitioning
 
@@ -193,7 +195,7 @@ streams:
     partition_by: created_date   # defaults to TIME + DAY
 ```
 
-**Long form** (new in stage 8c — for `range`, `ingestion`, or non-`day` granularities):
+**Long form** (for `range`, `ingestion`, or non-`day` granularities):
 
 ```yaml
 streams:
@@ -246,7 +248,7 @@ partition_overrides:
 
 The full resolution chain (highest → lowest precedence): `partition_overrides[stream]` → `StreamDef.partition_by` → cursor-based auto-default → `None` (no partition).
 
-**Backward compat for the short form on a non-time column:** several pre-existing sources (Stripe, ShipHero) declare a short-form `partition_by` against a column that is an INTEGER (a Unix epoch under `cursor_type: int`) or otherwise not time-typed. Before stage 8c the destination ignored `partition_by` entirely; once the BigQuery destination starts honoring it, naively mapping the short form to `TIME+DAY` on an INTEGER column would crash every existing run. The engine therefore **degrades** a short-form declaration to "no partition + WARNING" when the column type isn't a `TIMESTAMP` / `DATE` (and emits the explicit-declaration suggestion). Long-form declarations and per-config overrides are *never* degraded — those are explicit decisions.
+**Backward compat for the short form on a non-time column:** several baked sources (Stripe, ShipHero) declare a short-form `partition_by` against a column that is an INTEGER (a Unix epoch under `cursor_type: int`) or otherwise not time-typed. Naively mapping the short form to `TIME+DAY` on an INTEGER column would fail at table-creation time. The engine therefore **degrades** a short-form declaration to "no partition + WARNING" when the column type isn't a `TIMESTAMP` / `DATE` (and emits the explicit-declaration suggestion). Long-form declarations and per-config overrides are *never* degraded — those are explicit decisions.
 
 **Partition drift on existing tables — hard error.** BigQuery cannot change an existing table's partitioning in place. If a config requests a partition spec that does not match the existing table, `ensure_schema` raises with a message naming both specs and the suggested operator action:
 
@@ -381,7 +383,8 @@ destination's dataset, prefixed `_det_` so they sort away from user
 tables. Same column names + types as the DuckDB destination so an admin
 / UI / cross-warehouse tool queries both backends identically.
 
-> [Open question: per-batch ("streaming") state commit for very large backfills, so a crash 90% through doesn't restart from zero. This trades the clean all-or-nothing model for partial progress. Proposal: keep whole-run commit in v1; add opt-in `state_granularity: batch` in v2 for streams that declare a monotonic cursor.]
+Per-batch (streaming) state commit for very large backfills is a deferred
+v2 opt-in — see [chapter 11 Q7b](./11-open-questions.md).
 
 ### 5.4 The capability-tier model and `state_backend()`
 
@@ -393,7 +396,7 @@ class StateBackend(Protocol):
     def commit_state(self, run_id: str, records: list[StateRecord]) -> None: ...
 ```
 
-The `Destination` interface exposes:
+The destination contract exposes:
 
 ```python
 @destination.state_backend

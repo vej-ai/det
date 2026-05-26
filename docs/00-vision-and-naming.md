@@ -1,8 +1,8 @@
 # 00 — Vision & Naming
 
 > Part of the **det** design handbook. This file sets the north star. Files
-> 01 (landscape) and 02 (architecture) build on the vocabulary and the design
-> test defined here.
+> 01 (landscape) and 02 (architecture) build on the vocabulary and the
+> simplicity test defined here.
 
 ## What det is
 
@@ -47,46 +47,51 @@ Runs are **synchronous** — "run, wait until it succeeds, exit." That makes
 det trivially easy to wrap in an orchestrator (Dagster, Airflow, cron) later,
 because a synchronous process with an exit code is the universal contract.
 
-## What det is deliberately NOT — the anti-Airbyte stance
+## Non-goals
 
-det is **explicitly not Airbyte**. The rejection is concrete, not a vibe:
+det does one job — extract-load — and explicitly does not do several adjacent
+ones:
 
-- **No UI as the authoring surface.** Connectors are code in a repo, not rows in
-  a database edited through a web form. The source of truth is the filesystem.
-- **No JSON-over-stdio process protocol.** Airbyte (and Singer) shuttle `RECORD`
-  / `SCHEMA` / `STATE` JSON messages between separate OS processes — often
-  separate Docker images. det runs the connector **in-process** as Python.
-  No serialization tax, no container-per-connector, stack traces you can read.
-- **No declarative YAML for stream *logic*.** Airbyte's low-code CDK expresses
-  pagination, auth, and record selection *as YAML*. det uses YAML only for a
-  **manifest** — metadata, declared streams, config schema. The *logic* of a
-  stream is a Python generator. YAML that needs an `if` is a programming
-  language with the safety removed; we will not build one.
-- **No blackbox.** Every connector is readable, debuggable, `pdb`-able Python.
+- **det does not provide a UI.** Connectors are code in a repo, not rows in a
+  database edited through a web form. The source of truth is the filesystem.
+- **det does not run connectors out-of-process.** Connectors are imported and
+  executed as in-process Python — no JSON-over-stdio protocol, no
+  container-per-connector, real stack traces. Singer and Airbyte shuttle
+  `RECORD` / `SCHEMA` / `STATE` messages between separate OS processes; det
+  does not.
+- **det does not express stream *logic* in YAML.** YAML is the manifest
+  (metadata, declared streams, config schema) and only the manifest. The
+  *logic* of a stream is a Python generator. YAML that needs an `if` is a
+  programming language with the safety removed.
+- **det does not host a control plane.** State lives in your destination
+  (`_det_state`), not in a det-managed service. There is no det backend,
+  no scheduler daemon, no telemetry endpoint.
+- **det does not transform data.** Use dbt.
+- **det is not an orchestrator, a reverse-ETL platform, a catalog, or a
+  managed SaaS.**
 
-What det *keeps* from that world: a **YAML manifest** (`register.yaml`) for
-declarative *metadata and config* — analogous in spirit to Airbyte's
-`metadata.yaml`, not its `manifest.yaml`. Declaring *what a connector is* in YAML
-is good. Encoding *what a connector does* in YAML is the mistake.
+What det *keeps* from the Airbyte / Singer world: a **YAML manifest**
+(`register.yaml`) for declarative *metadata and config* — analogous in spirit
+to Airbyte's `metadata.yaml`, not its `manifest.yaml`. Declaring *what a
+connector is* in YAML is good. Encoding *what a connector does* in YAML is the
+mistake.
 
-### Non-goals (full list in "Non-goals for v1" below)
-
-det is not an orchestrator, not a transformation tool, not a reverse-ETL
-platform, not a catalog, not a managed SaaS. It does one job.
+(The full list of v1 non-goals — including CDC, distributed execution, and a
+connector marketplace — is in "Non-goals for v1" below.)
 
 ## The "simplest possible thing" north star
 
-The owner's #1 principle: **keep it as simple as possible.** This is not a slogan
+The #1 principle is **keep it as simple as possible.** This is not a slogan
 — it is a **test** applied to every design decision:
 
-> **The det test.** For any proposed feature or abstraction, ask:
+> **The simplicity test.** For any proposed feature or abstraction, ask:
 > 1. Can a competent data engineer who has never seen det read a connector
 >    folder and understand it in under five minutes?
 > 2. Does this add a *concept the user must learn*? If yes, does it remove at
 >    least one other concept, or unlock something genuinely impossible without it?
 > 3. Could the user do this with plain Python instead? If yes, the burden of
 >    proof is on the abstraction, not on plain Python.
-> 4. Does it require a new config file, a new CLI flag, or a new lifecycle stage?
+> 4. Does it require a new config file, a new CLI flag, or a new lifecycle phase?
 >    Each of those is a cost paid by every user forever.
 
 A feature that fails the test is cut or demoted to an escape hatch. When two
@@ -107,7 +112,7 @@ stands for "data extraction tool."
 | Thing | Form | Notes |
 |-------|------|-------|
 | Product name | **det** | Always lowercase. "data extraction tool." |
-| CLI binary | `det` | `det run -p meta_ads_prod` (post-8.B: the `-p / --conf` arg names a pipeline config — chapter 12). |
+| CLI binary | `det` | `det run -p shiphero_prod` — the `-p / --conf` arg names a pipeline config (chapter 12). |
 | Python package / import | `det` | `import det` / `from det import run`. |
 | Runtime unit | **config** | A pipeline (one source + one destination + one target + params). Lives under `configs/` (chapter 12). |
 | State table | `_det_state` | Underscore-prefixed, lives in the destination. |
@@ -119,15 +124,9 @@ stands for "data extraction tool."
 Rationale: one identifier for everything is the simplest thing. Borrowing the
 dbt convention (`dbt` the binary, `dbt` the package, `dbt_project.yml`) keeps
 the analogy clean for the target user (see §Target user below). Underscore-
-prefixed names (`_det_state`, `_det_synced_at`, eventually `_det_runs`) mark
-the engine-owned namespace inside the destination so it sorts away from user
+prefixed names (`_det_state`, `_det_synced_at`, `_det_runs`) mark the
+engine-owned namespace inside the destination so it sorts away from user
 tables and columns.
-
-> Provenance: the project was previously called **simpl.E** (with a separate
-> `simple-e` CLI and `simple_e` Python package). It was renamed to **`det`**
-> in stage 8.A — a pre-release rename made cheap by the fact that no live
-> deployments existed. The old name is preserved nowhere in the codebase; this
-> line is the only reference.
 
 ## Target user
 
@@ -158,13 +157,14 @@ v1 scope is **CLI + library only**. Explicitly out of scope for v1:
 - **No reverse-ETL framing.** A warehouse→SaaS sync is just a connector pair, but
   v1 does not build first-class reverse-ETL ergonomics.
 - **No CDC / log-based replication** as a built-in. Cursor-based incremental
-  only in v1. [Open question: whether a connector author can implement CDC
-  themselves within the `@stream` contract — likely yes, but not a v1 promise.]
+  only in v1; whether a connector author can implement CDC themselves
+  within the `@stream` contract is a v2 question — see
+  [chapter 10](./10-roadmap-and-scope.md) and [chapter 11 Q5](./11-open-questions.md).
 - **No distributed / multi-node execution.** Single process, single host.
 - **No data catalog, lineage graph, or column-level metadata store.** det
   emits a **run record**; it is not a metadata platform.
 - **No connector marketplace.** Baked connectors ship in the package; everything
   else is custom and lives in the user's project. A registry may come later.
 
-Each non-goal is a direct application of the det test: every one of these
-would add concepts and surface area without doing the one job better.
+Each non-goal is a direct application of the simplicity test: every one of
+these would add concepts and surface area without doing the one job better.

@@ -4,10 +4,9 @@
 
 det is invoked the way dbt is: `pip install`, then a CLI. But the CLI is a **thin shell over a real Python library** — every command is one function call away. This is deliberate. Orchestrators (Dagster, Airflow) and notebooks should never shell out; they import det. The CLI and the library are the *same engine*, exposed twice.
 
-Stage 8.B made **pipeline configs** (chapter 12) the runtime unit. The CLI's
-primary selector is now `-p / --conf <config_name>`; the connector-alone
-selector (`-c / --connector`) is gone, because a source without a destination
-binding cannot run.
+**Pipeline configs** (chapter 12) are the runtime unit. The CLI's primary
+selector is `-p / --conf <config_name>`; there is no connector-alone
+selector, because a source without a destination binding cannot run.
 
 ---
 
@@ -35,7 +34,7 @@ walks up from the CWD to find it, like dbt and git.
 det init my_pipelines
 ```
 
-Creates the stage-8.B project tree:
+Creates the project tree:
 
 ```
 my_pipelines/
@@ -135,7 +134,7 @@ past per-config failures**. See [§ `det run --tag`](#det-run--tag-tag-multi-con
 | `--full-refresh` | Discard state for the selected streams; reload from the beginning. |
 | `--param k=v` | Override a source param. Repeatable. Top precedence (chapter 03 §6). Not supported with `--tag`. |
 | `--destination-param k=v` | Override a destination param. Repeatable. Top precedence (chapter 12 §5). |
-| `--threads N` (stage 8e) | Pipeline-level concurrency for `--tag`. Overrides `profiles.yml`'s top-level `threads:`. Each destination's `max_concurrent_writes` caps further. Meaningless with `-p` (single-config runs are not parallelizable; the flag is debug-logged and silently ignored). |
+| `--threads N` | Pipeline-level concurrency for `--tag`. Overrides `profiles.yml`'s top-level `threads:`. Each destination's `max_concurrent_writes` caps further. Meaningless with `-p` (single-config runs are not parallelizable; the flag is debug-logged and silently ignored). |
 | `--project-dir <dir>` | Project root (or any dir under it). Defaults to CWD. |
 
 #### `det run --tag <tag>` — multi-config by tag
@@ -180,7 +179,7 @@ stripe_hourly       succeeded  567    2.1s      -
 zendesk_hourly      failed     0      7.1s      ConnectionError: ...
 ```
 
-#### Parallel output (stage 8e, `--threads > 1`)
+#### Parallel output (`--threads > 1`)
 
 With `--threads N` (or a `threads:` set in `profiles.yml`) the engine
 runs matched pipelines through a `ThreadPoolExecutor`, sized at `N` and
@@ -275,7 +274,7 @@ union v1 does not honour; a future `--destination <name>` is the natural
 relaxation). `show` colors events by type on a TTY; piped output is plain
 JSON-lines.
 
-### `det secrets test [-p <config>] [--target <t>]` — verify secret resolution (stage 9a)
+### `det secrets test [-p <config>] [--target <t>]` — verify secret resolution
 
 ```bash
 det secrets test                           # resolve every reference in every config

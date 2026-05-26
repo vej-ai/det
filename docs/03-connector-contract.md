@@ -20,7 +20,7 @@ the `.sql` files carry logic. det does the same with `register.yaml` and
 strings into YAML — that road leads to the config-driven YAML blackbox, which
 is explicitly what det is not.
 
-A useful litmus test, applied to every `register.yaml` key in this chapter:
+The litmus test for every `register.yaml` key in this chapter:
 
 > *Could the engine discover this without running Python?* If yes, it belongs in
 > YAML. If it is logic, it belongs in a decorated function.
@@ -76,21 +76,20 @@ imported. It is pure data — no expressions, no logic.
 | `schedule` | string (cron or alias) | No | `null` | A *hint* for how often this connector should run. See §2.6. |
 | `requires` | list[string] | No | `[]` | pip requirement specifiers, mirrored from `requirements.txt` if present. The engine validates these are installable. |
 
-That is the complete top-level key set. Ten keys (post-8.B: the
-source-side `destination:` binding moved to a pipeline config — chapter 12).
-If a future feature needs an eleventh, it must justify the ceremony.
+That is the complete top-level key set. Ten keys — the source-to-destination
+binding lives in a pipeline config (chapter 12), not in a source's
+`register.yaml`. If a future feature needs an eleventh, it must justify the
+ceremony.
 
 > # NOTE: `register.yaml` may still carry an old-style `destination:` block
-> from a pre-8.B project; the parser preserves the field (a parsed
+> from a legacy project; the parser preserves the field (a parsed
 > `DestinationBinding` is still returned) but the engine logs a warning and
 > ignores it at run time. The field is expected to be removed in a future
-> stage. The runtime unit is now a config (chapter 12), and configs are
-> where the source-to-destination binding lives.
+> release. The runtime unit is a config (chapter 12).
 
 ### 2.2 The `streams` list
 
-Each entry in `streams` declares one output table. This generalizes **exactly**
-the per-table block in the ShipHero `config.json` proof case.
+Each entry in `streams` declares one output table.
 
 | Key | Type | Required | Default | Purpose |
 |---|---|---|---|---|
@@ -105,20 +104,19 @@ the per-table block in the ShipHero `config.json` proof case.
 
 #### The `incremental` block
 
-Replaces ShipHero's loose `cursor_field` / `lookback_days` pairing with one
-named block. Only the cursor *contract* lives here — *how* the connector turns a
+One named block carries the cursor *contract*; *how* the connector turns a
 cursor into an API request is Python logic in the body.
 
 | Key | Type | Required | Default | Purpose |
 |---|---|---|---|---|
 | `cursor_field` | string | **Yes** | — | Record field whose max value is the incremental cursor (e.g. `created_date`). |
 | `cursor_type` | enum: `timestamp` \| `date` \| `int` \| `string` | No | `timestamp` | How the cursor value is compared and stored. |
-| `lookback` | duration string | No | `null` | Re-fetch window to catch late-arriving rows (e.g. `2d`, `6h`). Mirrors ShipHero's `lookback_days`. |
-| `initial_value` | string | No | `null` | Where to start on the first run (e.g. `"2025-01-01"`). Mirrors ShipHero's `start_date`. |
+| `lookback` | duration string | No | `null` | Re-fetch window to catch late-arriving rows (e.g. `2d`, `6h`). |
+| `initial_value` | string | No | `null` | Where to start on the first run (e.g. `"2025-01-01"`). |
 
 #### 2.2.1 The `schema` field list
 
-Each entry mirrors the ShipHero schema entry shape `{name, type, mode}` exactly.
+Each entry has the shape `{name, type, mode}`.
 
 | Key | Type | Required | Default | Purpose |
 |---|---|---|---|---|
@@ -128,63 +126,48 @@ Each entry mirrors the ShipHero schema entry shape `{name, type, mode}` exactly.
 | `description` | string | No | `""` | Column documentation. |
 
 **Schema philosophy.** Declaring `schema` explicitly is the **recommended
-default** — it is what the ShipHero proof case does, it makes loads
-production-safe, and it lets the destination create/evolve tables deterministically.
-Omitting `schema` opts into `infer_schema` behavior: the destination derives
-columns from the first batch of records. Inference is a convenience for
-prototyping, not a free lunch — it cannot see nullable columns absent from the
-sample, and type drift between runs becomes a runtime error. Handbook guidance:
-prototype with inference, ship with an explicit schema.
+default** — it makes loads production-safe and lets the destination
+create/evolve tables deterministically. Omitting `schema` opts into
+`infer_schema` behaviour: the destination derives columns from the first
+batch of records. Inference is a convenience for prototyping, not a free
+lunch — it cannot see nullable columns absent from the sample, and type
+drift between runs becomes a runtime error. Handbook guidance: prototype
+with inference, ship with an explicit schema.
 
 The engine always appends one column the connector author never declares:
 
 - `_det_synced_at` (`TIMESTAMP`) — load timestamp, set by the engine.
 
-This generalizes ShipHero's hand-rolled `_synced_at` field.
+### 2.3 The source-to-destination binding lives in a config
 
-### 2.3 The `destination` binding — now lives in a config (post-8.B)
+A source's `register.yaml` does **not** declare which destination its data
+goes to. The binding lives in a **pipeline config** under `configs/` (chapter
+12). A config file names the source + destination + target + params as one
+pipeline; the CLI runs configs: `det run -p <config_name>`.
 
-> # NOTE: stage 8.B moved the source-to-destination binding out of
-> `register.yaml` and into a **pipeline config** under `configs/` (chapter 12).
-> A source's `register.yaml` no longer carries a `destination:` block;
-> instead, a config file names the source + destination + target + params as
-> one pipeline. The CLI runs configs: `det run -p <config_name>`.
->
-> The `DestinationBinding` dataclass remains in `det.types` for
-> backwards-parsing compatibility — an older `register.yaml` still loads
-> without error and the engine emits a warning + ignores the field at run
-> time. The field is expected to be removed entirely in a later stage.
->
-> What used to live here:
->
-> ```yaml
-> # PRE-8.B — no longer the source contract.
-> destination:
->   connector: bigquery
->   dataset: shiphero
-> ```
->
-> The post-8.B equivalent (chapter 12):
->
-> ```yaml
-> # configs/shiphero_prod.yml
-> name: shiphero_prod
-> source: shiphero
-> destination: bigquery
-> target: prod
-> destination_params:
->   dataset: shiphero
-> ```
->
-> The destination-side `Destination` interface (chapter 05) is unchanged.
-> Only the *binding* moved.
+```yaml
+# configs/shiphero_prod.yml
+name: shiphero_prod
+source: shiphero
+destination: bigquery
+target: prod
+destination_params:
+  dataset: shiphero
+```
+
+The destination-side `Destination` interface (chapter 05) is unchanged.
+
+> A `DestinationBinding` dataclass remains in `det.types` for
+> backwards-parsing compatibility — an older `register.yaml` carrying a
+> `destination:` block still loads without error and the engine emits a
+> warning + ignores the field at run time.
 
 ### 2.4 `params` — declared configuration
 
-`params` declares typed knobs the connector exposes. This is where ShipHero's
-`page_size`, `step_days`, `batch_size`, `max_retries` belong — they are
-*strategy knobs the connector chooses*, so the connector declares them with
-defaults rather than the engine inventing them.
+`params` declares typed knobs the connector exposes — things like `page_size`,
+`step_days`, `batch_size`, `max_retries`. These are *strategy knobs the
+connector chooses*, so the connector declares them with defaults rather than
+the engine inventing them.
 
 ```yaml
 params:
@@ -227,15 +210,14 @@ secrets:
 | SecretRef key | Type | Required | Purpose |
 |---|---|---|---|
 | `name` | string | **Yes** | Logical name. The body reads it as `config.secrets["api_token"]`. |
-| `ref` | string | **Yes** | Resolution expression. `${env.X}` reads env var `X`; `${profile.X.Y}` reads key `Y` of profile block `X` (chapter 06); `secret://<scheme>/<path>[#<field>]` dispatches to a pluggable resolver (chapter 08 §3, stage 9a). |
+| `ref` | string | **Yes** | Resolution expression. `${env.X}` reads env var `X`; `${profile.X.Y}` reads key `Y` of profile block `X` (chapter 06); `secret://<scheme>/<path>[#<field>]` dispatches to a pluggable resolver (chapter 08 §3). |
 
 The engine resolves refs lazily and never logs secret values.
 
-The `secret://` form (stage 9a) is the **third** resolver — added without
-removing the original two. The two `${...}` forms stay built-in and
-universal; the `secret://` URL is the plugin surface for cloud secret
-managers (GCP, AWS, Vault) — see [08 §3](./08-security.md) for the protocol
-and the registration pattern (entry-points or a project-local
+The `secret://` form is the **third** resolver — the two `${...}` forms stay
+built-in and universal; the `secret://` URL is the plugin surface for cloud
+secret managers (GCP, AWS, Vault). See [08 §3](./08-security.md) for the
+protocol and the registration pattern (entry-points or a project-local
 `det_plugins.py`).
 
 ### 2.6 `schedule` — a hint, not a scheduler
@@ -302,10 +284,10 @@ destination_params:
 
 ### 2.8 Worked example B — a multi-stream GraphQL source (ShipHero)
 
-This is the proof case, re-expressed in the contract. Note what *moved*: the
-GraphQL `query` string, `field_path`, and `date_from_field`/`date_to_field` are
-**not** in YAML — they are request-construction logic and live in `source.py`.
-The YAML carries only the discovery contract.
+The baked ShipHero connector, re-expressed in the contract. Note what *moved*:
+the GraphQL `query` string, `field_path`, and `date_from_field` /
+`date_to_field` are **not** in YAML — they are request-construction logic and
+live in `source.py`. The YAML carries only the discovery contract.
 
 ```yaml
 # connectors/shiphero/register.yaml
@@ -378,8 +360,7 @@ destination_params:
 ```
 
 The `shipping_labels` / `line_items` nested objects are declared as `JSON`
-columns — the ShipHero v2 approach. *(See chapter 04 for the
-flatten-vs-JSON-column discussion.)*
+columns. *(See chapter 04 for the flatten-vs-JSON-column discussion.)*
 
 ## 3. The decorator API
 
@@ -527,7 +508,7 @@ def close(conn):                         # flush + release — always runs
 | `@destination.state_backend` | If **not** `Capability.STATE` | Returns a companion state backend for Tier B (object-storage) destinations. |
 | `@destination.transaction` | If `Capability.TRANSACTIONAL_LOAD` | A context-manager hook the engine wraps around each stream's `write_batch`+`commit_state` block, so data and cursor flip atomically. See chapter 05 §1. |
 | `@destination.write_run_record` | If `Capability.RUN_RECORDS` | Persists one `RunRecord` row into `_det_runs` — the queryable audit table. Called once per run, after streams finish and before `close`. See chapter 09 §4. |
-| `@destination.max_concurrent_writes` | No (optional) | Returns the maximum number of pipelines that may target this destination concurrently under `det run --tag --threads N` (stage 8e). Signature `(config: Config) -> int`. Absent ⇒ unlimited. DuckDB returns 1 (file lock); BigQuery returns 10 by default. See chapter 02 §Concurrency. |
+| `@destination.max_concurrent_writes` | No (optional) | Returns the maximum number of pipelines that may target this destination concurrently under `det run --tag --threads N`. Signature `(config: Config) -> int`. Absent ⇒ unlimited. DuckDB returns 1 (file lock); BigQuery returns 10 by default. See chapter 02 §Concurrency. |
 | `@destination.close` | **Yes** | Flushes and releases resources. Runs even on failure. |
 
 The `Capability` enum referenced above (`STATE`, `MERGE`, `SCHEMA_EVOLUTION`, …)
@@ -551,8 +532,7 @@ contract a destination author binds to.
 
 ### 3.5 The state table — `_det_state`
 
-Incremental state lives **in the destination**, in a table the engine owns. This
-generalizes ShipHero's `sync_checkpoints` table.
+Incremental state lives **in the destination**, in a table the engine owns.
 
 | Column | Type | Purpose |
 |---|---|---|
@@ -574,11 +554,10 @@ correctly with zero local files.
 
 ## 4. The class-based escape hatch
 
-The decorator style covers the overwhelming majority of connectors, including
-the ShipHero proof case. For genuinely complex stateful sources — a shared
-auth/session pooled across many streams, an SDK that must be opened and closed,
-cross-stream ordering constraints — a connector may instead subclass
-`Connector`.
+The decorator style covers the overwhelming majority of connectors. For
+genuinely complex stateful sources — a shared auth/session pooled across many
+streams, an SDK that must be opened and closed, cross-stream ordering
+constraints — a connector may instead subclass `Connector`.
 
 ```python
 # connectors/complex_erp/source.py

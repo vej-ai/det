@@ -1,9 +1,9 @@
 # ShipHero baked source connector
 
 A det source connector that extracts ShipHero fulfillment data via the
-public GraphQL API. This is the proof case docs/03 §2.8 designed the contract
-around — ported from an internal hand-written ShipHero connector that's been
-running in production.
+public GraphQL API. The worked example in docs/03 §2.8 is this connector's
+`register.yaml`; the connector is itself derived from a hand-written
+production EL script.
 
 ## Authentication
 

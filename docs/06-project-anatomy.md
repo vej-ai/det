@@ -1,11 +1,11 @@
 # 06 — Project Anatomy
 
 A det **project** is the directory a user creates to run extract-load
-pipelines. It is modeled on a dbt project: a small declarative root file, a
+pipelines. It is modelled on a dbt project: a small declarative root file, a
 credentials file kept separate from code, folders of components, and a
-disposable working directory. After stage 8.B, sources, destinations, and
-pipeline *configs* live in their own folders — and a config (not a connector)
-is the runtime unit (chapter 12).
+disposable working directory. Sources, destinations, and pipeline *configs*
+live in their own folders, and a config (not a connector) is the runtime
+unit (chapter 12).
 
 ## The dbt analogy at a glance
 
@@ -24,7 +24,7 @@ is the runtime unit (chapter 12).
 acme_el/
 ├── det_project.yml         # project config (the dbt_project.yml analog)
 ├── profiles.yml            # per-destination connection params (NOT committed)
-├── det_plugins.py          # OPTIONAL — project-local secret-resolver plugins (stage 9a)
+├── det_plugins.py          # OPTIONAL — project-local secret-resolver plugins
 ├── .gitignore
 │
 ├── sources/                # custom SOURCE connectors (kind: source)
@@ -54,13 +54,12 @@ acme_el/
     └── cache/
 ```
 
-The optional **`det_plugins.py`** file (stage 9a) sits next to `det_project.yml`. If present, det imports it once at engine startup so the file's `det.register_secret_resolver(...)` calls register custom `secret://` schemes for the project. The file is arbitrary Python — same trust model as the connector folders. See [08 — Security §3](./08-security.md) for the resolver protocol and the registration pattern.
+The optional **`det_plugins.py`** file sits next to `det_project.yml`. If present, det imports it once at engine startup so the file's `det.register_secret_resolver(...)` calls register custom `secret://` schemes for the project. The file is arbitrary Python — same trust model as the connector folders. See [08 — Security §3](./08-security.md) for the resolver protocol and the registration pattern.
 
-Stage 8.B split the old single `connectors/` directory into **`sources/`** and
-**`destinations/`** (one per kind, no more guessing by `register.yaml` `kind:`),
-and added **`configs/`** — the directory of pipeline configs that bind a source
-to a destination. Configs are the runtime unit: `det run -p <name>` names a
-config, not a connector.
+Sources and destinations live in their own top-level folders (`sources/` for
+`kind: source`, `destinations/` for `kind: destination`); `configs/` holds the
+pipeline configs that bind a source to a destination. Configs are the
+runtime unit: `det run -p <name>` names a config, not a connector.
 
 ## `det_project.yml` — the project config
 
@@ -101,12 +100,12 @@ vars:
 | `vars` | map[string → scalar] | No | `{}` | Project-wide param overrides applied to every connector. |
 | `working_dir` | string | No | `.det` | Where the engine writes the manifest cache, logs, and scratch. |
 
-> Stage 8.B removed `default_destination` (the source's `register.yaml` no
-> longer declares the destination; a config does) and `default_target` (each
-> destination block in `profiles.yml` carries its own `default_target`). A
-> pre-8.B `connector_paths` key is still parsed as a fallback for `source_paths`
-> and `destination_paths` so older project files don't break, but the canonical
-> form is the split.
+> There is no `default_destination` key (a source's `register.yaml` does not
+> declare a destination; a config does) and no top-level `default_target`
+> (each destination block in `profiles.yml` carries its own `default_target`).
+> A legacy `connector_paths` key is still parsed as a fallback for
+> `source_paths` and `destination_paths` so older project files don't break,
+> but the canonical form is the split.
 
 ## `profiles.yml` — per-destination connection params
 
@@ -115,21 +114,19 @@ everything *secret*. **Never committed** — it goes in `.gitignore`, and
 CI/production supply it out of band (mounted file, env-templated, or a secret
 manager).
 
-Stage 8.B made the file **destination-keyed** (dbt-outputs style). Each
-top-level key is the name of a destination connector; under it sits the
-destination's `default_target` and a `targets:` map of named-environment
-connection params. A parallel top-level `profiles:` block, keyed by target name,
-carries source-secret rows so `${profile.<block>.<key>}` refs still resolve
-under the locked two-resolver-form contract (chapter 03 §2.5).
+The file is **destination-keyed** (dbt-outputs style). Each top-level key is
+the name of a destination connector; under it sits the destination's
+`default_target` and a `targets:` map of named-environment connection
+params. A parallel top-level `profiles:` block, keyed by target name, carries
+source-secret rows so `${profile.<block>.<key>}` refs resolve (chapter 03 §2.5).
 
 ```yaml
 # profiles.yml  --  NOT committed to version control
 
-# Project-wide pipeline-level concurrency budget (stage 8e). Default 1
-# (sequential — opt in to parallelism). dbt's `threads:` knob, same
-# semantics. Honored by `det run --tag <T>`; each destination's
-# @destination.max_concurrent_writes hook caps further. See chapter 02
-# §Concurrency model + chapter 07 §`--threads`.
+# Project-wide pipeline-level concurrency budget. Default 1 (sequential —
+# opt in to parallelism). dbt's `threads:` knob, same semantics. Honoured
+# by `det run --tag <T>`; each destination's @destination.max_concurrent_writes
+# hook caps further. See chapter 02 §Concurrency model + chapter 07 §`--threads`.
 threads: 4
 
 # The pre-baked DuckDB destination. `path` is the .duckdb file location.
@@ -173,14 +170,14 @@ profiles:
 
 | Top-level key | Type | Purpose |
 |---|---|---|
-| `threads` (stage 8e) | positive integer | Pipeline-level concurrency budget for `det run --tag`. Default 1. Each destination's `@destination.max_concurrent_writes` caps further. dbt-style. |
+| `threads` | positive integer | Pipeline-level concurrency budget for `det run --tag`. Default 1. Each destination's `@destination.max_concurrent_writes` caps further. dbt-style. |
 | `<destination name>` | mapping with `targets:` (+ optional `default_target:`) | One block per destination connector. The block's `targets.<name>` rows supply the destination's connection params for each named environment. |
 | `profiles` | map[string → map[string → map]] | Per-target source-secret blocks. `profiles.<target>.<block>.<key>` is what `${profile.<block>.<key>}` resolves to (after the engine picks the active target from the config). |
 
 Values may embed `${env.VAR}` so the file itself stays free of literal secrets —
 the recommended pattern for `prod`.
 
-### Why DuckDB clamps to 1 thread (stage 8e)
+### Why DuckDB clamps to 1 thread
 
 A `.duckdb` database file is protected by a single OS-level file lock —
 two writer connections on the same file at the same time would corrupt
@@ -303,10 +300,10 @@ profiles.yml
 det init acme_el
 ```
 
-Scaffolds the tree above: `det_project.yml` with the post-8.B keys,
-`profiles.yml` template (destination-keyed) with a single `duckdb`/`dev`
-target, empty `sources/` and `destinations/` folders, a `configs/` folder
-seeded with one `example.yml` stub, and the `.gitignore`. From there:
+Scaffolds the tree above: `det_project.yml`, a destination-keyed
+`profiles.yml` template with a single `duckdb`/`dev` target, empty
+`sources/` and `destinations/` folders, a `configs/` folder seeded with one
+`example.yml` stub, and the `.gitignore`. From there:
 
 ```bash
 det new source shiphero        # scaffold a custom source folder

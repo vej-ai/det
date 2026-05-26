@@ -113,7 +113,7 @@ The logical schema (destination-agnostic):
 
 ### 4.3 Tier-A only, for now
 
-`_det_runs` is hosted by the destination, in the same store as `_det_state` and the loaded data — so "show me every failed `echo_dev` run this week" is one `SELECT`. v1 ships DuckDB (declares `Capability.RUN_RECORDS`); BigQuery follows in stage 8b. A destination that does NOT declare the capability is fully valid — the engine simply skips the table write and the JSONL log file remains the durable record.
+`_det_runs` is hosted by the destination, in the same store as `_det_state` and the loaded data — so "show me every failed `echo_dev` run this week" is one `SELECT`. Both baked destinations (DuckDB and BigQuery) declare `Capability.RUN_RECORDS`. A destination that does NOT declare the capability is fully valid — the engine simply skips the table write and the JSONL log file remains the durable record.
 
 A destination that *does* declare `Capability.RUN_RECORDS` but does not implement `@destination.write_run_record` is rejected at run start with a clear `EngineError` — same conditional-mandatory pattern as `@destination.transaction` under `Capability.TRANSACTIONAL_LOAD` (see [05 §1](./05-destinations-and-state.md)).
 
@@ -146,7 +146,7 @@ Show recent runs from the destination's `_det_runs`. `-p <config>` is **required
 
 Show one run's full record + every event in its `.det/logs/<run_id>/run.jsonl`. Accepts the short id (`abc123def...`) or the long form (`run-abc123def...`). On a TTY, events are colored by type; piped output is plain.
 
-Both commands open the destination via its own `@destination.open` / `@destination.close` hooks (same pattern as `det state list`) and run a parameterized `SELECT` on the connection. Like `det state reset`, this reaches past the destination hook contract — there is no `read_run_records` hook in v1, and SQL-direct querying is the v1 limitation. DuckDB is the only Tier-A destination shipping v1 with `Capability.RUN_RECORDS`; future Tier-A destinations follow the same pattern (the table is the contract; the implementation hands back rows the CLI shape).
+Both commands open the destination via its own `@destination.open` / `@destination.close` hooks (same pattern as `det state list`) and run a parameterized `SELECT` on the connection. Like `det state reset`, this reaches past the destination hook contract — there is no `read_run_records` hook in v1, and SQL-direct querying is the v1 limitation. The two baked Tier-A destinations (DuckDB and BigQuery) both declare `Capability.RUN_RECORDS`; future Tier-A destinations follow the same pattern (the table is the contract; the implementation hands back rows the CLI shapes).
 
 ---
 

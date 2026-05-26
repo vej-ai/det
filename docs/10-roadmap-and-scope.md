@@ -12,22 +12,23 @@ v1 is the smallest thing that is genuinely useful in production: a dbt-style CLI
 
 **v1 ships:**
 
-- **Core engine** — connector discovery, the `@stream` / `@resource` / `@destination` contract, incremental state, write dispositions, additive schema evolution. ([03](./03-connector-contract.md), [04](./04-connector-body.md), [05](./05-destinations-and-state.md))
-- **CLI** — `init`, `new connector`, `list`, `test`, `run`, `state`. Synchronous, scriptable exit codes. ([07](./07-cli-and-library-api.md))
-- **Python library** — `load_project()`, `project.run()`, `RunResult`. CLI and library are the same engine. ([07](./07-cli-and-library-api.md))
-- **~3 pre-baked source connectors** — a small, high-value, well-tested set. Likely a database source (Postgres CDC/replication), a SaaS API (Stripe), and a flat-file source (filesystem CSV/Parquet/JSONL). [Open question: exact three depends on what early users actually need — to be fixed before the v1 freeze, not guessed now.]
-- **2 pre-baked destinations** — **DuckDB** (zero-config local dev, the default `dev` target) and **BigQuery** (the first production warehouse). ([05 §2](./05-destinations-and-state.md))
+- **Core engine** — connector discovery, the `@stream` / `@resource` / `@destination` contract, incremental state, write dispositions, additive schema evolution (with `strict` opt-in). ([03](./03-connector-contract.md), [04](./04-connector-body.md), [05](./05-destinations-and-state.md))
+- **CLI** — `init`, `new {source,destination,config}`, `list`, `validate`, `run` (with `-p` and `--tag`), `state`, `runs`, `secrets test`. Synchronous, scriptable exit codes. ([07](./07-cli-and-library-api.md))
+- **Python library** — `det.run()`, `det.run_tag()`, `RunResult`. CLI and library are the same engine. ([07](./07-cli-and-library-api.md))
+- **5 baked source connectors** — `filesystem` (CSV/JSONL/Parquet from local, GCS, or S3), `rest` (paginated REST APIs — 4 pagination strategies, 4 auth modes), `postgres` (keyset pagination, no `OFFSET`), `shiphero` (GraphQL), `stripe` (resource-as-stream over the REST API).
+- **2 baked destinations** — **DuckDB** (zero-config local dev, the default `dev` target) and **BigQuery** (production warehouse, Parquet-staged via GCS + LOAD jobs, MERGE upserts, smart cursor-based partitioning). ([05 §2](./05-destinations-and-state.md))
 - **State in the destination** — `_det_state` table; sidecar JSON for the (single) Tier-B path. ([05 §5](./05-destinations-and-state.md))
-- **Structured logging + run records** — per-run JSON-lines logs, `_det_runs` table. ([09](./09-logging-and-observability.md))
-- **Security baseline** — `profiles.yml`, `${ENV_VAR}` interpolation, redaction, `.gitignore` defaults, an honest trust model. ([08](./08-security.md))
+- **Structured logging + run records** — per-run JSON-lines logs, `_det_runs` table on both baked destinations. ([09](./09-logging-and-observability.md))
+- **Security baseline + 3 secret-manager resolvers** — `profiles.yml`, `${env.X}` / `${profile.X.Y}` interpolation, `secret://` URL plugin surface, GCP Secret Manager / AWS Secrets Manager / HashiCorp Vault adapters (each as an opt-in extra), log redaction, `.gitignore` defaults, an honest trust model. ([08](./08-security.md))
+- **Pipeline-level parallelism** — `det run --tag <T> --threads N` runs matched configs concurrently, with per-destination caps (DuckDB clamps to 1, BigQuery defaults to 10). ([02 §Concurrency](./02-architecture.md))
 
 **v1 explicitly does NOT include:**
 
 - **No UI.** None. The whole "not Airbyte" thesis is no blackbox; the UI is deferred until the CLI/library are proven (§2, v3).
 - **No orchestrator adapters.** det runs *under* an orchestrator via the plain library API; no `dagster-det` package yet.
-- **No secret-manager resolvers.** `${ENV_VAR}` only; the `SecretResolver` interface exists but GCP/AWS/Vault land in v2. ([08 §3](./08-security.md))
 - **No connector sandboxing.** Connectors run in-process as trusted code. ([08 §7](./08-security.md))
-- **No streaming/iterator library API, no per-batch state commit, no merge-on-object-storage.** All flagged as open questions in [05](./05-destinations-and-state.md) / [07](./07-cli-and-library-api.md); none are v1.
+- **No CDC / log-based replication.** Cursor-based incremental only. ([Q5](./11-open-questions.md))
+- **No streaming/iterator library API, no per-batch state commit, no stream-level parallelism, no merge-on-object-storage.** All deferred — see [chapter 11](./11-open-questions.md).
 
 The test of v1: a senior data engineer can `pip install det`, `det init`, write or pick a connector, and have an incremental BigQuery pipeline running under cron or Dagster the same afternoon — with no UI and no surprises.
 
@@ -45,16 +46,16 @@ Once the core is proven, widen it — without changing the contract:
 
 - **More destinations** — Snowflake, ClickHouse, Postgres, the GCS/S3 filesystem destination, generic SQLAlchemy. The capability-tier model ([05 §2](./05-destinations-and-state.md)) was designed for exactly this; adding a destination is adding a connector, not changing the engine.
 - **More source connectors** — driven by community contribution and demand.
-- **Orchestrator integration** — an official thin `dagster-det` helper (assets/ops wrapping `project.run()`), and documented Airflow/Prefect patterns. The library API is already orchestrator-ready ([07 §4.3](./07-cli-and-library-api.md)); this is convenience, not capability.
-- **Schema evolution, expanded** — opt-in `schema_contract: strict` per stream, type-widening across more destinations, clearer migration errors. ([05 §3.2](./05-destinations-and-state.md))
-- **Secret-manager resolvers** — GCP Secret Manager, AWS Secrets Manager, Vault, via the v1 `SecretResolver` protocol. ([08 §3](./08-security.md))
+- **Orchestrator integration** — an official thin `dagster-det` helper (assets/ops wrapping `det.run()`), and documented Airflow/Prefect patterns. The library API is already orchestrator-ready ([07 §4.2](./07-cli-and-library-api.md)); this is convenience, not capability.
+- **CDC** — log-based replication for the `postgres` source (and similar). ([Q5](./11-open-questions.md))
+- **Schema evolution, expanded** — type-widening across more destinations, clearer migration errors.
 - **Pluggable state backends** — a real Postgres/DynamoDB `StateBackend` for concurrency-safe Tier-B state. ([05 §5.4](./05-destinations-and-state.md))
-- **Quality-of-life** — `det logs <run_id>`, log retention flags, possibly opt-in per-batch state commit.
+- **Quality-of-life** — log retention flags (`--keep-logs N`), opt-in per-batch state commit for large backfills ([Q7b](./11-open-questions.md)), stream-level parallelism within one pipeline.
 
 ### v3 — UI and ecosystem
 
-- **A UI** — a *reader* over the data det already writes (`_det_runs`, `_det_state`, `run.jsonl`): run history, stream health, state inspection, log drill-down. It deliberately does not become a connector-authoring blackbox — connectors stay as folders of Python. **Hosting model is TBD** [Open question: a local `det ui` that serves from `.det/` and the destination, vs. a deployable service, vs. both. The local-first option keeps the self-hosted, no-backend promise intact and is the current preference.]
-- **Connector registry / marketplace** — a discoverable index of community connectors, with signing and checksum-pinning so audited code is the code that runs ([08 §7](./08-security.md)). [Open question: a curated, reviewed registry vs. an open index — curation builds trust but adds maintainer burden; an open index scales but pushes auditing onto users. Likely a curated "verified" tier over an open index.]
+- **A UI** — a *reader* over the data det already writes (`_det_runs`, `_det_state`, `run.jsonl`): run history, stream health, state inspection, log drill-down. It deliberately does not become a connector-authoring blackbox — connectors stay as folders of Python. Hosting model is open — local-first vs. deployable service — see [chapter 11 Q14](./11-open-questions.md).
+- **Connector registry / marketplace** — a discoverable index of community connectors, with signing and checksum-pinning so audited code is the code that runs ([08 §7](./08-security.md)). Curated vs. open is still open — see [chapter 11 Q15](./11-open-questions.md).
 - **Possible managed/hosted offering** — out of scope for the open-source roadmap; noted only so the architecture does not foreclose it.
 
 Roadmap ordering is a hypothesis, not a contract. v2's exact connector set follows real usage.
@@ -63,9 +64,9 @@ Roadmap ordering is a hypothesis, not a contract. v2's exact connector set follo
 
 ## 3. Open-source release considerations
 
-- **License** — a permissive license (Apache-2.0 preferred for its explicit patent grant) to maximize adoption and let connectors be freely shared and embedded. [Open question: Apache-2.0 vs. MIT — Apache-2.0 is the recommendation; confirm with whatever governance the project adopts.]
-- **Repository structure** — a single repo: the `det` engine package, the pre-baked connectors under `det/connectors/`, the docs in `docs/` (this handbook), and an `examples/` project. One repo keeps the engine and its baked connectors versioned together and contribution friction low. Community connectors live in their own repos (and, later, the registry).
-- **Contribution model for connectors** — the connector contract ([03](./03-connector-contract.md)) is the public API. A connector is a folder; contributing one is a small, reviewable PR or an independently published package. A connector template (`det new connector`) and a connector test harness (`det test`) make a contribution self-validating before review.
+- **License** — **Apache-2.0**. The explicit patent grant is the safer choice for a tool meant to be embedded and have connectors freely shared. See [LICENSE](../LICENSE).
+- **Repository structure** — a single repo: the `det` engine package, the baked sources under `det/sources/` and baked destinations under `det/destinations/`, the docs in `docs/` (this handbook). One repo keeps the engine and its baked connectors versioned together and contribution friction low. Community connectors live in their own repos (and, later, the registry).
+- **Contribution model for connectors** — the connector contract ([03](./03-connector-contract.md)) is the public API. A connector is a folder; contributing one is a small, reviewable PR or an independently published package. The scaffolding commands (`det new source`, `det new destination`) and `det validate` make a contribution self-validating before review.
 - **Registry / marketplace** — see v3. The near-term path is a curated list in the docs; the registry is the scaled version once enough connectors exist to warrant it.
 - **Governance** — start owner-led with clear `CONTRIBUTING.md` and a connector style guide; formalize only if the contributor base grows enough to need it. Do not build governance ceremony ahead of the community that needs it.
 

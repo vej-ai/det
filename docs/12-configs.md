@@ -9,7 +9,7 @@ A **config** is the runtime unit of det. One config = one pipeline. It names:
 - optionally, the **streams** to run (a subset of the source's declared streams),
 - optionally, a **schedule** (advisory — surfaced to an external scheduler, the engine itself never acts on it).
 
-Before stage 8.B, a connector was the runtime unit and the source's `register.yaml` named the destination. That collapsed the moment the same source needed two pipelines (dev + prod, one DuckDB + one BigQuery, etc.). Configs fix it: the source describes *what it can extract*, the destination describes *what it can write to*, and a config picks one of each and runs them as a pipeline.
+A config separates *what a source can extract* (the source's `register.yaml`) and *what a destination can write to* (the destination's `register.yaml`) from *how this pipeline pairs them*. The same source can feed two pipelines (dev + prod, one DuckDB + one BigQuery, etc.) without forking the connector.
 
 ## 1. The file shape
 
@@ -207,7 +207,7 @@ This is intentional: a `shiphero_dev` and a `shiphero_prod` config pointing at t
 | `det.engine.configs.discover_configs(project_root, config_paths)` | Walks each `config_paths` dir, parses every `*.yml`/`*.yaml`, returns `{name: PipelineConfig}`. Hard-errors on duplicate names. |
 | `det.engine.configs.load_config(name, project_root, config_paths)` | Returns the named `PipelineConfig` or raises a clear `ConfigError` listing the configs the project does define. |
 
-The engine calls `load_config` in stage 1 (DISCOVER) of the run lifecycle (docs/02).
+The engine calls `load_config` in step 1 (DISCOVER) of the run lifecycle (docs/02).
 
 ## 8. The runtime type
 

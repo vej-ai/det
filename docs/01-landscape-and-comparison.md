@@ -1,7 +1,7 @@
 # 01 — Landscape & Comparison
 
 > Part of the **det** design handbook. This file surveys the existing EL
-> tools, scores each against the *det test* defined in File 00 (five-minute
+> tools, scores each against the *simplicity test* defined in File 00 (five-minute
 > readability, concept count, "could plain Python do it"), and ends with an
 > honest accounting of what det steals and what it rejects.
 
@@ -158,7 +158,7 @@ sophistication than dlt.
 | **Selection model** | Code | UI toggles | UI toggles | `catalog.json` | YAML wildcards | **Configs + `--tag` selection** |
 | **Invocation** | `pipeline.run()` | Scheduler/UI | Managed schedule | `meltano run` | `sling run -r` | `det run` / `import` |
 | **Open source** | Yes | Yes (+ paid cloud) | No | Yes | Core yes | **Yes** |
-| **Passes the det test** | Mostly | No (YAML logic, blackbox UI) | No (closed SaaS) | Partly (protocol tax) | Mostly (but no authoring) | — (by construction) |
+| **Passes the simplicity test** | Mostly | No (YAML logic, blackbox UI) | No (closed SaaS) | Partly (protocol tax) | Mostly (but no authoring) | — (by construction) |
 
 ## What det steals — and what it rejects
 

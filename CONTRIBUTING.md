@@ -44,8 +44,7 @@ Worked examples already in the tree:
 
 - `det/types.py::StateRecord` defines the canonical `_det_state` schema
   (docs/03 §3.5 and docs/05 §5.1 follow it).
-- **Configs are the runtime unit** (stage 8.B). The CLI's `-p / --conf` arg
-  and `det.run(config=...)` library entry point both take a *config name* —
-  the source-alone selector is gone. Documents `06`, `07`, and the new `12`
-  follow this; older sections that still refer to "running a connector"
-  carry `# NOTE:` comments calling out the post-8.B reality.
+- **Configs are the runtime unit.** The CLI's `-p / --conf` arg and
+  `det.run(config=...)` library entry point both take a *config name* —
+  there is no source-alone selector. Documents `06`, `07`, and `12` follow
+  this.

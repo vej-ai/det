@@ -77,10 +77,10 @@ For local development, det auto-loads a gitignored `.env` file from the project 
 
 Environment variables are the v1 baseline. They are simple and universal, but they put plaintext secrets in the process environment and in CI settings. Teams with stricter requirements want secrets fetched **at run time** from a manager. det supports this with a typed reference syntax and a pluggable resolver.
 
-A `secrets[].ref` value in a connector's `register.yaml` may be a **secret reference** in one of three forms (the original two `${...}` forms PLUS the pluggable URL form, locked at stage 9a):
+A `secrets[].ref` value in a connector's `register.yaml` may be a **secret reference** in one of three forms — the two `${...}` forms (env, profile) and the pluggable `secret://` URL form:
 
 ```yaml
-# Pluggable secret-manager URL (stage 9a)
+# Pluggable secret-manager URL
 prod:
   api_key:     secret://gcp-secret-manager/projects/my-proj/secrets/stripe-key/versions/latest
   credentials: secret://vault/secret/data/warehouse#service_account
@@ -94,16 +94,16 @@ class SecretResolver(Protocol):
     def resolve(self, path: str, field: str | None) -> str: ...
 ```
 
-**Stage 9a ships the core (the `SecretResolver` Protocol, URL parsing, the plugin registry); no live cloud resolver is built in.** A live GCP / AWS / Vault resolver is delivered either by a third-party package (entry-point registration) or by a project-local `det_plugins.py` (see below).
+The det engine ships the core (the `SecretResolver` Protocol, URL parsing, the plugin registry) plus three production resolvers — **GCP Secret Manager**, **AWS Secrets Manager**, and **HashiCorp Vault** — each delivered as an opt-in extra (`pip install 'det[gcp-secrets]' / '[aws-secrets]' / '[vault]'`). Custom resolvers register either as a third-party package via entry-points or as a project-local `det_plugins.py` (see below).
 
-| Resolver | Scheme | Status |
+| Resolver | Scheme | Form |
 |---|---|---|
-| Environment variables | `${env.X}` (built-in syntax) | **v1** |
-| Profiles.yml lookup | `${profile.X.Y}` (built-in syntax) | **v1** |
-| `secret://` plugin surface | `secret://<scheme>/...` (protocol + parser) | **v1 (stage 9a)** |
-| GCP Secret Manager | `secret://gcp-secret-manager/projects/<p>/secrets/<n>/versions/<v>` (plugin) | **v1 (stage 9b)** |
-| AWS Secrets Manager | `secret://aws-secrets-manager/<region>/<secret-id>[:<version-stage>][#<json-field>]` (plugin) | **v1 (stage 9c)** |
-| HashiCorp Vault | `secret://vault/<mount-path>/<kv-path>#<field>` (plugin) | **v1 (stage 9c)** |
+| Environment variables | `${env.X}` | built-in syntax |
+| Profiles.yml lookup | `${profile.X.Y}` | built-in syntax |
+| `secret://` plugin surface | `secret://<scheme>/...` | protocol + parser |
+| GCP Secret Manager | `secret://gcp-secret-manager/projects/<p>/secrets/<n>/versions/<v>` | plugin (`det[gcp-secrets]`) |
+| AWS Secrets Manager | `secret://aws-secrets-manager/<region>/<secret-id>[:<version-stage>][#<json-field>]` | plugin (`det[aws-secrets]`) |
+| HashiCorp Vault | `secret://vault/<mount-path>/<kv-path>#<field>` | plugin (`det[vault]`) |
 
 ### GCP Secret Manager — setup
 
@@ -213,7 +213,7 @@ Authentication is **token-based only in v1**: the resolver reads `VAULT_ADDR` an
 
 The `SecretResolver` protocol and `secret://` parsing exist so a manager can be added as a small package or a project-local plugin **without an engine change** — the same extensibility philosophy as the `StateBackend` in [05](./05-destinations-and-state.md). Resolved secret values are held only in memory for the duration of the run and are subject to the redaction rules in §6.
 
-> Resolved-secret caching (Q11) is deferred: stage 9a commits to **fresh-every-run** (no on-disk cache). The per-process resolver INSTANCE is cached after first use (a GCP SDK init only runs once), but the per-reference value is re-fetched on every run.
+> Resolved-secret caching is deferred — det runs **fresh-every-run** (no on-disk cache). The per-process resolver instance is cached after first use (an SDK init only runs once per process), but every reference value is re-fetched on every run. See [chapter 11 Q11](./11-open-questions.md).
 
 ### Writing a custom resolver
 
@@ -301,7 +301,7 @@ A secrets file readable by every user on the host is a leak. On creation (`det i
 - World- or group-readable (`o+r` / `g+r`) → a `[warn]` log line: *"profiles.yml is readable by other users — run `chmod 600 profiles.yml`."*
 - This is a warning, not a hard failure: in some container setups the file is mounted read-only with broader bits and the operator has accepted that. det informs; the operator decides.
 
-The same `0600` expectation applies to `.env` and to any on-disk state that could contain a resolved secret. det never writes resolved secret *values* to disk (see §3 open question).
+The same `0600` expectation applies to `.env` and to any on-disk state that could contain a resolved secret. det never writes resolved secret *values* to disk (see [chapter 11 Q11](./11-open-questions.md)).
 
 ---
 
@@ -334,7 +334,11 @@ det imports and executes `@stream` / `@destination` functions in-process. A comm
 4. **Least-privilege credentials.** The strongest practical mitigation, and operator-side: give each connector a credential scoped to exactly what it needs (a read-only API token, a warehouse role that can write only its own dataset). If a connector is malicious, the blast radius is that credential. det's per-connector config makes this natural — every connector has its own credential block.
 5. **Signed connector registry (v3).** If a public connector registry/marketplace materializes (see [10 — Roadmap](./10-roadmap-and-scope.md)), connectors would be signed and checksum-pinned, so what you audited is what you run. This is a future feature, not a v1 promise.
 
-> [Open question: is opt-in subprocess isolation worth building for v2 — run each connector in a child process with a restricted environment (scrubbed env vars, no `profiles.yml` access, only its own resolved config passed in)? It would not stop a determined attacker but would contain accidents and reduce blast radius. It costs IPC complexity and breaks the in-process simplicity. Proposal: prototype after v1; decide based on whether a real community-connector ecosystem emerges.]
+Whether opt-in subprocess isolation is worth building (run each connector in
+a child process with a restricted environment) is a v2 question. It would
+not stop a determined attacker but would contain accidents and reduce blast
+radius, at the cost of IPC complexity and the in-process simplicity. See
+[chapter 11 Q12](./11-open-questions.md).
 
 **Bottom line for the operator:** treat a det connector exactly as you treat any third-party Python dependency. Pin versions, read the code of anything you did not write, scope every credential to least privilege, and prefer the pre-baked connectors when they exist.
 

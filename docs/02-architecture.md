@@ -45,10 +45,6 @@ The CLI and the library are **the same engine** with two front doors. `det
 run` parses argv and calls the same `run()` the library exposes. Nothing the CLI
 can do is unavailable to the library, and vice versa.
 
-> [Open question: project config filename. `det_project.yml` is proposed
-> for symmetry with dbt's `dbt_project.yml`; a shorter `det.yml` is the
-> alternative. Pick one before v1 and never alias.]
-
 ## Connector resolution: baked vs custom
 
 A connector is named, not pathed. The engine resolves a name by precedence:
@@ -96,7 +92,7 @@ The runtime unit is a **config** (chapter 12) — a pipeline file under
   └─────────────────────────────────────────────────────────────────┘
 ```
 
-Stages 1–4 are setup; stage 5 is the real work; stage 6 is the audit trail.
+Steps 1–4 are setup; step 5 is the real work; step 6 is the audit trail.
 
 - **Discover** — find the project root (walk up for `det_project.yml`),
   load `configs/` and look up the named config, resolve its source +
@@ -123,9 +119,8 @@ State is committed **per stream** (step 5d), immediately after that stream's dat
 is durably written — not once at the end. If stream 7 of 10 fails, streams 1–6
 keep their advanced cursors and the next run resumes mid-job. This favors
 **crash-safety over whole-run atomicity**, the right trade for synchronous EL.
-
-> [Open question: a `--atomic` flag could defer all cursor commits to step 6 for
-> users who want all-or-nothing semantics. Default stays per-stream.]
+A whole-run `--atomic` mode is a deferred opt-in — see
+[chapter 11 Q7](./11-open-questions.md).
 
 ## The extract → normalize → load pipeline
 
@@ -147,10 +142,10 @@ the reason memory stays bounded.
 - **Normalize.** The engine reconciles each batch against the stream's schema and
   coerces values to the destination's type system. When a stream declares an
   explicit `schema` in `register.yaml` — the **recommended default**, and what
-  the ShipHero proof case does — that schema is authoritative. When `schema` is
-  omitted, the engine infers it from the first batch and evolves it additively as
-  later batches introduce new columns or wider types (a convenience for
-  prototyping; see chapter 03 §2.2.1).
+  the baked ShipHero connector does — that schema is authoritative. When `schema`
+  is omitted, the engine infers it from the first batch and evolves it
+  additively as later batches introduce new columns or wider types (a
+  convenience for prototyping; see chapter 03 §2.2.1).
 - **Load.** The normalized batch is handed to the destination connector, which
   appends/merges/replaces per the configured write disposition.
 
@@ -179,7 +174,7 @@ generators; both are pulled the same way. (Their full contract — signature,
 `register.yaml` declaration, the class escape hatch — is owned by the connector
 handbook.)
 
-## Pipeline selection — by config name or config tag (post-8d)
+## Pipeline selection — by config name or config tag
 
 det selects work by **pipeline config**:
 
@@ -210,15 +205,11 @@ is by exact match (no glob/regex). The library equivalent is
 `det.run_tag(tag, ...)` — returns a `list[RunResult]` so the caller decides
 overall outcome.
 
-> # NOTE: pre-8.B det supported `-c <connector>` and `--tag <tag>` on
-> connectors. Stage 8.B removed both because a connector alone is not a
-> complete runtime unit (no destination, no target). Stage 8d brought
-> `--tag` back, but on **configs** — the runtime unit — instead of on
-> connectors. The `tags:` key on a source/destination's `register.yaml`
-> is still parsed (it shows up in `det list` and `det list --tag` for
-> catalog filtering) but it does NOT drive `det run --tag`. Clean
-> separation: source/destination tags = "what this connector IS"; config
-> tags = "how/when to run this pipeline".
+The `tags:` key on a source's or destination's `register.yaml` is its
+own namespace — it shows up in `det list` and `det list --tag` for catalog
+filtering, but does NOT drive `det run --tag`. Clean separation:
+source/destination tags describe what the connector *is*; config tags
+describe *how and when* to run a pipeline.
 
 ## Destination capability tiers
 
@@ -244,16 +235,16 @@ det's concurrency stance is deliberately minimal — concurrency is the most
 reliable place for an EL tool to acquire bugs, so v1 spends its complexity budget
 elsewhere.
 
-- **Across pipelines: opt-in parallel** (stage 8e). `det run --tag <T>` may
-  run matched configs concurrently via a `ThreadPoolExecutor` sized by
-  `profiles.yml`'s top-level `threads:` (default 1, dbt-style) or the
-  `--threads N` CLI override. Each destination declares a per-destination
-  cap via the optional `@destination.max_concurrent_writes` hook; the
-  engine enforces `min(threads, per-destination cap)` via per-destination
-  semaphores. DuckDB returns 1 (file lock); BigQuery returns 10 (default;
-  overridable per-target). A `det run -p X` single-config invocation is
-  unaffected — the parallel path only fires for the multi-config `--tag`
-  surface. See chapter 06 §`threads:` and chapter 07 §`--threads`.
+- **Across pipelines: opt-in parallel.** `det run --tag <T>` may run matched
+  configs concurrently via a `ThreadPoolExecutor` sized by `profiles.yml`'s
+  top-level `threads:` (default 1, dbt-style) or the `--threads N` CLI
+  override. Each destination declares a per-destination cap via the
+  optional `@destination.max_concurrent_writes` hook; the engine enforces
+  `min(threads, per-destination cap)` via per-destination semaphores. DuckDB
+  returns 1 (file lock); BigQuery returns 10 (default; overridable
+  per-target). A `det run -p X` single-config invocation is unaffected — the
+  parallel path only fires for the multi-config `--tag` surface. See
+  chapter 06 §`threads:` and chapter 07 §`--threads`.
 - **Across streams: sequential.** Streams within one pipeline still run
   one at a time, in declared order — pipeline-level parallelism does not
   imply stream-level parallelism. Per-stream commit (above) already gives
@@ -269,16 +260,16 @@ elsewhere.
   1. **Independent streams in parallel within one pipeline** — streams
      touch disjoint cursors and (usually) disjoint tables, so a worker
      pool is natural. Needs a concurrency cap and per-destination
-     connection limits — both already present at the pipeline level
-     (stage 8e), so the extension is mostly engine-side.
+     connection limits — both already present at the pipeline level, so the
+     extension is mostly engine-side.
   2. **Partitioned extract within one stream** — e.g. a date-ranged backfill
      split into sub-ranges. Requires the connector to declare partitionability.
 
   Both are additive: they change *how fast* step 5 runs, never the lifecycle or
-  the contract. Pipeline-level parallelism shipped in stage 8e; stream-level
-  remains deferred.
+  the contract. Pipeline-level parallelism ships in v1; stream-level
+  parallelism is deferred.
 
-### Per-destination concurrency cap (stage 8e)
+### Per-destination concurrency cap
 
 Each destination is its own concurrency story. DuckDB's file lock can't
 host two writers; BigQuery's per-project load-job quota tolerates ~50

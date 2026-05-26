@@ -1,3 +1,5 @@
+> Archived: research note that informed the Stripe connector design. Kept for historical context; not user documentation.
+
 # Stripe Connector — Research & Design Note
 
 **Status:** Research complete · **Date:** 2026-05-22 · **Audience:** det connector authors

@@ -25,10 +25,11 @@ The relationship in one sentence:
 
 Note the asymmetry that the symmetric *contract* hides: source and destination
 are **separate connectors**, each its own folder. They are never two halves of
-one connector. The `destination:` binding in a source's `register.yaml` (chapter
-03 §2.3) is the only link between them, and it is a name, not an import. This
-keeps a source reusable across destinations and a destination reusable across
-sources — the dbt-style decoupling.
+one connector. The link between them is a **pipeline config** (chapter 12) —
+a small YAML file that names one source + one destination + one target +
+params. It is a name-binding, not an import. This keeps a source reusable
+across destinations and a destination reusable across sources — the dbt-style
+decoupling.
 
 ## Recommended file layout
 
@@ -54,14 +55,14 @@ Guidance on the split:
   the *only* Python file. It is the file a reader opens first.
 - **`client.py`** holds everything about *talking to the API* — token refresh,
   HTTP/GraphQL calls, retry/backoff, rate-limit handling. It has **no
-  decorators**: it is an ordinary module. In the ShipHero proof case, this is
-  `refresh_access_token`, `execute_graphql`, and the retry loop.
+  decorators**: it is an ordinary module. In the baked ShipHero connector,
+  this is `refresh_access_token`, `execute_graphql`, and the retry loop.
 - **`streams.py`** exists only when one file of `@stream` functions becomes hard
   to scan. Splitting is by readability, not by rule.
 - **`schema.py`** holds shaping logic: turning a raw API payload into the flat
   record dict the declared `schema` expects (extracting `node` from GraphQL
-  edges, navigating `field_path`, coercing types). In the proof case this is
-  `extract_records` and the field-path walk.
+  edges, navigating `field_path`, coercing types). In the baked ShipHero
+  connector, this is `extract_records` and the field-path walk.
 
 A connector author should be able to delete `streams.py` and `schema.py` and
 fold their contents into `source.py` with no behavior change. They are
@@ -80,8 +81,8 @@ bigquery/
 - **`destination.py`** holds the `@destination` hooks (`open`, `write_batch`,
   `ensure_schema`, `commit_state`/`read_state`, `close` — see chapter 03 §3.4).
 - **`ddl.py`** holds create-table / add-column / partitioning logic — the
-  destination-shaped concern. In the proof case this is `ensure_tables_exist`
-  and `get_bq_schema`.
+  destination-shaped concern. In the baked BigQuery destination, this is
+  `ensure_tables_exist` and `get_bq_schema`.
 
 A destination's `register.yaml` uses the **same manifest format** as a source —
 it just sets `kind: destination`, declares no `streams`, and exposes the
@@ -96,7 +97,7 @@ summary: Loads batches into Google BigQuery (MERGE / append / replace).
 tags: [warehouse, gcp]
 
 params:
-  dataset:  {type: string, required: true}   # set by the source's destination: binding
+  dataset:  {type: string, required: true}   # supplied per-pipeline via a config
   location: {type: string, default: "US"}
 
 secrets:
@@ -104,10 +105,11 @@ secrets:
     ref: ${profile.bigquery.credentials_file}
 ```
 
-The `dataset` param is supplied per-source via the `destination:` binding
-(chapter 03 §2.3); `location` and `credentials_file` come from the active
-target's `profiles.yml` (chapter 06). The destination connector itself is
-identical across every source and every environment that uses it.
+The `dataset` param is supplied per-pipeline via the active config's
+`destination_params:` block (chapter 12); `location` and `credentials_file`
+come from the active target's `profiles.yml` (chapter 06). The destination
+connector itself is identical across every source and every environment that
+uses it.
 
 ### A combined connector (rare)
 
@@ -162,17 +164,18 @@ The engine's only contributions to a record are:
 
 ### Nested data
 
-The ShipHero v2 proof case stores `shipping_labels` and `line_items` as `JSON`
-columns rather than flattening them into child tables. det supports both:
-declare the column as `type: JSON` to keep nested structure, or shape it flat in
-`schema.py` to spread it across columns. The handbook default is **JSON column
-for nested objects** — it is simplest, matches the proof case, and keeps one
-stream = one table.
+The baked ShipHero connector stores `shipping_labels` and `line_items` as
+`JSON` columns rather than flattening them into child tables. det supports
+both: declare the column as `type: JSON` to keep nested structure, or shape
+it flat in `schema.py` to spread it across columns. The handbook default is
+**JSON column for nested objects** — it is simplest and keeps one stream =
+one table.
 
-> [Open question: should a connector be able to declare a *child stream*
-> (`line_items` as its own table keyed back to `shipments`) declaratively in
-> `register.yaml`, or is "emit a second `@stream`" enough? Current lean: a second
-> `@stream` is enough — child tables are just streams. Avoid a nested-stream DSL.]
+Whether a connector should be able to declare a *child stream* (e.g.
+`line_items` as its own table keyed back to `shipments`) declaratively in
+`register.yaml` is a v2 question — current lean is "a second `@stream` is
+enough; child tables are just streams." See
+[chapter 11 Q4](./11-open-questions.md).
 
 ## How state relates to a stream
 
@@ -190,20 +193,19 @@ body:
 
 Both are scoped **per stream**, keyed `(connector, stream)` in `_det_state`.
 Two streams in one connector have independent state and can be at different
-cursor positions — exactly what the ShipHero per-table `sync_checkpoints` rows
-expressed.
+cursor positions.
 
 ## A complete annotated example connector
 
-A full source connector folder, end to end. This is the ShipHero proof case
-re-expressed in the det body conventions — the same logic as the proof
-`main.py`, reorganized into the recommended layout.
+A full source connector folder, end to end. This is the baked ShipHero
+connector, organized into the recommended layout.
 
 ### `shiphero/register.yaml`
 
 See chapter 03 §2.8 for the full manifest. In brief: `kind: source`, one
-`shipments` stream, `write_disposition: merge` on `primary_key: id`, incremental
-on `created_date` with a `2d` lookback, destination bound to `bigquery`.
+`shipments` stream, `write_disposition: merge` on `primary_key: id`,
+incremental on `created_date` with a `2d` lookback. The destination is named
+by the pipeline config (chapter 12), not in the source manifest.
 
 ### `shiphero/client.py` — the API client (no decorators)
 
@@ -325,24 +327,25 @@ def shipments(config, state, cursor, log):
         yield batch        # final partial batch
 ```
 
-### What maps to what (proof case → det)
+### What lives where
 
-| ShipHero proof `main.py` | det location |
+| Concern | det location |
 |---|---|
-| `config.json` `tables.*` block | `register.yaml` `streams[]` |
-| `config.json` `page_size`, `step_days`, … | `register.yaml` `params` (defaults) |
-| `refresh_access_token`, `execute_graphql` | `client.py` (plain module) |
-| `extract_records`, `field_path` walk | `schema.py` (plain module) |
-| `sync_table` loop | `source.py` `@stream` function |
-| `get_checkpoint` / `save_checkpoint` | the engine, via `cursor` + `_det_state` |
-| `ensure_tables_exist`, `merge_records` | the **bigquery destination** connector |
-| `upsert_records` MERGE-on-`primary_key` | engine resolves `write_disposition: merge` |
+| Per-table extraction config | `register.yaml` `streams[]` |
+| Connector knobs (`page_size`, `step_days`, …) | `register.yaml` `params` (defaults) |
+| API auth & HTTP / GraphQL plumbing | `client.py` (plain module) |
+| Record shaping (`extract_records`, `field_path` walk) | `schema.py` (plain module) |
+| The per-stream extraction loop | `source.py` `@stream` function |
+| Checkpoint read / write | the engine, via `cursor` + `_det_state` |
+| Table creation & MERGE / upsert | the destination connector (e.g. `bigquery`) |
+| Resolving `write_disposition: merge` to SQL | the engine + the destination |
 
-Everything that was *plumbing* in the proof script — checkpoint reads/writes,
-table creation, the MERGE — moves out of the connector and into the engine or
-the destination. What remains in the source body is only what is genuinely
-ShipHero-specific: its query, its pagination, its date-windowing. That is the
-measure of a good connector body.
+Everything that would have been *plumbing* in a hand-rolled script —
+checkpoint reads/writes, table creation, the MERGE — moves out of the
+connector and into the engine or the destination. What remains in the source
+body is only what is genuinely connector-specific: its query, its
+pagination, its date-windowing. That is the measure of a good connector
+body.
 
 ---
 
