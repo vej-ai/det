@@ -1,0 +1,77 @@
+name: CI
+
+# Run the test matrix + lint on every push to main and every PR targeting
+# main. We use `concurrency:` so a stack of pushes to the same branch only
+# burns CI on the latest commit.
+#
+# NOTE: integration tests are gated by env vars (BIGQUERY_TEST_PROJECT,
+# POSTGRES_TEST_URL, DET_GCP_SECRETS_TEST_PROJECT, DET_AWS_SECRETS_TEST_REGION,
+# DET_VAULT_TEST_PATH). CI does NOT set those — the 6 integration tests
+# stay skipped here. The full 633-test unit suite runs.
+#
+# NOTE: we install ALL extras ([dev,gcs,s3,gcp-secrets,aws-secrets,vault])
+# so every test path's imports resolve — the secret-manager unit tests
+# monkeypatch the SDKs but still need the modules importable. The cold
+# install pulls ~250MB of cloud SDKs (~30-45s); with pip cache it's ~5-10s.
+# 3 Python versions on Linux + 1 lint job = 4 parallel jobs, ~3-4 min total.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install detx with all extras
+        run: pip install -e ".[dev,gcs,s3,gcp-secrets,aws-secrets,vault]"
+
+      - name: Run pytest
+        run: pytest -q
+
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install detx with all extras
+        # mypy needs the cloud SDKs importable to type-check the
+        # secret-resolver + cloud-backend modules cleanly.
+        run: pip install -e ".[dev,gcs,s3,gcp-secrets,aws-secrets,vault]"
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: mypy
+        run: mypy detx

@@ -128,6 +128,11 @@ distributed either as a third-party package via the
 (`secret://<scheme>/<path>[#<field>]`) are in
 [docs/08 §3 — Secret references and pluggable secret managers](./docs/08-security.md).
 
+## Releases
+
+See [`docs/_internal/release.md`](./docs/_internal/release.md) for the
+maintainer's release runbook.
+
 ## Issue templates
 
 Use the templates under
