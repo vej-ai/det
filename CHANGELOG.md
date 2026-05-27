@@ -14,6 +14,18 @@ For what is *planned* — versus what has shipped — see
 - GitHub Actions CI: pytest matrix on Python 3.11/3.12/3.13, ruff + mypy lint.
 - PyPI Trusted Publishing workflow triggered by `v*` tags.
 
+## [0.1.1] — 2026-05-27
+
+### Fixed
+- README links rendered as broken on the PyPI project page. PyPI does not
+  resolve relative paths against a base URL the way GitHub does, so the
+  Documentation / Security / Contributing / Code of Conduct / Changelog /
+  LICENSE links pointed at nothing. All converted to absolute
+  `https://github.com/vej-ai/dtex/...` URLs.
+
+No code changes. The 0.1.0 release on PyPI is yanked; install `dtex==0.1.1`
+or later.
+
 ## [0.1.0] — 2026-05-27
 
 The first public release.
@@ -72,5 +84,6 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/vej-ai/dtex/releases/tag/v0.1.1
 [0.1.0]: https://github.com/vej-ai/dtex/releases/tag/v0.1.0

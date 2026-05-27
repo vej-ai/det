@@ -71,20 +71,21 @@ Vault — each as an opt-in extra.
 
 ## Documentation
 
-The full design handbook lives in [`docs/`](./docs/README.md). Start with
-[00 — Vision & Naming](./docs/00-vision-and-naming.md),
-[02 — Architecture](./docs/02-architecture.md),
-[06 — Project Anatomy](./docs/06-project-anatomy.md),
-[12 — Configs](./docs/12-configs.md), and
-[10 — Roadmap and Scope](./docs/10-roadmap-and-scope.md).
+The full design handbook lives in [`docs/`](https://github.com/vej-ai/dtex/tree/main/docs).
+Start with
+[00 — Vision & Naming](https://github.com/vej-ai/dtex/blob/main/docs/00-vision-and-naming.md),
+[02 — Architecture](https://github.com/vej-ai/dtex/blob/main/docs/02-architecture.md),
+[06 — Project Anatomy](https://github.com/vej-ai/dtex/blob/main/docs/06-project-anatomy.md),
+[12 — Configs](https://github.com/vej-ai/dtex/blob/main/docs/12-configs.md), and
+[10 — Roadmap and Scope](https://github.com/vej-ai/dtex/blob/main/docs/10-roadmap-and-scope.md).
 
 ## Security · Contributing · Code of Conduct
 
-- [Security policy](./SECURITY.md) — how to report a vulnerability.
-- [Contributing](./CONTRIBUTING.md) — dev setup, PR process, how to add a connector.
-- [Code of Conduct](./CODE_OF_CONDUCT.md).
-- [Changelog](./CHANGELOG.md).
+- [Security policy](https://github.com/vej-ai/dtex/blob/main/SECURITY.md) — how to report a vulnerability.
+- [Contributing](https://github.com/vej-ai/dtex/blob/main/CONTRIBUTING.md) — dev setup, PR process, how to add a connector.
+- [Code of Conduct](https://github.com/vej-ai/dtex/blob/main/CODE_OF_CONDUCT.md).
+- [Changelog](https://github.com/vej-ai/dtex/blob/main/CHANGELOG.md).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](./LICENSE).
+Apache License 2.0 — see [LICENSE](https://github.com/vej-ai/dtex/blob/main/LICENSE).
