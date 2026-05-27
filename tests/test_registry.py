@@ -65,10 +65,23 @@ def test_public_api_exposes_contract_types() -> None:
 
 
 def test_version_still_exported() -> None:
-    """__version__ survives the public-API wiring."""
+    """__version__ survives the public-API wiring.
+
+    The exact value is intentionally NOT checked: __version__ is now read
+    from importlib.metadata (the installed-package metadata) so a hardcoded
+    test value would drift across every release. The invariant is that the
+    attribute exists, is a non-empty string, and is not the source-tree
+    fallback when running the test against the installed package.
+    """
     import dtex
 
-    assert dtex.__version__ == "0.1.0"
+    assert isinstance(dtex.__version__, str)
+    assert dtex.__version__
+    # The fallback "0.0.0+unknown" fires only when dtex itself is not
+    # installed (e.g. an unbuilt source tree without an `-e` install).
+    # The test suite runs against the editable install, so the real
+    # version should be present.
+    assert dtex.__version__ != "0.0.0+unknown"
 
 
 # ---------------------------------------------------------------------------

@@ -79,7 +79,21 @@ from dtex.types import (
     WriteDisposition,
 )
 
-__version__ = "0.1.0"
+# Source of truth: pyproject.toml's [project] version. Read from the
+# installed-package metadata so a hardcoded mirror cannot drift (which it did
+# in 0.1.0/0.1.1 — `pyproject.toml` was bumped but this string was not, so
+# `dtex --version` lied). importlib.metadata is stdlib in Python 3.11+.
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("dtex")
+except Exception:  # noqa: BLE001 — also covers PackageNotFoundError
+    # Running from an unbuilt source tree where the package isn't installed.
+    # The version is then unknown; fall back to a placeholder so importing
+    # `dtex` doesn't blow up. The hardcoded fallback is acceptable here
+    # because every published wheel/sdist HAS metadata — this branch only
+    # fires in a uniquely broken local dev setup.
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     # Version

@@ -14,6 +14,18 @@ For what is *planned* — versus what has shipped — see
 - GitHub Actions CI: pytest matrix on Python 3.11/3.12/3.13, ruff + mypy lint.
 - PyPI Trusted Publishing workflow triggered by `v*` tags.
 
+## [0.1.2] — 2026-05-27
+
+### Fixed
+- `dtex --version` reported `0.1.0` regardless of the installed version
+  because `dtex/__init__.py` hardcoded the version string and drifted from
+  `pyproject.toml`'s `[project] version`. `__version__` is now read from
+  the installed-package metadata via `importlib.metadata` — one source of
+  truth, no drift possible.
+
+The 0.1.1 release on PyPI is yanked alongside 0.1.0; install `dtex==0.1.2`
+or later for an accurate `--version` output.
+
 ## [0.1.1] — 2026-05-27
 
 ### Fixed
@@ -23,8 +35,7 @@ For what is *planned* — versus what has shipped — see
   LICENSE links pointed at nothing. All converted to absolute
   `https://github.com/vej-ai/dtex/...` URLs.
 
-No code changes. The 0.1.0 release on PyPI is yanked; install `dtex==0.1.1`
-or later.
+The 0.1.0 release on PyPI is yanked; install `dtex==0.1.1` or later.
 
 ## [0.1.0] — 2026-05-27
 
@@ -84,6 +95,7 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/vej-ai/dtex/releases/tag/v0.1.2
 [0.1.1]: https://github.com/vej-ai/dtex/releases/tag/v0.1.1
 [0.1.0]: https://github.com/vej-ai/dtex/releases/tag/v0.1.0
