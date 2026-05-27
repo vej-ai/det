@@ -14,7 +14,7 @@ For what is *planned* — versus what has shipped — see
 - GitHub Actions CI: pytest matrix on Python 3.11/3.12/3.13, ruff + mypy lint.
 - PyPI Trusted Publishing workflow triggered by `v*` tags.
 
-## [0.1.0] — Unreleased
+## [0.1.0] — 2026-05-27
 
 The first public release.
 
