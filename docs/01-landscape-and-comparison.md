@@ -1,11 +1,11 @@
 # 01 — Landscape & Comparison
 
-> Part of the **detx** design handbook. This file surveys the existing EL
+> Part of the **dtex** design handbook. This file surveys the existing EL
 > tools, scores each against the *simplicity test* defined in File 00 (five-minute
 > readability, concept count, "could plain Python do it"), and ends with an
-> honest accounting of what detx steals and what it rejects.
+> honest accounting of what dtex steals and what it rejects.
 
-detx is not being born into an empty field. The EL space has mature tools.
+dtex is not being born into an empty field. The EL space has mature tools.
 The point of this survey is to be precise about *which* good idea comes from
 *which* tool, and to avoid re-making mistakes that are already well documented.
 
@@ -65,7 +65,7 @@ encodes *stream logic* in YAML; the moment an API needs a real conditional you
 either drop to the Python CDK or fight the YAML. Container-per-connector adds an
 operational tax (image builds, registries, the stdio protocol). The UI as
 source-of-truth means connector definitions live in a database, not a repo —
-hard to review, hard to diff. This is the model detx exists to reject.
+hard to review, hard to diff. This is the model dtex exists to reject.
 
 ## Fivetran
 
@@ -85,7 +85,7 @@ control the state store.
 **Strengths.** Zero operational burden. Reliable. Broad catalog.
 
 **Weaknesses.** Closed, proprietary, usage-priced. No local execution, no
-self-hosting, the connector runtime is a blackbox. For detx's purpose
+self-hosting, the connector runtime is a blackbox. For dtex's purpose
 Fivetran is the **foil**: it is everything an open-source, repo-native,
 locally-runnable tool is defined against. It contributes no positive idea.
 
@@ -115,7 +115,7 @@ a project manifest is a clean convention. Large ecosystem of taps.
 **Weaknesses.** The stdio JSON protocol is a per-process, per-row serialization
 tax and an awkward debugging surface (two processes piped together). Tap quality
 varies wildly across the community. `catalog.json` selection is verbose. The
-process-boundary protocol is exactly what detx removes by running connectors
+process-boundary protocol is exactly what dtex removes by running connectors
 in-process.
 
 ## Sling
@@ -145,36 +145,36 @@ sophistication than dlt.
 
 ## Comparison
 
-| Dimension | dlt | Airbyte | Fivetran | Meltano/Singer | Sling | **detx** |
+| Dimension | dlt | Airbyte | Fivetran | Meltano/Singer | Sling | **dtex** |
 |---|---|---|---|---|---|---|
 | **Form factor** | Python library | Platform + UI + control plane | Managed SaaS | Project tool over CLI taps | Single Go binary | Python library + CLI + project |
 | **Connector runs** | In-process | Separate process / Docker | Fivetran's cloud | Separate process (stdio) | In-process (Go) | **In-process (Python)** |
 | **Authoring model** | `@dlt.resource` generators | YAML manifest or Python CDK | Connector SDK (Python, managed) | `Tap`/`Stream` subclass | None (built-in drivers) | **Folder + `register.yaml` + `@stream`/`@resource`** |
 | **Custom API connectors** | Excellent | Good (low-code) → Python | Good (deploy to FT) | Good (Singer SDK) | Weak | **Excellent (the core use case)** |
 | **Source/dest uniformity** | Partial | Yes (protocol) | N/A (managed) | **Yes** (tap/target) | Implicit | **Yes** (one contract) |
-| **State location** | Destination table | Control plane | Opaque managed | Meltano store (job-keyed) | Destination (cursor read) | **Destination (`_detx_state`)** |
+| **State location** | Destination table | Control plane | Opaque managed | Meltano store (job-keyed) | Destination (cursor read) | **Destination (`_dtex_state`)** |
 | **Schema inference** | Strong + evolution | Per-connector | Managed | Per-tap | Moderate | Inherit dlt-style inference |
 | **Project convention** | None | DB-backed | SaaS config | `meltano.yml` | Replication YAML | **dbt-style project folder** |
 | **Selection model** | Code | UI toggles | UI toggles | `catalog.json` | YAML wildcards | **Configs + `--tag` selection** |
-| **Invocation** | `pipeline.run()` | Scheduler/UI | Managed schedule | `meltano run` | `sling run -r` | `detx run` / `import` |
+| **Invocation** | `pipeline.run()` | Scheduler/UI | Managed schedule | `meltano run` | `sling run -r` | `dtex run` / `import` |
 | **Open source** | Yes | Yes (+ paid cloud) | No | Yes | Core yes | **Yes** |
 | **Passes the simplicity test** | Mostly | No (YAML logic, blackbox UI) | No (closed SaaS) | Partly (protocol tax) | Mostly (but no authoring) | — (by construction) |
 
-## What detx steals — and what it rejects
+## What dtex steals — and what it rejects
 
 The influences are not equal. Ranked honestly:
 
 **dlt — the closest cousin. Steal the core.**
 - ✅ Connectors are Python **generators** decorated with `@stream` / `@resource`.
-- ✅ **State lives in the destination** (`_detx_state`, cf. `_dlt_pipeline_state`).
+- ✅ **State lives in the destination** (`_dtex_state`, cf. `_dlt_pipeline_state`).
 - ✅ Schema **inference and evolution**, and the **extract → normalize → load**
   stage split.
-- ❌ Reject the lack of a project shape. detx adds the dbt-style project so a
+- ❌ Reject the lack of a project shape. dtex adds the dbt-style project so a
   team has *one* obvious layout, not a library and a blank page.
 
 **dbt — the architectural template. Steal the shape.**
 - ✅ A **project folder** of plain files, under version control.
-- ✅ **CLI verbs** (`detx run`), **profiles** for environment config, and a
+- ✅ **CLI verbs** (`dtex run`), **profiles** for environment config, and a
   **tag-based selector** (`--tag` on pipeline configs — chapter 12).
 - ✅ The **core/library/project triad**: engine = `dbt-core`, project = a dbt
   project. (Detailed in File 02.)
@@ -184,14 +184,14 @@ The influences are not equal. Ranked honestly:
 - ✅ The **`defaults` + per-stream override** YAML pattern and **wildcard stream
   selection** — adopted into `register.yaml` / project config.
 - ❌ Reject the closed engine and the missing authoring contract — that gap is
-  precisely detx's reason to exist.
+  precisely dtex's reason to exist.
 
 **Singer / Meltano — steal the *idea*, not the protocol.**
 - ✅ **Sources and destinations are the same kind of thing** — one contract,
-  freely composable. detx's "destinations use the same folder+yaml+decorator
+  freely composable. dtex's "destinations use the same folder+yaml+decorator
   contract" is this idea.
-- ✅ A **project manifest** convention (`meltano.yml` → detx project config).
-- ❌ Reject the **stdin/stdout JSON protocol** and the process boundary. detx
+- ✅ A **project manifest** convention (`meltano.yml` → dtex project config).
+- ❌ Reject the **stdin/stdout JSON protocol** and the process boundary. dtex
   runs connectors **in-process**: no serialization tax, real stack traces.
 
 **Airbyte — the cautionary tale. Steal almost nothing.**
@@ -202,9 +202,9 @@ The influences are not equal. Ranked honestly:
 - ❌ Reject the **UI as source of truth** — connectors live in a repo.
 - ❌ Reject **container-per-connector** and the control-plane state store.
 
-**Fivetran — the foil. Steal nothing.** Closed, managed, opaque. detx is
+**Fivetran — the foil. Steal nothing.** Closed, managed, opaque. dtex is
 defined in opposition: open, local-runnable, repo-native, debuggable.
 
-> **One-line summary:** detx = dlt's connector core + dbt's project shape +
+> **One-line summary:** dtex = dlt's connector core + dbt's project shape +
 > Sling's CLI ergonomics + Singer's source/destination uniformity — with
 > Airbyte's YAML-as-logic and Fivetran's closed SaaS deliberately left out.

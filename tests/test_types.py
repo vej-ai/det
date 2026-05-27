@@ -1,4 +1,4 @@
-"""Unit tests for the detx contract types — ``detx/types.py``.
+"""Unit tests for the dtex contract types — ``dtex/types.py``.
 
 These exercise *behavior*: enum parsing from YAML scalars, schema lookup and
 the engine-appended column, cursor observe/start_value semantics, Config
@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from detx.types import (
+from dtex.types import (
     Batch,
     Capability,
     Config,

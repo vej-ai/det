@@ -1,8 +1,8 @@
 # 07 — CLI and Library API
 
-> Part of the detx design handbook. See [README.md](./README.md) for the full table of contents.
+> Part of the dtex design handbook. See [README.md](./README.md) for the full table of contents.
 
-detx is invoked the way dbt is: `pip install`, then a CLI. But the CLI is a **thin shell over a real Python library** — every command is one function call away. This is deliberate. Orchestrators (Dagster, Airflow) and notebooks should never shell out; they import detx. The CLI and the library are the *same engine*, exposed twice.
+dtex is invoked the way dbt is: `pip install`, then a CLI. But the CLI is a **thin shell over a real Python library** — every command is one function call away. This is deliberate. Orchestrators (Dagster, Airflow) and notebooks should never shell out; they import dtex. The CLI and the library are the *same engine*, exposed twice.
 
 **Pipeline configs** (chapter 12) are the runtime unit. The CLI's primary
 selector is `-p / --conf <config_name>`; there is no connector-alone
@@ -13,10 +13,10 @@ selector, because a source without a destination binding cannot run.
 ## 1. Installation
 
 ```bash
-pip install detx
+pip install dtex
 ```
 
-This installs the engine, the CLI entry point `detx`, and the pre-baked
+This installs the engine, the CLI entry point `dtex`, and the pre-baked
 sources/destinations. Source connectors with heavy dependencies are installed
 per-connector via each connector's `requirements.txt`.
 
@@ -25,35 +25,35 @@ per-connector via each connector's `requirements.txt`.
 ## 2. CLI surface
 
 All commands share a project root: the directory containing
-`detx_project.yml` (see [06 — Project Anatomy](./06-project-anatomy.md)). detx
+`dtex_project.yml` (see [06 — Project Anatomy](./06-project-anatomy.md)). dtex
 walks up from the CWD to find it, like dbt and git.
 
-### `detx init [<dir>]` — scaffold a project
+### `dtex init [<dir>]` — scaffold a project
 
 ```bash
-detx init my_pipelines
+dtex init my_pipelines
 ```
 
 Creates the project tree:
 
 ```
 my_pipelines/
-  detx_project.yml      # project name, version, *_paths, vars
+  dtex_project.yml      # project name, version, *_paths, vars
   profiles.yml         # per-destination connection params (gitignored)
   sources/             # custom SOURCE connectors (kind: source)
   destinations/        # custom DESTINATION connectors (kind: destination)
   configs/             # pipeline configs (one source + one destination each)
     example.yml        # a starter config stub
-  .detx/                # run state, logs, cache (gitignored)
+  .dtex/                # run state, logs, cache (gitignored)
   .gitignore           # pre-populated
 ```
 
-### `detx new {source|destination|config} <name>` — scaffold a component
+### `dtex new {source|destination|config} <name>` — scaffold a component
 
 ```bash
-detx new source stripe              # → sources/stripe/
-detx new destination my_warehouse   # → destinations/my_warehouse/
-detx new config stripe_dev          # → configs/stripe_dev.yml
+dtex new source stripe              # → sources/stripe/
+dtex new destination my_warehouse   # → destinations/my_warehouse/
+dtex new config stripe_dev          # → configs/stripe_dev.yml
 ```
 
 Each subcommand writes a stub the user edits. A scaffolded source's
@@ -61,30 +61,30 @@ Each subcommand writes a stub the user edits. A scaffolded source's
 the full `@destination` hook stub set; a scaffolded config binds a
 placeholder source to the baked `duckdb` destination.
 
-### `detx list [--kind {source|destination|config}] [--tag <tag>]` — discover what exists
+### `dtex list [--kind {source|destination|config}] [--tag <tag>]` — discover what exists
 
 ```bash
-detx list                       # sources, destinations, configs (all three)
-detx list --kind config         # just configs
-detx list --tag hourly          # filter every section by tag
-detx list --kind config --tag hourly
+dtex list                       # sources, destinations, configs (all three)
+dtex list --kind config         # just configs
+dtex list --tag hourly          # filter every section by tag
+dtex list --kind config --tag hourly
 ```
 
 `--tag` filters each section (sources, destinations, configs) by its
 own `tags:` field. One tag namespace per project, naturally partitioned:
-running `detx list --tag warehouse` typically shows destinations only
-(those are warehouses); running `detx list --tag hourly` typically shows
+running `dtex list --tag warehouse` typically shows destinations only
+(those are warehouses); running `dtex list --tag hourly` typically shows
 configs only (no source/destination would carry an operational schedule
 tag). A section with no matches still shows its header with a `(no <kind>
 match tag '<tag>')` placeholder so the user sees what was searched.
 
 The CONFIGS table additionally carries a `TAGS` column (the config's own
-`tags:` list — the field `detx run --tag` selects on).
+`tags:` list — the field `dtex run --tag` selects on).
 
 Output is grouped under three section headers:
 
 ```
-$ detx list
+$ dtex list
 SOURCES
 NAME      ORIGIN   #STREAMS  STREAMS                       TAGS
 stripe    baked    4         charges, customers, ...       saas, payments
@@ -100,30 +100,30 @@ stripe_prod    stripe    bigquery     prod    (all)
 shiphero_dev   shiphero  duckdb       dev     shipments, orders
 ```
 
-`ORIGIN` is `baked` for a component shipped with detx and `project` for one
+`ORIGIN` is `baked` for a component shipped with dtex and `project` for one
 under the project's `source_paths` / `destination_paths`.
 
-### `detx run -p <config> [...]` — extract and load
+### `dtex run -p <config> [...]` — extract and load
 
 The core command. Runs **synchronously**: it blocks until the run succeeds or
 fails, streaming logs to stdout. "Wait until it succeeds" is the contract —
 no background jobs, no polling, no daemon.
 
 ```bash
-detx run -p stripe_prod                            # run the pipeline by config name
-detx run --conf stripe_prod                        # long alias
-detx run -p stripe_prod --select charges           # narrow streams (repeatable)
-detx run -p stripe_prod --target staging           # override the config's target
-detx run -p stripe_prod --full-refresh             # ignore state, reload
-detx run -p stripe_prod --param page_size=500      # override a source param
-detx run -p stripe_prod --destination-param dataset=raw   # override a dest param
-detx run --tag hourly                              # run every config tagged 'hourly'
+dtex run -p stripe_prod                            # run the pipeline by config name
+dtex run --conf stripe_prod                        # long alias
+dtex run -p stripe_prod --select charges           # narrow streams (repeatable)
+dtex run -p stripe_prod --target staging           # override the config's target
+dtex run -p stripe_prod --full-refresh             # ignore state, reload
+dtex run -p stripe_prod --param page_size=500      # override a source param
+dtex run -p stripe_prod --destination-param dataset=raw   # override a dest param
+dtex run --tag hourly                              # run every config tagged 'hourly'
 ```
 
 Exactly one of `-p/--conf` or `--tag` must be supplied — they are mutually
 exclusive. The `--tag` form runs every pipeline config whose `tags:` list
 contains the tag, sequentially in alphabetical name order, **continuing
-past per-config failures**. See [§ `detx run --tag`](#detx-run--tag-tag-multi-config-by-tag) below.
+past per-config failures**. See [§ `dtex run --tag`](#dtex-run--tag-tag-multi-config-by-tag) below.
 
 | Flag | Purpose |
 |---|---|
@@ -137,12 +137,12 @@ past per-config failures**. See [§ `detx run --tag`](#detx-run--tag-tag-multi-c
 | `--threads N` | Pipeline-level concurrency for `--tag`. Overrides `profiles.yml`'s top-level `threads:`. Each destination's `max_concurrent_writes` caps further. Meaningless with `-p` (single-config runs are not parallelizable; the flag is debug-logged and silently ignored). |
 | `--project-dir <dir>` | Project root (or any dir under it). Defaults to CWD. |
 
-#### `detx run --tag <tag>` — multi-config by tag
+#### `dtex run --tag <tag>` — multi-config by tag
 
 ```bash
-detx run --tag hourly                                       # all configs tagged hourly
-detx run --tag hourly --target staging                      # uniform target
-detx run --tag hourly --destination-param path=/tmp/x.duckdb
+dtex run --tag hourly                                       # all configs tagged hourly
+dtex run --tag hourly --target staging                      # uniform target
+dtex run --tag hourly --destination-param path=/tmp/x.duckdb
 ```
 
 Behavior:
@@ -150,7 +150,7 @@ Behavior:
 * **Selection** — every config whose `tags:` list contains the tag.
   Case-insensitive (tags are lowercased at parse time and at match time).
   Selection is exact-match — no glob, no regex.
-* **Order** — alphabetical by config name; reuses `detx list --kind
+* **Order** — alphabetical by config name; reuses `dtex list --kind
   config` ordering for predictability.
 * **Continue-on-failure** — a per-config failure does NOT stop the rest.
   Each config goes through the same `run()` path the `-p` form uses, which
@@ -158,7 +158,7 @@ Behavior:
 * **Uniform args** — `--target`, `--destination-param`, `--full-refresh`,
   `--select` apply to **every** matched config. `--param` is rejected with
   `--tag` because a source param override on a multi-source sweep would
-  silently apply to configs whose source doesn't declare it (use `detx run
+  silently apply to configs whose source doesn't declare it (use `dtex run
   -p <config> --param k=v` per config when you need that).
 
 Exit codes:
@@ -190,17 +190,17 @@ progress banners print under a global print-lock so engine logs from
 different pipelines never interleave:
 
 ```
-$ detx run --tag hourly --threads 4
+$ dtex run --tag hourly --threads 4
 ▸ starting shiphero_hourly
 ▸ starting stripe_hourly
-2026-05-26 14:30:01 [INFO] detx: running stream 'shipments'
+2026-05-26 14:30:01 [INFO] dtex: running stream 'shipments'
 ... (shiphero_hourly's buffered logs flushed in one block)
 ✓ done shiphero_hourly (3.2s, 1234 rows)
 ✓ done stripe_hourly (2.1s, 567 rows)
   parallelism: clamped to 1 for destination 'duckdb' (project threads=4)
 ```
 
-The per-run JSONL log (`.detx/logs/<run_id>/run.jsonl`) writes live to its
+The per-run JSONL log (`.dtex/logs/<run_id>/run.jsonl`) writes live to its
 own file per pipeline — that's unchanged from sequential mode and is the
 forensics surface. The total-duration line in the rollup table sums
 per-run durations (the CPU spent on the sweep); wall-clock saved by
@@ -211,7 +211,7 @@ X" line appears only when a destination's cap was lower than the project
 Example run output:
 
 ```
-$ detx run -p stripe_prod
+$ dtex run -p stripe_prod
 [info] running stream 'charges'
 [info] stream 'charges' loaded 7310 row(s)
 [info] running stream 'customers'
@@ -223,10 +223,10 @@ ok  customers  1840       1840
 run run-a1b9f3eb1234: succeeded - 9150 row(s), 41.20s
 ```
 
-### `detx validate` — validate every component
+### `dtex validate` — validate every component
 
 ```bash
-detx validate
+dtex validate
 ```
 
 Walks every source, destination, and config the project can discover, runs
@@ -235,55 +235,55 @@ config's `source` and `destination` exist + its `target` is defined in
 `profiles.yml`. Reports each problem found; exits non-zero if any component
 fails — a useful CI / pre-commit gate.
 
-### `detx state {list|reset}` — inspect and reset state
+### `dtex state {list|reset}` — inspect and reset state
 
 State operations take a **config name**; the config resolves to a (source,
-destination, target) triple. State rows in `_detx_state` are keyed by source
+destination, target) triple. State rows in `_dtex_state` are keyed by source
 name (chapter 12 §6), so two configs naming the same source share the same
 state rows.
 
 ```bash
-detx state list -p stripe_prod                       # cursors for this config's source
-detx state reset -p stripe_prod                      # clear all cursors
-detx state reset -p stripe_prod --stream charges     # clear just one
+dtex state list -p stripe_prod                       # cursors for this config's source
+dtex state reset -p stripe_prod                      # clear all cursors
+dtex state reset -p stripe_prod --stream charges     # clear just one
 ```
 
 `state reset` is the safe, surgical alternative to `--full-refresh`: it
 clears the cursor without touching loaded data, so the next run re-extracts
-the window. Both read/write the `_detx_state` table described in
+the window. Both read/write the `_dtex_state` table described in
 [05 — Destinations and State](./05-destinations-and-state.md).
 
-### `detx runs {list|show}` — inspect run history
+### `dtex runs {list|show}` — inspect run history
 
-Every run lands two artifacts: an audit row in `_detx_runs` and a per-run
-JSONL log at `.detx/logs/<run_id>/run.jsonl` (see
+Every run lands two artifacts: an audit row in `_dtex_runs` and a per-run
+JSONL log at `.dtex/logs/<run_id>/run.jsonl` (see
 [09 — Logging and Observability](./09-logging-and-observability.md)).
 These commands read them back.
 
 ```bash
-detx runs list -p stripe_prod                  # recent runs (default --limit 20)
-detx runs list -p stripe_prod --limit 5        # the most recent five
-detx runs show <run_id> -p stripe_prod         # full record + JSONL events
-detx runs show abc123def -p stripe_prod        # short id (12-hex tail) also works
+dtex runs list -p stripe_prod                  # recent runs (default --limit 20)
+dtex runs list -p stripe_prod --limit 5        # the most recent five
+dtex runs show <run_id> -p stripe_prod         # full record + JSONL events
+dtex runs show abc123def -p stripe_prod        # short id (12-hex tail) also works
 ```
 
 `-p <config>` is **required** — run records are stored per destination, and
-the config disambiguates which destination's `_detx_runs` to query (a
+the config disambiguates which destination's `_dtex_runs` to query (a
 project with multiple destinations would otherwise need a multi-store
 union v1 does not honour; a future `--destination <name>` is the natural
 relaxation). `show` colors events by type on a TTY; piped output is plain
 JSON-lines.
 
-### `detx secrets test [-p <config>] [--target <t>]` — verify secret resolution
+### `dtex secrets test [-p <config>] [--target <t>]` — verify secret resolution
 
 ```bash
-detx secrets test                           # resolve every reference in every config
-detx secrets test -p stripe_prod            # only this config's references
-detx secrets test -p stripe_prod --target prod
+dtex secrets test                           # resolve every reference in every config
+dtex secrets test -p stripe_prod            # only this config's references
+dtex secrets test -p stripe_prod --target prod
 ```
 
 Resolves every declared `register.yaml` `secrets[].ref` for the selected
-config(s) through the same machinery `detx run` uses at run start —
+config(s) through the same machinery `dtex run` uses at run start —
 `${env.X}`, `${profile.X.Y}`, and `secret://<scheme>/...` plugin URLs —
 and prints one line per reference with its status (`✓` or `✗` + the
 error). The resolved VALUE is never printed; only the reference URL
@@ -299,14 +299,14 @@ string (the value the operator wrote in `register.yaml` /
 Example output:
 
 ```
-$ detx secrets test -p stripe_prod
+$ dtex secrets test -p stripe_prod
 ✓ stripe_prod  source=stripe  api_token=${env.STRIPE_API_KEY}
 ✗ stripe_prod  source=stripe  refresh_token=secret://vault/x/y  -- no resolver registered for scheme 'vault'; known schemes: gcp
 
 1 of 2 reference(s) failed to resolve
 ```
 
-### `detx --version`
+### `dtex --version`
 
 Print the installed package version and exit 0.
 
@@ -314,8 +314,8 @@ Print the installed package version and exit 0.
 
 ## 3. Exit codes and synchronous semantics
 
-`detx run` blocks for the entire run. There is no async mode in the CLI — an
-orchestrator that wants concurrency runs multiple `detx` invocations, or uses
+`dtex run` blocks for the entire run. There is no async mode in the CLI — an
+orchestrator that wants concurrency runs multiple `dtex` invocations, or uses
 the library.
 
 | Code | Meaning |
@@ -326,7 +326,7 @@ the library.
 | `130` | Interrupted (Ctrl-C / SIGTERM). |
 
 > # NOTE: docs/07 §3 originally specified a finer 0/1/2/3/130 table that split
-> config errors from load errors. The engine's `detx.run()` returns a uniform
+> config errors from load errors. The engine's `dtex.run()` returns a uniform
 > FAILED `RunResult` for every failure class and never raises (runner.py), so
 > the CLI collapses to 0/1 — the code is source of truth (CONTRIBUTING.md
 > precedence rule).
@@ -339,10 +339,10 @@ Everything the CLI does, the library does — because the CLI calls the
 library. The importable surface is small and stable.
 
 ```python
-import detx
+import dtex
 
 # Run a config. Blocks until done — same synchronous contract as the CLI.
-result = detx.run(
+result = dtex.run(
     config="stripe_prod",                        # the config NAME under configs/
     project_dir="./my_pipelines",                # walks up if omitted
     target_override="staging",                   # overrides the config's target
@@ -366,14 +366,14 @@ if result.status.value == "failed":
     raise result.error      # or call result.raise_for_status()
 ```
 
-For a tag-based multi-run, use `detx.run_tag(...)`:
+For a tag-based multi-run, use `dtex.run_tag(...)`:
 
 ```python
-import detx
+import dtex
 
 # Returns a list[RunResult] — one per matched config, in alphabetical name order.
 # Continue-on-failure: a per-config failure does NOT stop the rest.
-results = detx.run_tag(
+results = dtex.run_tag(
     "hourly",
     project_dir="./my_pipelines",
     target_override="prod",                        # uniform across every matched config
@@ -382,7 +382,7 @@ results = detx.run_tag(
     select=("charges",),                           # uniform — replaces config.select
 )
 
-# Caller decides overall outcome — detx.run_tag returns the list, never raises.
+# Caller decides overall outcome — dtex.run_tag returns the list, never raises.
 if not results:
     raise SystemExit(f"no configs matched the tag")
 if any(r.status.value == "failed" for r in results):
@@ -391,13 +391,13 @@ if any(r.status.value == "failed" for r in results):
             print(f"{r.config}: {type(r.error).__name__}: {r.error}")
 ```
 
-`detx.run_tag` does NOT accept `params_override` — a source param override
+`dtex.run_tag` does NOT accept `params_override` — a source param override
 on a multi-source sweep would silently apply to configs whose source
-doesn't declare it. For per-config knobs, call `detx.run(...)` per name.
+doesn't declare it. For per-config knobs, call `dtex.run(...)` per name.
 
 ### 4.1 The `RunResult` object
 
-`detx.run(...)` returns a `RunResult`:
+`dtex.run(...)` returns a `RunResult`:
 
 ```python
 @dataclass
@@ -426,23 +426,23 @@ class RunResult:
     log_path: str
 ```
 
-`detx.run()` does **not** raise on a failed run — it returns a `RunResult`
+`dtex.run()` does **not** raise on a failed run — it returns a `RunResult`
 with `status=FAILED` and a populated `error`. A caller wanting exceptions
 calls `result.raise_for_status()`.
 
-### 4.2 Calling detx from an orchestrator (Dagster)
+### 4.2 Calling dtex from an orchestrator (Dagster)
 
 ```python
 # dagster_pipeline.py
 from dagster import op, job, Failure
-import detx
+import dtex
 
 @op
 def load_stripe():
-    result = detx.run(config="stripe_prod", project_dir="/opt/pipelines")
+    result = dtex.run(config="stripe_prod", project_dir="/opt/pipelines")
     if result.status.value == "failed":
         raise Failure(
-            description=f"detx run {result.run_id} failed",
+            description=f"dtex run {result.run_id} failed",
             metadata={"run_id": result.run_id, "log": result.log_path},
         )
     return {s.name: s.rows_loaded for s in result.streams}
@@ -459,28 +459,28 @@ cron + script.
 
 ## 5. Configuration precedence
 
-detx resolves every setting through a fixed precedence chain. Higher wins.
+dtex resolves every setting through a fixed precedence chain. Higher wins.
 
 For a **source param** (lowest → highest):
 
 1. The source's `register.yaml` `params[].default`.
-2. The project's `detx_project.yml` `vars:` block.
+2. The project's `dtex_project.yml` `vars:` block.
 3. The active config's `params:` block.
 4. `SIMPLE_E_PARAM_<NAME>` environment variable.
-5. `detx run --param k=v` flag / `detx.run(params_override=)` kwarg.
+5. `dtex run --param k=v` flag / `dtex.run(params_override=)` kwarg.
 
 For a **destination param** (lowest → highest):
 
 1. The destination's `register.yaml` `params[].default`.
-2. The project's `detx_project.yml` `vars:` block.
+2. The project's `dtex_project.yml` `vars:` block.
 3. The destination's `profiles.yml[<destination>].targets[<target>]` row.
 4. The active config's `destination_params:` block.
 5. `SIMPLE_E_PARAM_<NAME>` environment variable.
-6. `detx run --destination-param k=v` flag / `detx.run(destination_params_override=)` kwarg.
+6. `dtex run --destination-param k=v` flag / `dtex.run(destination_params_override=)` kwarg.
 
 ### Reference
 
-- Project layout, `detx_project.yml`, `profiles.yml` → [06 — Project Anatomy](./06-project-anatomy.md)
+- Project layout, `dtex_project.yml`, `profiles.yml` → [06 — Project Anatomy](./06-project-anatomy.md)
 - Configs in depth → [12 — Configs](./12-configs.md)
 - `profiles.yml` format, secrets, `${ENV_VAR}` → [08 — Security](./08-security.md)
 - Run logs and the run record → [09 — Logging and Observability](./09-logging-and-observability.md)

@@ -1,1 +1,1 @@
-"""Tests for the baked connectors under ``detx/sources/``."""
+"""Tests for the baked connectors under ``dtex/sources/``."""

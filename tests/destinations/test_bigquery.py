@@ -4,8 +4,8 @@ Two paths:
 
 * **Unit tests** (always run): substitute fake ``bigquery.Client`` /
   ``storage.Client`` classes via the module's lazy accessors
-  (:func:`~detx.destinations.bigquery.client._bigquery_module` /
-  :func:`~detx.destinations.bigquery.client._storage_module`). The fakes
+  (:func:`~dtex.destinations.bigquery.client._bigquery_module` /
+  :func:`~dtex.destinations.bigquery.client._storage_module`). The fakes
   record calls and serve canned responses; no network, no live BigQuery.
 * **Integration tests** (gated): exercise the destination against a real
   BigQuery dataset, enabled when ``BIGQUERY_TEST_PROJECT`` /
@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from detx import (
+from dtex import (
     Capability,
     Config,
     CursorType,
@@ -44,8 +44,8 @@ from detx import (
     TimeGranularity,
     WriteDisposition,
 )
-from detx.destinations.bigquery import client as bq_client_mod
-from detx.destinations.bigquery.ddl import (
+from dtex.destinations.bigquery import client as bq_client_mod
+from dtex.destinations.bigquery.ddl import (
     bigquery_mode,
     bigquery_type,
     compare_partition,
@@ -60,7 +60,7 @@ from detx.destinations.bigquery.ddl import (
 # The connector-folder harness reloads ``destination.py`` under a unique
 # synthetic module name, so the class object that the hooks raise is NOT the
 # same Python object as one imported from the canonical
-# ``detx.destinations.bigquery.destination`` module path. Tests check the
+# ``dtex.destinations.bigquery.destination`` module path. Tests check the
 # raised exception via its parent type (``RuntimeError``) and its message
 # substring — both stable across the harness's re-import.
 from tests.conftest import LoadedConnector, load_connector
@@ -71,7 +71,7 @@ from tests.conftest import LoadedConnector, load_connector
 
 _BIGQUERY_CONNECTOR_DIR = (
     Path(__file__).resolve().parent.parent.parent
-    / "detx" / "destinations" / "bigquery"
+    / "dtex" / "destinations" / "bigquery"
 )
 
 
@@ -445,7 +445,7 @@ def fake_bq(monkeypatch: pytest.MonkeyPatch) -> _FakeBigQueryModule:
     """Substitute the lazy ``_bigquery_module()`` accessor with a fake module.
 
     Single swap point: ``destination.py`` and ``ddl.py`` both look up the
-    SDK accessor via the canonical ``detx.destinations.bigquery.client``
+    SDK accessor via the canonical ``dtex.destinations.bigquery.client``
     module on every call (rather than ``from ... import _bigquery_module``
     at module load), so patching one attribute here covers every call site.
     This pattern is the connector-folder import harness's price of
@@ -637,9 +637,9 @@ def test_identifier_validation_rejects_injection() -> None:
 
 
 def test_identifier_validation_allows_underscore_prefixed() -> None:
-    """Engine-owned names (_detx_state, _detx_synced_at) are valid."""
-    assert validate_identifier("_detx_state", kind="table") == "_detx_state"
-    assert validate_identifier("_detx_synced_at", kind="column") == "_detx_synced_at"
+    """Engine-owned names (_dtex_state, _dtex_synced_at) are valid."""
+    assert validate_identifier("_dtex_state", kind="table") == "_dtex_state"
+    assert validate_identifier("_dtex_synced_at", kind="column") == "_dtex_synced_at"
 
 
 def test_quote_identifier_and_fq_table() -> None:
@@ -777,7 +777,7 @@ def test_ensure_schema_creates_table_with_synced_at(
     fake_bq: _FakeBigQueryModule,
     fake_gcs: type[_FakeStorageClient],
 ) -> None:
-    """ensure_schema calls create_table with every declared field + _detx_synced_at."""
+    """ensure_schema calls create_table with every declared field + _dtex_synced_at."""
     conn = _open_with_fakes(bigquery_destination)
     hooks = _hooks(bigquery_destination)
     hooks["ensure_schema"](conn, _events_meta())
@@ -989,7 +989,7 @@ def test_ensure_schema_existing_table_mismatched_partition_raises(
     # actionable resolution suggestion.
     assert "TIME/DAY" in msg
     assert "TIME/HOUR" in msg
-    assert "detx state reset" in msg
+    assert "dtex state reset" in msg
     assert "BigQuery cannot change an existing table" in msg
 
 
@@ -1155,7 +1155,7 @@ def test_write_batch_append_loads_with_write_append(
     assert job["table"] == "events"
     assert job["write_disposition"] == "WRITE_APPEND"
     # URI shape: gs://bucket/prefix/run_suffix/events/batch-<uuid>.parquet
-    assert job["uri"].startswith("gs://fake-bucket/detx/staging/")
+    assert job["uri"].startswith("gs://fake-bucket/dtex/staging/")
     assert "/events/batch-" in job["uri"]
     assert job["uri"].endswith(".parquet")
     # GCS: one upload, one delete (success path cleans up).
@@ -1397,7 +1397,7 @@ def test_read_state_returns_empty_on_first_run(
     assert records == []
     # The state table was created lazily.
     table_names = [t.table_id for t in conn.client.bq.created_tables]
-    assert "_detx_state" in table_names
+    assert "_dtex_state" in table_names
 
 
 def test_commit_state_and_read_state_round_trip(
@@ -1496,7 +1496,7 @@ def test_commit_state_stamps_run_id_when_unset(
 
 
 # --------------------------------------------------------------------------
-# write_run_record — _detx_runs upsert on run_id
+# write_run_record — _dtex_runs upsert on run_id
 # --------------------------------------------------------------------------
 
 
@@ -1523,14 +1523,14 @@ def test_write_run_record_creates_table_and_upserts(
     fake_bq: _FakeBigQueryModule,
     fake_gcs: type[_FakeStorageClient],
 ) -> None:
-    """write_run_record creates _detx_runs lazily and issues a parameterized MERGE."""
+    """write_run_record creates _dtex_runs lazily and issues a parameterized MERGE."""
     conn = _open_with_fakes(bigquery_destination)
     hooks = _hooks(bigquery_destination)
 
     hooks["write_run_record"](conn, _build_record())
 
     # Runs table created.
-    assert any(t.table_id == "_detx_runs" for t in conn.client.bq.created_tables)
+    assert any(t.table_id == "_dtex_runs" for t in conn.client.bq.created_tables)
     # One MERGE on run_id was issued, parameterized.
     assert len(conn.client.bq.queries) == 1
     q = conn.client.bq.queries[0]
@@ -1578,7 +1578,7 @@ def test_engine_resolves_destination_hooks_without_transaction(
     raise here. A successful resolution returns the hook dict + the
     declared capability set.
     """
-    from detx.engine.runner import _resolve_destination_hooks
+    from dtex.engine.runner import _resolve_destination_hooks
 
     hooks, caps = _resolve_destination_hooks(bigquery_destination)
     # The 4 declared capabilities, no TRANSACTIONAL_LOAD.

@@ -1,0 +1,124 @@
+# Filesystem source — read flat files (CSV / JSONL / Parquet) from a local
+# directory or an object-storage URI (gs://, s3://). docs/03 §2.
+#
+# This is the "no external API + no credentials needed for tests" baseline
+# connector. It exercises:
+#   * schema inference (no API to query types from — types come from headers/data)
+#   * multiple file formats in one connector (csv / jsonl / parquet)
+#   * a glob-based incremental model (cursor = file mtime ISO timestamp, or
+#     file name lexicographic — both are ``string`` cursors)
+#   * an object-storage path via a pluggable per-scheme backend (local always
+#     available; gs:// / s3:// lazy-imported).
+#
+# NOTE: NO `secrets:` for v1. Local FS reads use OS credentials; GCS/S3 use
+# application default credentials (ADC) via google-cloud-storage / boto3. A
+# future revision may add explicit credential secrets per backend; the
+# decision was deferred to keep the v1 "no API + no credentials" property.
+name: filesystem
+kind: source
+version: "1.0.0"
+summary: Read flat files (CSV / JSONL / Parquet) from a local dir or gs:// / s3:// prefix.
+tags: [filesystem, csv, jsonl, parquet, local]
+
+# Connector-level params. Each can be overridden by a stream-level `params`
+# block (docs/03 §2.4 "Stream-level params override connector-level ones").
+params:
+  # The directory or URI prefix files are enumerated under. Required — the
+  # connector has nothing to read without it.
+  #   "/data/exports/"          local directory
+  #   "gs://bucket/exports/"    Google Cloud Storage prefix
+  #   "s3://bucket/exports/"    Amazon S3 prefix
+  path:
+    type: string
+    required: true
+    description: Local directory path or object-storage URI prefix (gs:// or s3://).
+
+  # Glob pattern applied under `path`. The default matches every .csv at any
+  # depth — recommend the author override this per stream rather than rely on
+  # the default. docs/03 §2.4: defaults are a strategy knob, not a guess.
+  glob:
+    type: string
+    default: "**/*.csv"
+    description: Glob pattern (recursive `**` supported) applied under `path`.
+
+  # File format. Default `auto` infers from the file extension at read time —
+  # `.csv`/`.tsv` → csv, `.jsonl`/`.ndjson` → jsonl, `.parquet`/`.pq` → parquet.
+  # Set to `csv` / `jsonl` / `parquet` to force one format regardless of
+  # extension.
+  format:
+    type: string
+    default: "auto"
+    description: One of csv / jsonl / parquet, or "auto" to infer from file extension.
+
+  # Records per yielded batch. The engine loads each batch independently
+  # (docs/03 §3.1 "yields lists of dicts — batches"), so this is also the
+  # checkpoint granularity for a single file.
+  batch_size:
+    type: int
+    default: 1000
+    description: Records per yielded batch.
+
+  # Cursor strategy — what monotonically advances per file:
+  #   "mtime" → file modification time (the default).
+  #   "name"  → the file name itself, lex-compared.
+  # NOTE: cursor_type for the example stream is `timestamp`, not `string`.
+  # `string` would be the natural choice for both strategies, but the
+  # baked DuckDB destination's `_dtex_state.cursor_value` JSON column
+  # rejects un-quoted bare strings — `_encode_value` only json.dumps()s
+  # dicts/lists. Shiphero hit the same constraint and works around it the
+  # same way (see dtex/connectors/shiphero/source.py lines 154-165).
+  # End-to-end runs against DuckDB therefore use `mtime` (observed as a
+  # tz-aware UTC datetime, which DuckDB binds to JSON cleanly). The `name`
+  # strategy is fully implemented and unit-tested in isolation, but a
+  # full end-to-end run with `cursor_strategy: name` against DuckDB will
+  # fail until the destination bug is fixed.
+  cursor_strategy:
+    type: string
+    default: "mtime"
+    description: How the file cursor key is computed — "mtime" or "name".
+
+  # CSV reader options. `csv_delimiter` is the field separator; `csv_has_header`
+  # toggles header-row → column names. With no header, columns are named
+  # "col_0", "col_1", ... so the dict shape stays well-defined.
+  csv_delimiter:
+    type: string
+    default: ","
+    description: CSV delimiter (use a tab "\t" for TSV).
+  csv_has_header:
+    type: bool
+    default: true
+    description: Whether the first CSV row carries column names.
+
+streams:
+  # One example stream — points the default glob at .csv under `path`. An
+  # author override of `glob` / `format` / `params` per stream produces a
+  # multi-stream connector (one stream per file shape) without code changes.
+  #
+  # `incremental.cursor_field: _dtex_file_cursor` — a SYNTHETIC field the
+  # source attaches to every record (docs/03 §3.2 cursor model). The engine
+  # never inspects file timestamps directly: it sees the cursor field on the
+  # record like any other incremental stream, and the standard Cursor /
+  # `_dtex_state` mechanism just works.
+  #
+  # cursor_type: timestamp — see the `cursor_strategy` param NOTE above for
+  # why this is `timestamp` and not the "natural" `string`. Source-side, the
+  # `mtime` strategy observes a tz-aware UTC datetime (cleanly bound to
+  # DuckDB's JSON state column); the synthetic field attached to records
+  # remains an ISO 8601 string for human readability.
+  #
+  # schema is OMITTED — the engine infers from the first batch. docs/03 §2.2.1
+  # "Inference is a convenience for prototyping". A real deployment will
+  # typically declare its own schema (and INCLUDE the synthetic
+  # _dtex_file_cursor STRING column when it does — `StreamDef.__post_init__`
+  # enforces that the cursor field appears in any declared schema).
+  - name: files
+    table: files
+    write_disposition: append
+    incremental:
+      cursor_field: _dtex_file_cursor
+      cursor_type: timestamp
+      initial_value: "1970-01-01T00:00:00+00:00"
+
+# As of build stage 8.B, the source's register.yaml no longer carries a
+# `destination:` block. A config (configs/<name>.yml) binds this source to
+# a destination + target (docs/12).

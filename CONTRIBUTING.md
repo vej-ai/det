@@ -1,6 +1,6 @@
-# Contributing to detx
+# Contributing to dtex
 
-Thanks for your interest in detx. The governing principle is the
+Thanks for your interest in dtex. The governing principle is the
 [design handbook](./docs/00-vision-and-naming.md): **keep it as simple as
 possible.** This file covers dev setup, the PR process, and how to add a
 new connector or secret-manager resolver.
@@ -10,7 +10,7 @@ By participating in this project you agree to abide by the
 
 ## Dev setup
 
-detx targets Python 3.11+. Clone the repo, then create a virtual environment
+dtex targets Python 3.11+. Clone the repo, then create a virtual environment
 and install the package in editable mode with the `dev` extras:
 
 ```sh
@@ -29,7 +29,7 @@ pytest -q
 
 ```sh
 ruff check .
-mypy detx
+mypy dtex
 ```
 
 Please make sure `pytest`, `ruff check`, and `mypy` all pass before opening a
@@ -45,10 +45,10 @@ This avoids re-litigating handbook ambiguities at every stage.
 
 Worked examples already in the tree:
 
-- `detx/types.py::StateRecord` defines the canonical `_detx_state` schema
+- `dtex/types.py::StateRecord` defines the canonical `_dtex_state` schema
   (docs/03 §3.5 and docs/05 §5.1 follow it).
 - **Configs are the runtime unit.** The CLI's `-p / --conf` arg and
-  `detx.run(config=...)` library entry point both take a *config name* —
+  `dtex.run(config=...)` library entry point both take a *config name* —
   there is no source-alone selector. Documents `06`, `07`, and `12` follow
   this.
 
@@ -58,7 +58,7 @@ Worked examples already in the tree:
 2. Make one logical change per PR — small PRs review faster and revert cleaner.
 3. Run the local checks before pushing:
    ```sh
-   pytest -q && ruff check . && mypy detx
+   pytest -q && ruff check . && mypy dtex
    ```
 4. Add or update tests for any new code path. Bug-fix PRs should land a
    regression test alongside the fix.
@@ -88,7 +88,7 @@ deviating.
 
 ## Adding a new source connector
 
-A source connector is a folder under `detx/sources/<name>/` (for a baked
+A source connector is a folder under `dtex/sources/<name>/` (for a baked
 one) or `connectors/sources/<name>/` (in a user project) containing:
 
 1. **`register.yaml`** — the manifest. Declares connector name, capabilities,
@@ -104,27 +104,27 @@ one) or `connectors/sources/<name>/` (in a user project) containing:
 4. **`README.md`** in the connector folder — what it extracts, how to
    authenticate, any operational notes.
 
-The fastest scaffold is `detx new source <name>` — it writes a skeletal
+The fastest scaffold is `dtex new source <name>` — it writes a skeletal
 `register.yaml` plus a `source.py` you fill in.
 
 ## Adding a new destination connector
 
 Destinations follow the same folder + `register.yaml` + decorator shape, but
 they accept records instead of yielding them. The folder lives under
-`detx/destinations/<name>/`, and the body uses `@destination`-hooked
+`dtex/destinations/<name>/`, and the body uses `@destination`-hooked
 functions. The destination contract — capabilities, the state-table shape,
 the transactional-load expectation, schema evolution — is in
 [docs/05 — Destinations and State](./docs/05-destinations-and-state.md).
 
-Scaffold: `detx new destination <name>`.
+Scaffold: `dtex new destination <name>`.
 
 ## Adding a new secret-manager resolver
 
 A secret-manager resolver is any object whose class declares
 `scheme: ClassVar[str]` and implements `resolve(path, field) -> str`. It is
 distributed either as a third-party package via the
-`detx.secret_resolvers` entry-point, or as a project-local
-`detx_plugins.py`. The protocol, registration mechanics, and the URL form
+`dtex.secret_resolvers` entry-point, or as a project-local
+`dtex_plugins.py`. The protocol, registration mechanics, and the URL form
 (`secret://<scheme>/<path>[#<field>]`) are in
 [docs/08 §3 — Secret references and pluggable secret managers](./docs/08-security.md).
 

@@ -1,22 +1,22 @@
 # 08 — Security
 
-> Part of the detx design handbook. See [README.md](./README.md) for the full table of contents.
+> Part of the dtex design handbook. See [README.md](./README.md) for the full table of contents.
 
-detx is open source and self-hosted. There is no vendor backend, no managed secret vault, no sandbox you inherit for free. That makes security a **design responsibility of the tool and the operator**, not a deployment afterthought. This section is concrete: where secrets live, how they are resolved, and the honest risks of running other people's connectors.
+dtex is open source and self-hosted. There is no vendor backend, no managed secret vault, no sandbox you inherit for free. That makes security a **design responsibility of the tool and the operator**, not a deployment afterthought. This section is concrete: where secrets live, how they are resolved, and the honest risks of running other people's connectors.
 
 ---
 
 ## 1. Where secrets live
 
-detx enforces one rule above all: **secrets never enter version control.**
+dtex enforces one rule above all: **secrets never enter version control.**
 
 | File | Committed to git? | Holds secrets? |
 |---|---|---|
 | `register.yaml` | **Yes** | **Never.** Declares config *keys*, not values. |
-| `detx_project.yml` | **Yes** | Never. Project metadata only. |
+| `dtex_project.yml` | **Yes** | Never. Project metadata only. |
 | `profiles.yml` | **No** — gitignored | Yes — connection config, may reference env vars. |
 | `.env` (optional) | **No** — gitignored | Yes — local env var values. |
-| `.detx/` | **No** — gitignored | State and logs (logs are redacted, see §6). |
+| `.dtex/` | **No** — gitignored | State and logs (logs are redacted, see §6). |
 
 `register.yaml` is part of a connector and is meant to be shared, even published to a registry. It must therefore be **value-free** for anything sensitive. It declares that a connector *needs* an `api_key`; it never contains one.
 
@@ -29,7 +29,7 @@ config:
   page_size: { required: false, default: 100 }
 ```
 
-The `secret: true` marker is load-bearing: it tells detx to redact this value in logs, in `--dry-run` output, and in run records (§6).
+The `secret: true` marker is load-bearing: it tells dtex to redact this value in logs, in `--dry-run` output, and in run records (§6).
 
 ---
 
@@ -54,7 +54,7 @@ bigquery:                                       # a destination profile
   targets:
     dev:
       type: duckdb
-      path: .detx/dev.duckdb                # zero-config local dev
+      path: .dtex/dev.duckdb                # zero-config local dev
     prod:
       type: bigquery
       project: my-gcp-project
@@ -66,16 +66,16 @@ bigquery:                                       # a destination profile
 
 - `${VAR}` is replaced with the value of environment variable `VAR` at load time.
 - `${VAR:-default}` supplies a fallback if `VAR` is unset.
-- A `${VAR}` that resolves to nothing for a **required** secret is a hard configuration error (exit code `2` — see [07 §3](./07-cli-and-library-api.md)). detx fails *before* running, naming the missing variable. It never silently runs with an empty credential.
+- A `${VAR}` that resolves to nothing for a **required** secret is a hard configuration error (exit code `2` — see [07 §3](./07-cli-and-library-api.md)). dtex fails *before* running, naming the missing variable. It never silently runs with an empty credential.
 - Interpolation is **string-substitution only** — no shell, no command execution. `${...}` cannot run code.
 
-For local development, detx auto-loads a gitignored `.env` file from the project root into the environment before interpolation (dotenv convention). In CI and production, the orchestrator/container supplies the variables directly; no `.env` is shipped.
+For local development, dtex auto-loads a gitignored `.env` file from the project root into the environment before interpolation (dotenv convention). In CI and production, the orchestrator/container supplies the variables directly; no `.env` is shipped.
 
 ---
 
 ## 3. Secret references and pluggable secret managers
 
-Environment variables are the v1 baseline. They are simple and universal, but they put plaintext secrets in the process environment and in CI settings. Teams with stricter requirements want secrets fetched **at run time** from a manager. detx supports this with a typed reference syntax and a pluggable resolver.
+Environment variables are the v1 baseline. They are simple and universal, but they put plaintext secrets in the process environment and in CI settings. Teams with stricter requirements want secrets fetched **at run time** from a manager. dtex supports this with a typed reference syntax and a pluggable resolver.
 
 A `secrets[].ref` value in a connector's `register.yaml` may be a **secret reference** in one of three forms — the two `${...}` forms (env, profile) and the pluggable `secret://` URL form:
 
@@ -86,7 +86,7 @@ prod:
   credentials: secret://vault/secret/data/warehouse#service_account
 ```
 
-A `secret://` URL has the shape `secret://<scheme>/<path>[#<field>]`. At config-resolution time, detx parses the URL and hands the `(path, field)` pair to the matching **resolver**:
+A `secret://` URL has the shape `secret://<scheme>/<path>[#<field>]`. At config-resolution time, dtex parses the URL and hands the `(path, field)` pair to the matching **resolver**:
 
 ```python
 class SecretResolver(Protocol):
@@ -94,16 +94,16 @@ class SecretResolver(Protocol):
     def resolve(self, path: str, field: str | None) -> str: ...
 ```
 
-The detx engine ships the core (the `SecretResolver` Protocol, URL parsing, the plugin registry) plus three production resolvers — **GCP Secret Manager**, **AWS Secrets Manager**, and **HashiCorp Vault** — each delivered as an opt-in extra (`pip install 'detx[gcp-secrets]' / '[aws-secrets]' / '[vault]'`). Custom resolvers register either as a third-party package via entry-points or as a project-local `detx_plugins.py` (see below).
+The dtex engine ships the core (the `SecretResolver` Protocol, URL parsing, the plugin registry) plus three production resolvers — **GCP Secret Manager**, **AWS Secrets Manager**, and **HashiCorp Vault** — each delivered as an opt-in extra (`pip install 'dtex[gcp-secrets]' / '[aws-secrets]' / '[vault]'`). Custom resolvers register either as a third-party package via entry-points or as a project-local `dtex_plugins.py` (see below).
 
 | Resolver | Scheme | Form |
 |---|---|---|
 | Environment variables | `${env.X}` | built-in syntax |
 | Profiles.yml lookup | `${profile.X.Y}` | built-in syntax |
 | `secret://` plugin surface | `secret://<scheme>/...` | protocol + parser |
-| GCP Secret Manager | `secret://gcp-secret-manager/projects/<p>/secrets/<n>/versions/<v>` | plugin (`detx[gcp-secrets]`) |
-| AWS Secrets Manager | `secret://aws-secrets-manager/<region>/<secret-id>[:<version-stage>][#<json-field>]` | plugin (`detx[aws-secrets]`) |
-| HashiCorp Vault | `secret://vault/<mount-path>/<kv-path>#<field>` | plugin (`detx[vault]`) |
+| GCP Secret Manager | `secret://gcp-secret-manager/projects/<p>/secrets/<n>/versions/<v>` | plugin (`dtex[gcp-secrets]`) |
+| AWS Secrets Manager | `secret://aws-secrets-manager/<region>/<secret-id>[:<version-stage>][#<json-field>]` | plugin (`dtex[aws-secrets]`) |
+| HashiCorp Vault | `secret://vault/<mount-path>/<kv-path>#<field>` | plugin (`dtex[vault]`) |
 
 ### GCP Secret Manager — setup
 
@@ -116,15 +116,15 @@ The `gcp-secret-manager` resolver auto-registers via entry-point when the option
    echo -n 'sk_live_xxx' | gcloud secrets versions add my-stripe-key --data-file=-
    ```
 
-2. **Grant access** to the principal detx runs as (service account in CI, your user ADC locally):
+2. **Grant access** to the principal dtex runs as (service account in CI, your user ADC locally):
 
    ```sh
    gcloud secrets add-iam-policy-binding my-stripe-key \
-     --member='serviceAccount:detx-runner@<proj>.iam.gserviceaccount.com' \
+     --member='serviceAccount:dtex-runner@<proj>.iam.gserviceaccount.com' \
      --role='roles/secretmanager.secretAccessor'
    ```
 
-3. **Install the extra**: `pip install 'detx[gcp-secrets]'`.
+3. **Install the extra**: `pip install 'dtex[gcp-secrets]'`.
 
 4. **Reference it in `profiles.yml`**:
 
@@ -151,9 +151,9 @@ The `aws-secrets-manager` resolver auto-registers via entry-point when the optio
        --secret-string '{"username":"u","password":"p"}' --region us-east-1
    ```
 
-2. **Grant `secretsmanager:GetSecretValue`** on the secret's ARN to the IAM principal detx runs as.
+2. **Grant `secretsmanager:GetSecretValue`** on the secret's ARN to the IAM principal dtex runs as.
 
-3. **Install the extra**: `pip install 'detx[aws-secrets]'`.
+3. **Install the extra**: `pip install 'dtex[aws-secrets]'`.
 
 4. **Reference it in `profiles.yml`**:
 
@@ -169,7 +169,7 @@ The `aws-secrets-manager` resolver auto-registers via entry-point when the optio
 
 URL format: `secret://aws-secrets-manager/<region>/<secret-id>[:<version-stage>][#<json-field>]`. The version stage defaults to `AWSCURRENT`; `AWSPENDING` and `AWSPREVIOUS` are the other AWS-defined labels. The `#field` URL fragment is honored when the `SecretString` is JSON (a common AWS idiom — Secrets Manager itself stores Postgres credentials as `{"username":..., "password":...}`). Binary `SecretBinary` payloads are not supported in v1.
 
-Authentication uses boto3's standard credential chain (env vars → `~/.aws/credentials` → IAM role) — no detx-side credential argument is passed. Each region creates its own client (cached per-process per-region).
+Authentication uses boto3's standard credential chain (env vars → `~/.aws/credentials` → IAM role) — no dtex-side credential argument is passed. Each region creates its own client (cached per-process per-region).
 
 ### HashiCorp Vault — setup
 
@@ -184,11 +184,11 @@ The `vault` resolver auto-registers via entry-point when the optional extra is i
    vault kv put -mount=secret/legacy warehouse username=u password=p
    ```
 
-2. **Grant a policy** with `read` capability on the secret path to the token detx runs as.
+2. **Grant a policy** with `read` capability on the secret path to the token dtex runs as.
 
-3. **Install the extra**: `pip install 'detx[vault]'`.
+3. **Install the extra**: `pip install 'dtex[vault]'`.
 
-4. **Export Vault env vars** in the shell / container detx runs in (these are the same env vars the official Vault CLI consults):
+4. **Export Vault env vars** in the shell / container dtex runs in (these are the same env vars the official Vault CLI consults):
 
    ```sh
    export VAULT_ADDR=https://vault.example.com:8200
@@ -213,7 +213,7 @@ Authentication is **token-based only in v1**: the resolver reads `VAULT_ADDR` an
 
 The `SecretResolver` protocol and `secret://` parsing exist so a manager can be added as a small package or a project-local plugin **without an engine change** — the same extensibility philosophy as the `StateBackend` in [05](./05-destinations-and-state.md). Resolved secret values are held only in memory for the duration of the run and are subject to the redaction rules in §6.
 
-> Resolved-secret caching is deferred — detx runs **fresh-every-run** (no on-disk cache). The per-process resolver instance is cached after first use (an SDK init only runs once per process), but every reference value is re-fetched on every run. See [chapter 11 Q11](./11-open-questions.md).
+> Resolved-secret caching is deferred — dtex runs **fresh-every-run** (no on-disk cache). The per-process resolver instance is cached after first use (an SDK init only runs once per process), but every reference value is re-fetched on every run. See [chapter 11 Q11](./11-open-questions.md).
 
 ### Writing a custom resolver
 
@@ -222,7 +222,7 @@ A resolver is any object whose class declares a `scheme: ClassVar[str]` and impl
 ```python
 # my_pkg/my_resolver.py
 from typing import ClassVar
-import detx
+import dtex
 
 class MyVaultResolver:
     scheme: ClassVar[str] = "my-vault"
@@ -234,52 +234,52 @@ def factory() -> MyVaultResolver:
     return MyVaultResolver()
 ```
 
-There are **two ways** to surface a resolver to detx:
+There are **two ways** to surface a resolver to dtex:
 
 1. **Entry-point** (for distributable packages). In `pyproject.toml`:
 
    ```toml
-   [project.entry-points."detx.secret_resolvers"]
+   [project.entry-points."dtex.secret_resolvers"]
    my-vault = "my_pkg.my_resolver:factory"
    ```
 
    The entry-point NAME is the scheme; the value is a `module:factory` pointing at the zero-arg factory. Loaded lazily — only on the first `secret://my-vault/...` reference.
 
-2. **Project-local `detx_plugins.py`** (no packaging required). Drop a file at the project root (next to `detx_project.yml`):
+2. **Project-local `dtex_plugins.py`** (no packaging required). Drop a file at the project root (next to `dtex_project.yml`):
 
    ```python
-   # detx_plugins.py
+   # dtex_plugins.py
    from typing import ClassVar
-   import detx
+   import dtex
 
    class MyResolver:
        scheme: ClassVar[str] = "my-scheme"
        def resolve(self, path, field):
            return _fetch(path, field)
 
-   detx.register_secret_resolver("my-scheme", MyResolver)
+   dtex.register_secret_resolver("my-scheme", MyResolver)
    ```
 
    The file runs once per project per process at engine startup. It is arbitrary Python with the engine's privileges — same trust model as `sources/<name>/source.py`.
 
 **Resolution precedence**: project-local registration always wins over an entry-point of the same scheme. Explicit beats implicit (same rule as project-local connectors shadowing baked ones, [03 §5](./03-connector-contract.md)).
 
-### Verifying resolution with `detx secrets test`
+### Verifying resolution with `dtex secrets test`
 
-The `detx secrets test` command resolves every declared reference and reports `✓` / `✗` per reference WITHOUT printing the resolved value — the operator can verify "my creds are wired up right" without leaking what they are. See [07 — CLI and Library API](./07-cli-and-library-api.md) for the full surface.
+The `dtex secrets test` command resolves every declared reference and reports `✓` / `✗` per reference WITHOUT printing the resolved value — the operator can verify "my creds are wired up right" without leaking what they are. See [07 — CLI and Library API](./07-cli-and-library-api.md) for the full surface.
 
 ---
 
 ## 4. `.gitignore` defaults
 
-`detx init` writes a `.gitignore` that pre-empts the most common credential leaks. A fresh project is safe by default:
+`dtex init` writes a `.gitignore` that pre-empts the most common credential leaks. A fresh project is safe by default:
 
 ```gitignore
-# detx — generated by `detx init`
+# dtex — generated by `dtex init`
 profiles.yml          # connection config & secrets — NEVER commit
 .env                  # local environment variables
 *.env
-.detx/            # run state, logs, local DuckDB files
+.dtex/            # run state, logs, local DuckDB files
 *.duckdb
 __pycache__/
 *.pyc
@@ -288,20 +288,20 @@ __pycache__/
 !profiles.example.yml
 ```
 
-`detx init` also drops a `profiles.example.yml` with the structure but placeholder values — this *is* committed, so a new teammate sees the expected shape without seeing a real key. detx prints a one-line reminder after `init`: *"profiles.yml is gitignored — never commit real credentials."*
+`dtex init` also drops a `profiles.example.yml` with the structure but placeholder values — this *is* committed, so a new teammate sees the expected shape without seeing a real key. dtex prints a one-line reminder after `init`: *"profiles.yml is gitignored — never commit real credentials."*
 
-A lightweight `detx test` (and CI) scans `profiles.yml`'s tracked status: if `profiles.yml` is somehow tracked by git, it emits a loud warning. detx cannot prevent a determined mistake, but it makes the safe path the default and the unsafe path noisy.
+A lightweight `dtex test` (and CI) scans `profiles.yml`'s tracked status: if `profiles.yml` is somehow tracked by git, it emits a loud warning. dtex cannot prevent a determined mistake, but it makes the safe path the default and the unsafe path noisy.
 
 ---
 
 ## 5. File permissions on `profiles.yml`
 
-A secrets file readable by every user on the host is a leak. On creation (`detx init`) and whenever detx writes `profiles.yml` or `.env`, it sets mode `0600` (owner read/write only). On every run, detx **checks** the mode of `profiles.yml`:
+A secrets file readable by every user on the host is a leak. On creation (`dtex init`) and whenever dtex writes `profiles.yml` or `.env`, it sets mode `0600` (owner read/write only). On every run, dtex **checks** the mode of `profiles.yml`:
 
 - World- or group-readable (`o+r` / `g+r`) → a `[warn]` log line: *"profiles.yml is readable by other users — run `chmod 600 profiles.yml`."*
-- This is a warning, not a hard failure: in some container setups the file is mounted read-only with broader bits and the operator has accepted that. detx informs; the operator decides.
+- This is a warning, not a hard failure: in some container setups the file is mounted read-only with broader bits and the operator has accepted that. dtex informs; the operator decides.
 
-The same `0600` expectation applies to `.env` and to any on-disk state that could contain a resolved secret. detx never writes resolved secret *values* to disk (see [chapter 11 Q11](./11-open-questions.md)).
+The same `0600` expectation applies to `.env` and to any on-disk state that could contain a resolved secret. dtex never writes resolved secret *values* to disk (see [chapter 11 Q11](./11-open-questions.md)).
 
 ---
 
@@ -309,8 +309,8 @@ The same `0600` expectation applies to `.env` and to any on-disk state that coul
 
 [09 — Logging and Observability](./09-logging-and-observability.md) specifies the log format; here is the security contract it must honor.
 
-- Every config key marked `secret: true` in `register.yaml`, and every value that arrived via `${ENV_VAR}` or `secret://`, is **redacted** to `***` in: stdout logs, `.detx/logs/` files, `--dry-run` config dumps, run records, and exception messages.
-- Redaction is by **value**, not just by key: detx builds a set of known secret values at run start and scrubs any occurrence of them from log strings before they are written. This catches a secret that leaks into, say, an HTTP error body echoed by a connector.
+- Every config key marked `secret: true` in `register.yaml`, and every value that arrived via `${ENV_VAR}` or `secret://`, is **redacted** to `***` in: stdout logs, `.dtex/logs/` files, `--dry-run` config dumps, run records, and exception messages.
+- Redaction is by **value**, not just by key: dtex builds a set of known secret values at run start and scrubs any occurrence of them from log strings before they are written. This catches a secret that leaks into, say, an HTTP error body echoed by a connector.
 - Connector code receives the *real* secret (it must, to authenticate) but the engine's logging layer sits between connector output and the log sink. A connector that deliberately `print()`s a secret bypasses redaction — see the trust model below.
 - URLs are redacted of userinfo and query strings that match secret values.
 
@@ -320,18 +320,18 @@ Redaction is best-effort and value-based; it is a strong safety net, not a guara
 
 ## 7. Trust model — running third-party connectors
 
-This is the most important and most under-appreciated security fact about detx, and the handbook will not soft-pedal it:
+This is the most important and most under-appreciated security fact about dtex, and the handbook will not soft-pedal it:
 
 > **A connector is arbitrary Python. Running a connector runs its code on your machine, with your privileges, with access to your credentials.**
 
-detx imports and executes `@stream` / `@destination` functions in-process. A community connector you `pip install` or copy into `connectors/` can read your `profiles.yml`, exfiltrate credentials, read any file your user can read, and make any network call. This is the same trust model as installing any PyPI package or a dbt package with macros — but it must be stated plainly because EL connectors are *expected* to handle credentials.
+dtex imports and executes `@stream` / `@destination` functions in-process. A community connector you `pip install` or copy into `connectors/` can read your `profiles.yml`, exfiltrate credentials, read any file your user can read, and make any network call. This is the same trust model as installing any PyPI package or a dbt package with macros — but it must be stated plainly because EL connectors are *expected* to handle credentials.
 
-**detx does not sandbox connector code in v1.** Claiming otherwise would be dishonest — true sandboxing (subprocess isolation, seccomp, containers, capability dropping) is hard, leaky, and out of scope for the v1 simplicity bar. What detx does instead:
+**dtex does not sandbox connector code in v1.** Claiming otherwise would be dishonest — true sandboxing (subprocess isolation, seccomp, containers, capability dropping) is hard, leaky, and out of scope for the v1 simplicity bar. What dtex does instead:
 
-1. **Provenance is explicit.** Pre-baked connectors ship inside the `detx` package and are reviewed as part of the project. Project-local connectors in `connectors/` are *your* code. A connector from anywhere else is third-party — treat it like any untrusted dependency.
+1. **Provenance is explicit.** Pre-baked connectors ship inside the `dtex` package and are reviewed as part of the project. Project-local connectors in `connectors/` are *your* code. A connector from anywhere else is third-party — treat it like any untrusted dependency.
 2. **Read the code.** A connector is a small folder of plain Python. Unlike an Airbyte connector image, it is *meant* to be read before you run it. The folder-of-Python design is itself a security feature: auditability.
-3. **`--allow-unsafe-connectors` gate (v2).** A planned flag so that running a connector whose source is outside the project or the baked set requires explicit opt-in. Without the flag, detx refuses to execute an unrecognized-provenance connector. This does not *sandbox* — it prevents *accidental* execution of untrusted code.
-4. **Least-privilege credentials.** The strongest practical mitigation, and operator-side: give each connector a credential scoped to exactly what it needs (a read-only API token, a warehouse role that can write only its own dataset). If a connector is malicious, the blast radius is that credential. detx's per-connector config makes this natural — every connector has its own credential block.
+3. **`--allow-unsafe-connectors` gate (v2).** A planned flag so that running a connector whose source is outside the project or the baked set requires explicit opt-in. Without the flag, dtex refuses to execute an unrecognized-provenance connector. This does not *sandbox* — it prevents *accidental* execution of untrusted code.
+4. **Least-privilege credentials.** The strongest practical mitigation, and operator-side: give each connector a credential scoped to exactly what it needs (a read-only API token, a warehouse role that can write only its own dataset). If a connector is malicious, the blast radius is that credential. dtex's per-connector config makes this natural — every connector has its own credential block.
 5. **Signed connector registry (v3).** If a public connector registry/marketplace materializes (see [10 — Roadmap](./10-roadmap-and-scope.md)), connectors would be signed and checksum-pinned, so what you audited is what you run. This is a future feature, not a v1 promise.
 
 Whether opt-in subprocess isolation is worth building (run each connector in
@@ -340,7 +340,7 @@ not stop a determined attacker but would contain accidents and reduce blast
 radius, at the cost of IPC complexity and the in-process simplicity. See
 [chapter 11 Q12](./11-open-questions.md).
 
-**Bottom line for the operator:** treat a detx connector exactly as you treat any third-party Python dependency. Pin versions, read the code of anything you did not write, scope every credential to least privilege, and prefer the pre-baked connectors when they exist.
+**Bottom line for the operator:** treat a dtex connector exactly as you treat any third-party Python dependency. Pin versions, read the code of anything you did not write, scope every credential to least privilege, and prefer the pre-baked connectors when they exist.
 
 ### Reference
 

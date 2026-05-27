@@ -1,12 +1,12 @@
 # Test-suite configs — both bound to the echo source (docs/12).
 #
 # Smoke + engine tests resolve `echo_dev` by name (`-p echo_dev` /
-# detx.run(config="echo_dev")). The DuckDB `path` defaults to the fixture
+# dtex.run(config="echo_dev")). The DuckDB `path` defaults to the fixture
 # profiles block; per-test overrides come in via run(destination_params_override=…).
 # The `echo_prod` config exists so tests can prove a different config name
 # routes the same source through a different target.
 #
-# Both configs carry tags so `detx run --tag <tag>` / `detx list --tag <tag>`
+# Both configs carry tags so `dtex run --tag <tag>` / `dtex list --tag <tag>`
 # tests have a fixture to bite on (stage 8d).
 configs:
   - name: echo_dev

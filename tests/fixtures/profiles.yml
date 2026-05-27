@@ -1,4 +1,4 @@
-# detx profiles for the engine test suite (docs/06 post-8.B + stage 8e).
+# dtex profiles for the engine test suite (docs/06 post-8.B + stage 8e).
 #
 # Normally NOT committed — here it is a test fixture, so it carries no real
 # secrets. Top-level keys are destination connector names (each carries its
@@ -18,9 +18,9 @@ duckdb:
   default_target: dev
   targets:
     dev:
-      path: ".detx/warehouse.duckdb"
+      path: ".dtex/warehouse.duckdb"
     prod:
-      path: ".detx/warehouse-prod.duckdb"
+      path: ".dtex/warehouse-prod.duckdb"
 
 # Per-target source-secret blocks. The `echo` fixture declares no secrets;
 # this is here so the secret-resolution engine test has a profile value to

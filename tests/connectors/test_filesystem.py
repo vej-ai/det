@@ -7,7 +7,7 @@ All real, no external services. Everything lives under ``tmp_path``:
 * Multi-file glob with deterministic sort by cursor key.
 * Incremental: a second run past the first file's cursor key skips it.
 * A malformed CSV raises a clear error naming the file.
-* End-to-end run via :func:`detx.run` lands rows in a tmp DuckDB and
+* End-to-end run via :func:`dtex.run` lands rows in a tmp DuckDB and
   exercises schema inference (no schema declared on the example stream).
 * Backend dispatch: GCS and S3 backends are unit-tested by monkeypatching
   the lazy SDK import — no live cloud calls.
@@ -27,14 +27,14 @@ from typing import Any
 import pytest
 import yaml
 
-from detx import Config, Cursor
+from dtex import Config, Cursor
 from tests.conftest import load_connector
 
 # Connector folder under the installed package — the engine resolves it
 # the same way; the test imports it directly via the conftest harness.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FILESYSTEM_CONNECTOR_DIR = (
-    _REPO_ROOT / "detx" / "sources" / "filesystem"
+    _REPO_ROOT / "dtex" / "sources" / "filesystem"
 )
 
 
@@ -116,7 +116,7 @@ def test_register_yaml_parses_and_declares_files_stream() -> None:
     assert files is not None
     assert files.is_incremental
     assert files.incremental is not None
-    assert files.incremental.cursor_field == "_detx_file_cursor"
+    assert files.incremental.cursor_field == "_dtex_file_cursor"
     # cursor_type is `timestamp`, not the natural `string` — see register.yaml
     # NOTE for the DuckDB JSON-binding constraint that forces this.
     assert files.incremental.cursor_type.value == "timestamp"
@@ -147,7 +147,7 @@ def test_csv_local_file_yields_50_rows_in_correct_batches(tmp_path: Path) -> Non
     assert flat[0]["id"] == "1"
     assert flat[0]["name"] == "row-1"
     # Synthetic cursor field is attached to every record.
-    assert all("_detx_file_cursor" in r for r in flat)
+    assert all("_dtex_file_cursor" in r for r in flat)
 
 
 def test_csv_without_header_uses_col_n_keys(tmp_path: Path) -> None:
@@ -161,7 +161,7 @@ def test_csv_without_header_uses_col_n_keys(tmp_path: Path) -> None:
     assert flat[0] == {
         "col_0": "a",
         "col_1": "1",
-        "_detx_file_cursor": flat[0]["_detx_file_cursor"],
+        "_dtex_file_cursor": flat[0]["_dtex_file_cursor"],
     }
 
 
@@ -245,9 +245,9 @@ def test_parquet_local_file_streams_rows(tmp_path: Path) -> None:
 def test_parquet_missing_pyarrow_raises_with_install_hint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """If pyarrow is absent the ImportError points the user at re-installing detx.
+    """If pyarrow is absent the ImportError points the user at re-installing dtex.
 
-    pyarrow ships in detx's base install (the BigQuery destination also needs
+    pyarrow ships in dtex's base install (the BigQuery destination also needs
     it). The error path exists for environments where the package was
     explicitly removed; the message tells the user to reinstall, not to add
     an extra (there is no `[parquet]` extra anymore).
@@ -265,7 +265,7 @@ def test_parquet_missing_pyarrow_raises_with_install_hint(
 
     # Force the lazy import to fail.
     monkeypatch.setitem(sys.modules, "pyarrow.parquet", None)
-    with pytest.raises(ImportError, match=r"pip install detx"):
+    with pytest.raises(ImportError, match=r"pip install dtex"):
         list(_run_stream(tmp_path, glob="**/*.parquet"))
 
 
@@ -424,7 +424,7 @@ def test_explicit_format_overrides_extension(tmp_path: Path) -> None:
 
 
 def test_synthetic_cursor_field_matches_file_cursor_key(tmp_path: Path) -> None:
-    """Every record carries ``_detx_file_cursor`` = its file's ISO cursor key.
+    """Every record carries ``_dtex_file_cursor`` = its file's ISO cursor key.
 
     Records from the same file share the same key; cursor.observe() is called
     once per file (with the typed datetime), so the observed max ends up at
@@ -448,7 +448,7 @@ def test_synthetic_cursor_field_matches_file_cursor_key(tmp_path: Path) -> None:
         cursor_type=stream_def.incremental.cursor_type,
     )
     flat = [r for batch in reg.func(config=config, cursor=cursor) for r in batch]
-    keys = {r["id"]: r["_detx_file_cursor"] for r in flat}
+    keys = {r["id"]: r["_dtex_file_cursor"] for r in flat}
     # Records 1 and 2 (same file) share a cursor key (ISO string).
     assert keys["1"] == keys["2"]
     # Record 3 has a different (newer) one.
@@ -460,12 +460,12 @@ def test_synthetic_cursor_field_matches_file_cursor_key(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end via detx.run — schema inference into DuckDB
+# End-to-end via dtex.run — schema inference into DuckDB
 # ---------------------------------------------------------------------------
 
 
 def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
-    """A real ``detx.run`` infers a schema, lands rows, advances the cursor.
+    """A real ``dtex.run`` infers a schema, lands rows, advances the cursor.
 
     No declared schema on the example stream → engine infers from the first
     batch. This is the most important test: it proves the whole pipeline
@@ -474,14 +474,14 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
     """
     import duckdb
 
-    import detx
+    import dtex
 
     # Project root with this connector visible. The filesystem source is
-    # baked under detx/sources/, so a project with no local sources still
+    # baked under dtex/sources/, so a project with no local sources still
     # finds it via the baked search root.
     project_root = tmp_path / "project"
     project_root.mkdir()
-    (project_root / "detx_project.yml").write_text(
+    (project_root / "dtex_project.yml").write_text(
         textwrap.dedent(
             """\
             name: filesystem_e2e_test
@@ -525,7 +525,7 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
     )
 
     db_path = tmp_path / "warehouse.duckdb"
-    result = detx.run(
+    result = dtex.run(
         config="filesystem_dev",
         project_dir=str(project_root),
         params_override={"path": str(data_dir), "glob": "**/*.csv", "batch_size": 100},
@@ -551,12 +551,12 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
         ]
         # The cursor column is also present (inferred as STRING / VARCHAR).
         cursor_vals = conn.execute(
-            "SELECT DISTINCT _detx_file_cursor FROM files"
+            "SELECT DISTINCT _dtex_file_cursor FROM files"
         ).fetchall()
         assert len(cursor_vals) == 1, "all rows came from one file → one cursor key"
         # State row carries the cursor advance.
         state_after_run1 = conn.execute(
-            "SELECT cursor_value FROM _detx_state "
+            "SELECT cursor_value FROM _dtex_state "
             "WHERE connector = 'filesystem' AND stream = 'files'"
         ).fetchall()
         assert len(state_after_run1) == 1
@@ -567,7 +567,7 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
     # Second run: no new files → 0 rows loaded, state cursor_value must NOT
     # regress (the source re-observes the resume value so the engine writes
     # back a clean datetime, not a stale string — see source.py NOTE).
-    result2 = detx.run(
+    result2 = dtex.run(
         config="filesystem_dev",
         project_dir=str(project_root),
         params_override={"path": str(data_dir), "glob": "**/*.csv", "batch_size": 100},
@@ -579,7 +579,7 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
     conn = duckdb.connect(str(db_path))
     try:
         state_after_run2 = conn.execute(
-            "SELECT cursor_value FROM _detx_state "
+            "SELECT cursor_value FROM _dtex_state "
             "WHERE connector = 'filesystem' AND stream = 'files'"
         ).fetchall()
         # Cursor must be stable (no regression, no double-stamp) — the
@@ -596,7 +596,7 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
 
 def test_pick_backend_dispatches_on_scheme() -> None:
     """URI scheme → backend type. Bad scheme raises listing the valid set."""
-    from detx.sources.filesystem.backends import (
+    from dtex.sources.filesystem.backends import (
         GcsBackend,
         LocalBackend,
         S3Backend,
@@ -614,27 +614,27 @@ def test_pick_backend_dispatches_on_scheme() -> None:
 def test_gcs_backend_missing_dep_raises_with_install_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing google-cloud-storage raises ImportError naming ``detx[gcs]``."""
-    from detx.sources.filesystem.backends import GcsBackend
+    """A missing google-cloud-storage raises ImportError naming ``dtex[gcs]``."""
+    from dtex.sources.filesystem.backends import GcsBackend
 
     # Pretend the SDK is not importable — sentinel `None` triggers ImportError
     # in `from google.cloud import storage`.
     monkeypatch.setitem(sys.modules, "google.cloud.storage", None)
     monkeypatch.setitem(sys.modules, "google.cloud", None)
     backend = GcsBackend(bucket="b", prefix="p")
-    with pytest.raises(ImportError, match=r"detx\[gcs\]"):
+    with pytest.raises(ImportError, match=r"dtex\[gcs\]"):
         backend.list_files("gs://b/p", "**/*.csv", cursor_strategy="mtime")
 
 
 def test_s3_backend_missing_dep_raises_with_install_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing boto3 raises ImportError naming ``detx[s3]``."""
-    from detx.sources.filesystem.backends import S3Backend
+    """A missing boto3 raises ImportError naming ``dtex[s3]``."""
+    from dtex.sources.filesystem.backends import S3Backend
 
     monkeypatch.setitem(sys.modules, "boto3", None)
     backend = S3Backend(bucket="b", prefix="p")
-    with pytest.raises(ImportError, match=r"detx\[s3\]"):
+    with pytest.raises(ImportError, match=r"dtex\[s3\]"):
         backend.list_files("s3://b/p", "**/*.csv", cursor_strategy="mtime")
 
 
@@ -650,7 +650,7 @@ def test_gcs_backend_lists_files_via_mocked_sdk(
     from datetime import UTC, datetime
     from types import ModuleType, SimpleNamespace
 
-    from detx.sources.filesystem.backends import GcsBackend
+    from dtex.sources.filesystem.backends import GcsBackend
 
     blob_a = SimpleNamespace(
         name="exports/a.csv",
@@ -705,7 +705,7 @@ def test_s3_backend_lists_files_via_mocked_sdk(
     from datetime import UTC, datetime
     from types import ModuleType
 
-    from detx.sources.filesystem.backends import S3Backend
+    from dtex.sources.filesystem.backends import S3Backend
 
     pages = [
         {

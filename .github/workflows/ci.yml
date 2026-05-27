@@ -46,7 +46,7 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install detx with all extras
+      - name: Install dtex with all extras
         run: pip install -e ".[dev,gcs,s3,gcp-secrets,aws-secrets,vault]"
 
       - name: Run pytest
@@ -65,7 +65,7 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install detx with all extras
+      - name: Install dtex with all extras
         # mypy needs the cloud SDKs importable to type-check the
         # secret-resolver + cloud-backend modules cleanly.
         run: pip install -e ".[dev,gcs,s3,gcp-secrets,aws-secrets,vault]"
@@ -74,4 +74,4 @@ jobs:
         run: ruff check .
 
       - name: mypy
-        run: mypy detx
+        run: mypy dtex

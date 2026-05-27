@@ -1,4 +1,4 @@
-> Archived 2026-05; written when the tool was called `det`. Renamed to `detx` after PyPI name collision. Body preserved as-is.
+> Archived 2026-05; originally written when the tool was called `det`. Renamed to `dtex` for the first public release (with a brief intermediate name `detx`). Body preserved as-is.
 >
 > Archived: research note that informed the Stripe connector design. Kept for historical context; not user documentation.
 

@@ -1,20 +1,20 @@
 # 02 — Architecture
 
-> Part of the **detx** design handbook. This file describes the core engine.
+> Part of the **dtex** design handbook. This file describes the core engine.
 > The **connector contract**, the **destination capability tiers**, and the
 > **CLI surface** are referenced here but fully specified by other handbook
 > files — this document defines how the engine *uses* them, not their details.
 
 ## The triad: engine / library / project
 
-detx borrows dbt's separation between *the tool* and *the work*. There are
+dtex borrows dbt's separation between *the tool* and *the work*. There are
 three things, and keeping them distinct keeps the system simple.
 
 ```
-                          detx  (the pip-installed Python package)
+                          dtex  (the pip-installed Python package)
    ┌──────────────────────────────────────────────────────────────────┐
    │  ENGINE          the run loop: discover, resolve, run, commit     │
-   │  LIBRARY (API)   detx.run(...) — equal first-class to the CLI │
+   │  LIBRARY (API)   dtex.run(...) — equal first-class to the CLI │
    │  BAKED CONNECTORS  meta_ads/, stripe/, bigquery/, ...  (folders)  │
    └──────────────────────────────────────────────────────────────────┘
                                   ▲
@@ -22,7 +22,7 @@ three things, and keeping them distinct keeps the system simple.
                        executes   │
                                   ▼
    my_data_project/   (the user-owned PROJECT folder — in their repo)
-   ├── detx_project.yml      project config: name, defaults, tags
+   ├── dtex_project.yml      project config: name, defaults, tags
    ├── profiles.yml              environment config + secrets refs
    └── connectors/
        ├── custom/               a custom SOURCE connector folder
@@ -36,12 +36,12 @@ three things, and keeping them distinct keeps the system simple.
 | Component | dbt analogue | Responsibility |
 |---|---|---|
 | **Engine** | `dbt-core` internals | Discovery, config resolution, the run lifecycle, state, the run record. |
-| **Library** | importable `dbt` | `from detx import run` — programmatic entry, equal to the CLI. |
-| **CLI** | the `dbt` binary | `detx run -p <config>` / `--tag <tag>`. A thin shell over the library. |
-| **Baked connectors** | dbt's built-in macros | Connector folders shipped *inside* `detx`. |
-| **Project** | a dbt project | User-owned folder: `detx_project.yml`, `profiles.yml`, `connectors/`. |
+| **Library** | importable `dbt` | `from dtex import run` — programmatic entry, equal to the CLI. |
+| **CLI** | the `dbt` binary | `dtex run -p <config>` / `--tag <tag>`. A thin shell over the library. |
+| **Baked connectors** | dbt's built-in macros | Connector folders shipped *inside* `dtex`. |
+| **Project** | a dbt project | User-owned folder: `dtex_project.yml`, `profiles.yml`, `connectors/`. |
 
-The CLI and the library are **the same engine** with two front doors. `detx
+The CLI and the library are **the same engine** with two front doors. `dtex
 run` parses argv and calls the same `run()` the library exposes. Nothing the CLI
 can do is unavailable to the library, and vice versa.
 
@@ -50,7 +50,7 @@ can do is unavailable to the library, and vice versa.
 A connector is named, not pathed. The engine resolves a name by precedence:
 
 1. **Project-local** — `connectors/<name>/` in the user's project. (`"custom"`.)
-2. **Baked** — `<name>/` inside the `detx` package. (`"meta_ads"`.)
+2. **Baked** — `<name>/` inside the `dtex` package. (`"meta_ads"`.)
 
 Project-local wins on a name clash, so a user can shadow a baked connector with
 their own fork. Resolution produces a **ConnectorHandle**: the folder path, the
@@ -59,26 +59,26 @@ destinations resolve through the *same* path — they are the same kind of objec
 
 ## Run lifecycle
 
-A `detx run` (or `detx.run()`) is one synchronous pass through a fixed
+A `dtex run` (or `dtex.run()`) is one synchronous pass through a fixed
 sequence. It either reaches `commit` and exits `0`, or it fails and exits non-zero.
 
 The runtime unit is a **config** (chapter 12) — a pipeline file under
 `configs/` naming source + destination + target + params. The CLI's `-p` /
-`--conf` arg names the config; the library's `detx.run(config=...)` mirrors it.
+`--conf` arg names the config; the library's `dtex.run(config=...)` mirrors it.
 
 ```
-  detx run -p my_pipeline
+  dtex run -p my_pipeline
         │
         ▼
   ┌─────────────────────────────────────────────────────────────────┐
   │ 1. DISCOVER    locate project; LOAD CONFIG by name; resolve     │
   │                its source + destination (project-local-first)    │
-  │ 2. RESOLVE     merge register.yaml + detx_project.yml vars +     │
+  │ 2. RESOLVE     merge register.yaml + dtex_project.yml vars +     │
   │                config params + profiles.yml row + env + CLI     │
   │                → one frozen RunConfig                            │
   │ 3. INIT DEST   open destination connector; ensure it is ready;   │
   │                determine its capability tier                    │
-  │ 4. LOAD STATE  read _detx_state from the destination (keyed by   │
+  │ 4. LOAD STATE  read _dtex_state from the destination (keyed by   │
   │                source name — chapter 12 §6)                     │
   │ 5. RUN STREAMS for each selected stream  (sequential in v1):     │
   │      a. EXTRACT    drive the @stream generator → batches         │
@@ -94,11 +94,11 @@ The runtime unit is a **config** (chapter 12) — a pipeline file under
 
 Steps 1–4 are setup; step 5 is the real work; step 6 is the audit trail.
 
-- **Discover** — find the project root (walk up for `detx_project.yml`),
+- **Discover** — find the project root (walk up for `dtex_project.yml`),
   load `configs/` and look up the named config, resolve its source +
   destination via project-local-first lookup (chapter 03 §5).
 - **Resolve** — merge every config layer. For a source param:
-  `register.yaml` defaults → `detx_project.yml` `vars:` → the active config's
+  `register.yaml` defaults → `dtex_project.yml` `vars:` → the active config's
   `params:` block → environment variables → CLI/`run()` overrides. For a
   destination param: register.yaml defaults → project `vars:` →
   `profiles.yml[<destination>].targets[<target>]` → config's
@@ -107,11 +107,11 @@ Steps 1–4 are setup; step 5 is the real work; step 6 is the audit trail.
 - **Init destination** — open the destination connector and confirm it can
   receive writes. This also fixes its **capability tier** (next section), which
   decides where state lives.
-- **Load state** — read prior cursors from `_detx_state` so incremental
+- **Load state** — read prior cursors from `_dtex_state` so incremental
   streams know where they left off. A cold destination simply yields empty state.
 - **Run streams** — the loop below.
 - **Run record** — a machine-readable record (and a human summary) of what
-  happened. This is detx's audit surface; it is *not* a metadata catalog.
+  happened. This is dtex's audit surface; it is *not* a metadata catalog.
 
 ### Commit granularity
 
@@ -176,11 +176,11 @@ handbook.)
 
 ## Pipeline selection — by config name or config tag
 
-detx selects work by **pipeline config**:
+dtex selects work by **pipeline config**:
 
-- `detx run -p shiphero_prod` — run one pipeline by its config name.
-- `detx run --conf shiphero_prod` — same, long-form alias.
-- `detx run --tag hourly` — run every pipeline config whose `tags:` list
+- `dtex run -p shiphero_prod` — run one pipeline by its config name.
+- `dtex run --conf shiphero_prod` — same, long-form alias.
+- `dtex run --tag hourly` — run every pipeline config whose `tags:` list
   includes `hourly`. Sequential, in alphabetical config-name order.
 
 `-p/--conf` and `--tag` are mutually exclusive — exactly one selector per
@@ -202,12 +202,12 @@ tags: [hourly, production]
 
 Tags are normalized to lowercase at parse time and deduplicated; selection
 is by exact match (no glob/regex). The library equivalent is
-`detx.run_tag(tag, ...)` — returns a `list[RunResult]` so the caller decides
+`dtex.run_tag(tag, ...)` — returns a `list[RunResult]` so the caller decides
 overall outcome.
 
 The `tags:` key on a source's or destination's `register.yaml` is its
-own namespace — it shows up in `detx list` and `detx list --tag` for catalog
-filtering, but does NOT drive `detx run --tag`. Clean separation:
+own namespace — it shows up in `dtex list` and `dtex list --tag` for catalog
+filtering, but does NOT drive `dtex run --tag`. Clean separation:
 source/destination tags describe what the connector *is*; config tags
 describe *how and when* to run a pipeline.
 
@@ -218,31 +218,31 @@ table. Destinations therefore have **capability tiers**, fixed at *init* time:
 
 | Tier | Examples | State storage | Notes |
 |---|---|---|---|
-| **Tier A — Stateful warehouse** | BigQuery, Snowflake, Postgres | `_detx_state` table *inside the destination* | The simple, default case. One destination, one place for everything. |
+| **Tier A — Stateful warehouse** | BigQuery, Snowflake, Postgres | `_dtex_state` table *inside the destination* | The simple, default case. One destination, one place for everything. |
 | **Tier B — Stateless storage** | S3, GCS, local files | A **companion state backend** alongside the data | Object storage cannot host a queryable state table; a sidecar is required. |
 
 A Tier B destination resolves a companion state backend (declared via the
 `@destination.state_backend` hook); the engine routes **load state** / **commit
 state** there instead of to the data target. The stream-running logic is
 identical across tiers — only the state I/O path differs. The v1 default Tier B
-backend is a **sidecar JSON file** (`_detx_state.json`) co-located with the
+backend is a **sidecar JSON file** (`_dtex_state.json`) co-located with the
 data; the backend interface is pluggable so a transactional store can be added
 later without an engine change. (Full detail: *05 — Destinations & State*.)
 
 ## Concurrency model
 
-detx's concurrency stance is deliberately minimal — concurrency is the most
+dtex's concurrency stance is deliberately minimal — concurrency is the most
 reliable place for an EL tool to acquire bugs, so v1 spends its complexity budget
 elsewhere.
 
-- **Across pipelines: opt-in parallel.** `detx run --tag <T>` may run matched
+- **Across pipelines: opt-in parallel.** `dtex run --tag <T>` may run matched
   configs concurrently via a `ThreadPoolExecutor` sized by `profiles.yml`'s
   top-level `threads:` (default 1, dbt-style) or the `--threads N` CLI
   override. Each destination declares a per-destination cap via the
   optional `@destination.max_concurrent_writes` hook; the engine enforces
   `min(threads, per-destination cap)` via per-destination semaphores. DuckDB
   returns 1 (file lock); BigQuery returns 10 (default; overridable
-  per-target). A `detx run -p X` single-config invocation is unaffected — the
+  per-target). A `dtex run -p X` single-config invocation is unaffected — the
   parallel path only fires for the multi-config `--tag` surface. See
   chapter 06 §`threads:` and chapter 07 §`--threads`.
 - **Across streams: sequential.** Streams within one pipeline still run
@@ -298,7 +298,7 @@ By design, the architecture references three things specified elsewhere:
   `@resource` signatures, and the class escape hatch.
 - **Destinations** — the per-destination write semantics and the Tier B
   companion-backend implementation.
-- **CLI** — the full `detx` command/flag surface.
+- **CLI** — the full `dtex` command/flag surface.
 
 The engine's promise to all three is constant: discover them, resolve their
 config into a frozen `RunConfig`, drive their generators through extract →

@@ -1,17 +1,17 @@
-"""Behavioral tests for the detx decorator + registration layer.
+"""Behavioral tests for the dtex decorator + registration layer.
 
-Exercises ``detx/registry.py``: ``@stream`` / ``@resource`` registration
+Exercises ``dtex/registry.py``: ``@stream`` / ``@resource`` registration
 and callability, the full ``@destination`` hook namespace, import-time
 validation of bad hook names and bad signatures, the ``Connector`` /
 ``@stream_method`` escape hatch, the argument-injection helper, per-connector
-registration isolation, and the public ``detx`` API surface.
+registration isolation, and the public ``dtex`` API surface.
 """
 
 import inspect
 
 import pytest
 
-from detx.registry import (
+from dtex.registry import (
     DESTINATION_HOOKS,
     MANDATORY_DESTINATION_HOOKS,
     STREAM_INJECTABLES,
@@ -22,7 +22,7 @@ from detx.registry import (
     compute_injection,
     registration_scope,
 )
-from detx.types import ConnectorKind
+from dtex.types import ConnectorKind
 
 # ---------------------------------------------------------------------------
 # Public API surface
@@ -30,8 +30,8 @@ from detx.types import ConnectorKind
 
 
 def test_public_api_decorators_importable() -> None:
-    """`from detx import stream, resource, destination, Connector` works."""
-    from detx import Connector, destination, resource, stream, stream_method
+    """`from dtex import stream, resource, destination, Connector` works."""
+    from dtex import Connector, destination, resource, stream, stream_method
 
     assert callable(stream)
     assert resource is stream  # @resource is a literal alias
@@ -41,8 +41,8 @@ def test_public_api_decorators_importable() -> None:
 
 
 def test_public_api_exposes_contract_types() -> None:
-    """The contract types a connector author needs are re-exported from detx."""
-    import detx
+    """The contract types a connector author needs are re-exported from dtex."""
+    import dtex
 
     for name in (
         "Capability",
@@ -60,15 +60,15 @@ def test_public_api_exposes_contract_types() -> None:
         "SchemaContract",
         "ConnectorKind",
     ):
-        assert hasattr(detx, name), f"detx is missing {name}"
-        assert name in detx.__all__
+        assert hasattr(dtex, name), f"dtex is missing {name}"
+        assert name in dtex.__all__
 
 
 def test_version_still_exported() -> None:
     """__version__ survives the public-API wiring."""
-    import detx
+    import dtex
 
-    assert detx.__version__ == "0.1.0"
+    assert dtex.__version__ == "0.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def test_version_still_exported() -> None:
 
 def test_stream_registers_and_stays_callable() -> None:
     """A @stream function registers in scope and remains directly callable."""
-    from detx import stream
+    from dtex import stream
 
     with registration_scope("demo_source") as reg:
 
@@ -99,7 +99,7 @@ def test_stream_registers_and_stays_callable() -> None:
 
 def test_stream_preserves_wraps_metadata() -> None:
     """@stream preserves the wrapped function's name/docstring via functools.wraps."""
-    from detx import stream
+    from dtex import stream
 
     with registration_scope("demo"):
 
@@ -114,7 +114,7 @@ def test_stream_preserves_wraps_metadata() -> None:
 
 def test_stream_callable_outside_any_scope() -> None:
     """Outside a registration scope @stream is a no-op but the function still works."""
-    from detx import stream
+    from dtex import stream
 
     assert active_registry() is None
 
@@ -125,13 +125,13 @@ def test_stream_callable_outside_any_scope() -> None:
     # No scope was open, so nothing was registered — but the function runs and
     # self-describes via its stamped metadata.
     assert list(standalone(config=None, log=None)) == [[{"ok": True}]]
-    assert standalone.__detx_stream_name__ == "standalone"  # type: ignore[attr-defined]
-    assert standalone.__detx_inject__ == ("config", "log")  # type: ignore[attr-defined]
+    assert standalone.__dtex_stream_name__ == "standalone"  # type: ignore[attr-defined]
+    assert standalone.__dtex_inject__ == ("config", "log")  # type: ignore[attr-defined]
 
 
 def test_stream_requires_name() -> None:
     """A bare @stream (no name=) raises a clear error at import time."""
-    from detx import stream
+    from dtex import stream
 
     with pytest.raises(TypeError, match="non-empty string 'name'"):
 
@@ -145,7 +145,7 @@ def test_stream_requires_name() -> None:
 
 def test_stream_rejects_unknown_parameter() -> None:
     """A @stream declaring a non-injectable parameter fails at decoration time."""
-    from detx import stream
+    from dtex import stream
 
     with pytest.raises(TypeError, match="widget"):
 
@@ -156,7 +156,7 @@ def test_stream_rejects_unknown_parameter() -> None:
 
 def test_stream_duplicate_name_within_connector_raises() -> None:
     """Two @stream with the same name in one connector raise at import time."""
-    from detx import stream
+    from dtex import stream
 
     with pytest.raises(ValueError, match="registered twice"):
         with registration_scope("dupes"):
@@ -172,7 +172,7 @@ def test_stream_duplicate_name_within_connector_raises() -> None:
 
 def test_stream_with_no_injectables_is_allowed() -> None:
     """A @stream may declare no injectables at all."""
-    from detx import stream
+    from dtex import stream
 
     with registration_scope("c") as reg:
 
@@ -190,7 +190,7 @@ def test_stream_with_no_injectables_is_allowed() -> None:
 
 def test_resource_behaves_identically_to_stream() -> None:
     """@resource registers a stream exactly like @stream — docs/03 §3.3."""
-    from detx import resource
+    from dtex import resource
 
     with registration_scope("dlt_style") as reg:
 
@@ -212,7 +212,7 @@ def test_resource_behaves_identically_to_stream() -> None:
 
 def test_destination_full_hook_set_registers() -> None:
     """The full @destination hook set registers under the correct hook names."""
-    from detx import destination
+    from dtex import destination
 
     with registration_scope("bigquery") as reg:
 
@@ -269,7 +269,7 @@ def test_destination_full_hook_set_registers() -> None:
 
 def test_destination_hook_lookup_and_record() -> None:
     """A registered hook is retrievable and carries its function."""
-    from detx import destination
+    from dtex import destination
 
     with registration_scope("d") as reg:
 
@@ -285,7 +285,7 @@ def test_destination_hook_lookup_and_record() -> None:
 
 def test_destination_bad_hook_name_raises_at_import() -> None:
     """A typo'd @destination hook name raises AttributeError at import time."""
-    from detx import destination
+    from dtex import destination
 
     with pytest.raises(AttributeError, match="not a valid destination hook"):
 
@@ -296,7 +296,7 @@ def test_destination_bad_hook_name_raises_at_import() -> None:
 
 def test_destination_hook_preserves_wraps_metadata() -> None:
     """A @destination hook preserves functools.wraps metadata."""
-    from detx import destination
+    from dtex import destination
 
     with registration_scope("d"):
 
@@ -311,7 +311,7 @@ def test_destination_hook_preserves_wraps_metadata() -> None:
 
 def test_destination_duplicate_hook_raises() -> None:
     """Defining the same @destination hook twice raises at import time."""
-    from detx import destination
+    from dtex import destination
 
     with pytest.raises(ValueError, match="registered twice"):
         with registration_scope("d"):
@@ -327,7 +327,7 @@ def test_destination_duplicate_hook_raises() -> None:
 
 def test_destination_missing_mandatory_hooks_reported() -> None:
     """missing_mandatory_hooks lists the unconditionally-required hooks not defined."""
-    from detx import destination
+    from dtex import destination
 
     with registration_scope("partial") as reg:
 
@@ -341,7 +341,7 @@ def test_destination_missing_mandatory_hooks_reported() -> None:
 
 def test_mixing_stream_and_destination_raises() -> None:
     """A connector cannot register both @stream and @destination — docs/03 §2.1."""
-    from detx import destination, stream
+    from dtex import destination, stream
 
     with pytest.raises(TypeError, match="source or a destination"):
         with registration_scope("confused"):
@@ -362,7 +362,7 @@ def test_mixing_stream_and_destination_raises() -> None:
 
 def test_connector_subclass_and_stream_method() -> None:
     """A Connector subclass registers its @stream_method streams and stays usable."""
-    from detx import Connector, stream_method
+    from dtex import Connector, stream_method
 
     with registration_scope("complex_erp") as reg:
 
@@ -397,7 +397,7 @@ def test_connector_subclass_and_stream_method() -> None:
 
 def test_stream_method_rejects_config_param() -> None:
     """@stream_method must not declare 'config' — docs/03 §4 (use self.config)."""
-    from detx import stream_method
+    from dtex import stream_method
 
     with pytest.raises(TypeError, match="config"):
 
@@ -409,7 +409,7 @@ def test_stream_method_rejects_config_param() -> None:
 
 def test_connector_base_setup_teardown_are_optional_noops() -> None:
     """The Connector base setup/teardown default to harmless no-ops."""
-    from detx import Connector
+    from dtex import Connector
 
     with registration_scope("plain"):
 
@@ -424,7 +424,7 @@ def test_connector_base_setup_teardown_are_optional_noops() -> None:
 
 def test_connector_defined_outside_scope_is_noop() -> None:
     """A Connector subclass defined outside a scope registers nothing but works."""
-    from detx import Connector, stream_method
+    from dtex import Connector, stream_method
 
     assert active_registry() is None
 
@@ -444,7 +444,7 @@ def test_connector_defined_outside_scope_is_noop() -> None:
 
 def test_compute_injection_picks_declared_kwargs() -> None:
     """compute_injection returns exactly the injectables the function declares."""
-    from detx import stream
+    from dtex import stream
 
     @stream(name="picky")
     def picky(config, cursor):  # type: ignore[no-untyped-def]
@@ -460,7 +460,7 @@ def test_compute_injection_picks_declared_kwargs() -> None:
 
 def test_compute_injection_empty_for_no_param_function() -> None:
     """A stream declaring no injectables gets an empty kwargs dict."""
-    from detx import stream
+    from dtex import stream
 
     @stream(name="none")
     def none():  # type: ignore[no-untyped-def]
@@ -471,7 +471,7 @@ def test_compute_injection_empty_for_no_param_function() -> None:
 
 def test_compute_injection_missing_injectable_raises() -> None:
     """A declared injectable absent from the available dict raises a clear error."""
-    from detx import stream
+    from dtex import stream
 
     @stream(name="needs_cursor")
     def needs_cursor(config, cursor):  # type: ignore[no-untyped-def]
@@ -488,13 +488,13 @@ def test_compute_injection_rejects_undecorated_function() -> None:
     def plain(config):  # type: ignore[no-untyped-def]
         yield []
 
-    with pytest.raises(TypeError, match="not a detx stream function"):
+    with pytest.raises(TypeError, match="not a dtex stream function"):
         compute_injection(plain, {"config": 1})
 
 
 def test_compute_injection_works_for_stream_method() -> None:
     """compute_injection works for @stream_method functions too (config excluded)."""
-    from detx import Connector, stream_method
+    from dtex import Connector, stream_method
 
     with registration_scope("m") as reg:
 
@@ -510,7 +510,7 @@ def test_compute_injection_works_for_stream_method() -> None:
 
 def test_stream_rejects_var_args() -> None:
     """A @stream using *args/**kwargs is rejected — not by-name injectable."""
-    from detx import stream
+    from dtex import stream
 
     with pytest.raises(TypeError, match=r"\*"):
 
@@ -526,7 +526,7 @@ def test_stream_rejects_var_args() -> None:
 
 def test_two_connectors_registrations_do_not_collide() -> None:
     """Identically named streams in two connectors land in separate registries."""
-    from detx import stream
+    from dtex import stream
 
     with registration_scope("connector_a") as reg_a:
 
@@ -560,7 +560,7 @@ def test_scope_isolation_resets_after_exit() -> None:
 
 def test_multiple_files_one_connector_share_registry() -> None:
     """Decorators run at different points in one scope share the same registry."""
-    from detx import stream
+    from dtex import stream
 
     with registration_scope("multi_file") as reg:
         # Simulates source.py being imported.
@@ -611,7 +611,7 @@ def test_stream_registration_is_frozen() -> None:
 
 def test_decorated_function_signature_is_inspectable() -> None:
     """functools.wraps keeps the wrapped function's signature inspectable."""
-    from detx import stream
+    from dtex import stream
 
     @stream(name="sig")
     def sig(config, state, cursor, log):  # type: ignore[no-untyped-def]

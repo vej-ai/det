@@ -1,6 +1,6 @@
 # Security Policy
 
-detx is open source and self-hosted. There is no managed backend; the engine,
+dtex is open source and self-hosted. There is no managed backend; the engine,
 the baked connectors, and the contract enforcement all run on your machines.
 This document covers **how to report a vulnerability** and **what is in
 scope**. For the full threat model — secrets handling, redaction, the
@@ -27,12 +27,12 @@ Two ways to report, in order of preference:
 
 1. **GitHub private Security Advisory** (preferred) — open a draft advisory
    at
-   <https://github.com/vej-ai/detx/security/advisories/new>.
+   <https://github.com/vej-ai/dtex/security/advisories/new>.
    This keeps the report private until a fix is ready and lets us
    coordinate a CVE if appropriate.
 
 2. **Email** — `security@vej.ai`. Include a description of the issue, the
-   detx version (`detx --version`), reproduction steps, and any proof-of-
+   dtex version (`dtex --version`), reproduction steps, and any proof-of-
    concept code. PGP is not currently required.
 
 ### What to expect
@@ -49,10 +49,10 @@ anonymous, please say so in your report.
 
 ## Scope
 
-**In scope** — the detx engine and its baked artifacts:
+**In scope** — the dtex engine and its baked artifacts:
 
-- The engine and CLI (`detx run`, `detx validate`, `detx state`, `detx runs`,
-  `detx secrets test`, etc.).
+- The engine and CLI (`dtex run`, `dtex validate`, `dtex state`, `dtex runs`,
+  `dtex secrets test`, etc.).
 - The connector contract: discovery, config resolution, manifest validation,
   the `@stream` / `@resource` / `@destination` decorators.
 - The baked source connectors: `filesystem`, `rest`, `postgres`, `shiphero`,
@@ -60,12 +60,12 @@ anonymous, please say so in your report.
 - The baked destination connectors: `duckdb`, `bigquery`.
 - The baked secret-manager resolvers: `gcp-secret-manager`,
   `aws-secrets-manager`, `vault`.
-- Log redaction, the `_detx_state` / `_detx_runs` tables, the run-record
+- Log redaction, the `_dtex_state` / `_dtex_runs` tables, the run-record
   surface.
 
 Examples of in-scope issues: a secret leaking into a log line or run
 record, a config-resolution bug that lets one target read another's
-state, a path-traversal in `detx init` / `detx new`, a resolver that
+state, a path-traversal in `dtex init` / `dtex new`, a resolver that
 returns a secret value to a calling-side error message, a destination
 write path that can corrupt or partially commit data without rolling back.
 
@@ -74,15 +74,15 @@ write path that can corrupt or partially commit data without rolling back.
 - Bugs in `google-cloud-bigquery`, `google-cloud-storage`, `psycopg`,
   `requests`, `boto3`, `hvac`, `pyarrow`, `duckdb`, `pyyaml`, or any other
   dependency listed in `pyproject.toml`. Please report those upstream; if
-  the bug has a detx-side mitigation, we will accept a separate report on
+  the bug has a dtex-side mitigation, we will accept a separate report on
   that mitigation.
 - The security posture of a **third-party connector** you installed from
-  outside the baked set. detx does not sandbox connector code
+  outside the baked set. dtex does not sandbox connector code
   (see [`docs/08-security.md` §7](./docs/08-security.md)). A malicious
   connector running with your credentials is a known limitation of the v1
-  trust model, not a vulnerability in detx itself.
+  trust model, not a vulnerability in dtex itself.
 - Operational misconfiguration: a committed `profiles.yml`, a world-readable
-  `.env`, an over-broad warehouse role. detx documents the safe defaults
+  `.env`, an over-broad warehouse role. dtex documents the safe defaults
   ([`docs/08-security.md` §4–5](./docs/08-security.md)) and warns when it
   can detect drift; correct operation is on the operator.
 

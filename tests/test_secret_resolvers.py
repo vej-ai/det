@@ -1,4 +1,4 @@
-"""Tests for the ``detx.secrets`` package — stage 9a.
+"""Tests for the ``dtex.secrets`` package — stage 9a.
 
 Covers the :class:`SecretResolver` Protocol, the URL parser, the
 project-local + entry-points discovery mechanisms, and the Redactor
@@ -21,9 +21,9 @@ from typing import ClassVar
 
 import pytest
 
-import detx
-from detx.engine.logger import Redactor, build_logger
-from detx.secrets import (
+import dtex
+from dtex.engine.logger import Redactor, build_logger
+from dtex.secrets import (
     SecretResolutionError,
     SecretResolver,
     _reset_resolvers_for_testing,
@@ -311,7 +311,7 @@ def test_entry_point_discovered_and_resolved(monkeypatch: pytest.MonkeyPatch) ->
             return f"ep:{path}"
 
     def fake_entry_points(*, group: str) -> list[_FakeEntryPoint]:
-        if group == "detx.secret_resolvers":
+        if group == "dtex.secret_resolvers":
             return [_FakeEntryPoint("from-ep", EntryPointResolver)]
         return []
 
@@ -337,7 +337,7 @@ def test_project_local_wins_over_entry_point(monkeypatch: pytest.MonkeyPatch) ->
             return f"local:{path}"
 
     def fake_entry_points(*, group: str) -> list[_FakeEntryPoint]:
-        if group == "detx.secret_resolvers":
+        if group == "dtex.secret_resolvers":
             return [_FakeEntryPoint("shared", EntryPointResolver)]
         return []
 
@@ -361,7 +361,7 @@ def test_broken_entry_point_does_not_block_others(monkeypatch: pytest.MonkeyPatc
             return f"ok:{path}"
 
     def fake_entry_points(*, group: str) -> list[_FakeEntryPoint]:
-        if group == "detx.secret_resolvers":
+        if group == "dtex.secret_resolvers":
             return [
                 _FakeEntryPoint(
                     "broken",
@@ -383,24 +383,24 @@ def test_broken_entry_point_does_not_block_others(monkeypatch: pytest.MonkeyPatc
 
 
 # ---------------------------------------------------------------------------
-# Project-local detx_plugins.py
+# Project-local dtex_plugins.py
 # ---------------------------------------------------------------------------
 
 
 def test_project_plugins_file_runs_registrations(tmp_path: Path) -> None:
-    """A ``detx_plugins.py`` next to ``detx_project.yml`` is imported, and its
+    """A ``dtex_plugins.py`` next to ``dtex_project.yml`` is imported, and its
     ``register_secret_resolver`` calls take effect."""
-    (tmp_path / "detx_project.yml").write_text("name: t\n")
-    (tmp_path / "detx_plugins.py").write_text(
+    (tmp_path / "dtex_project.yml").write_text("name: t\n")
+    (tmp_path / "dtex_plugins.py").write_text(
         "from typing import ClassVar\n"
-        "import detx\n"
+        "import dtex\n"
         "\n"
         "class P:\n"
         "    scheme: ClassVar[str] = 'plugin'\n"
         "    def resolve(self, path, field):\n"
         "        return f'plugin:{path}'\n"
         "\n"
-        "detx.register_secret_resolver('plugin', P)\n"
+        "dtex.register_secret_resolver('plugin', P)\n"
     )
     load_project_plugins(tmp_path)
     assert resolve_secret_url("secret://plugin/abc") == "plugin:abc"
@@ -410,17 +410,17 @@ def test_project_plugins_idempotent(tmp_path: Path) -> None:
     """Calling :func:`load_project_plugins` twice for the same root does not
     re-import the file (which would trigger the duplicate-registration
     error)."""
-    (tmp_path / "detx_project.yml").write_text("name: t\n")
-    (tmp_path / "detx_plugins.py").write_text(
+    (tmp_path / "dtex_project.yml").write_text("name: t\n")
+    (tmp_path / "dtex_plugins.py").write_text(
         "from typing import ClassVar\n"
-        "import detx\n"
+        "import dtex\n"
         "\n"
         "class P:\n"
         "    scheme: ClassVar[str] = 'p1'\n"
         "    def resolve(self, path, field):\n"
         "        return 'v'\n"
         "\n"
-        "detx.register_secret_resolver('p1', P)\n"
+        "dtex.register_secret_resolver('p1', P)\n"
     )
     load_project_plugins(tmp_path)
     load_project_plugins(tmp_path)  # Must not raise.
@@ -428,19 +428,19 @@ def test_project_plugins_idempotent(tmp_path: Path) -> None:
 
 
 def test_project_plugins_missing_is_noop(tmp_path: Path) -> None:
-    """A project without ``detx_plugins.py`` is fine — no error."""
-    (tmp_path / "detx_project.yml").write_text("name: t\n")
+    """A project without ``dtex_plugins.py`` is fine — no error."""
+    (tmp_path / "dtex_project.yml").write_text("name: t\n")
     load_project_plugins(tmp_path)  # No raise.
 
 
 def test_project_plugins_import_error_wrapped(tmp_path: Path) -> None:
-    """A ``detx_plugins.py`` that raises at import surfaces as
+    """A ``dtex_plugins.py`` that raises at import surfaces as
     :class:`SecretResolutionError` with the underlying exception chained."""
-    (tmp_path / "detx_project.yml").write_text("name: t\n")
-    (tmp_path / "detx_plugins.py").write_text("raise RuntimeError('boom')\n")
+    (tmp_path / "dtex_project.yml").write_text("name: t\n")
+    (tmp_path / "dtex_plugins.py").write_text("raise RuntimeError('boom')\n")
     with pytest.raises(SecretResolutionError) as exc_info:
         load_project_plugins(tmp_path)
-    assert "detx_plugins.py" in str(exc_info.value)
+    assert "dtex_plugins.py" in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
@@ -485,11 +485,11 @@ def test_resolved_value_redacted_in_logger(tmp_path: Path) -> None:
 
 def test_public_api_exports() -> None:
     """The three new public names are re-exported from the top-level package."""
-    assert detx.SecretResolver is SecretResolver
-    assert detx.SecretResolutionError is SecretResolutionError
-    assert detx.register_secret_resolver is register_secret_resolver
+    assert dtex.SecretResolver is SecretResolver
+    assert dtex.SecretResolutionError is SecretResolutionError
+    assert dtex.register_secret_resolver is register_secret_resolver
     for name in ("SecretResolver", "SecretResolutionError", "register_secret_resolver"):
-        assert name in detx.__all__
+        assert name in dtex.__all__
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +498,7 @@ def test_public_api_exports() -> None:
 
 
 def test_secret_ref_accepts_secret_url() -> None:
-    from detx.types import SecretRef
+    from dtex.types import SecretRef
 
     ref = SecretRef.from_dict({"name": "token", "ref": "secret://gcp/projects/x/secrets/y"})
     assert ref.ref == "secret://gcp/projects/x/secrets/y"
@@ -514,8 +514,8 @@ def test_secret_ref_accepts_secret_url() -> None:
 def test_resolve_secret_ref_dispatches_secret_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """The engine's :func:`resolve_secret_ref` dispatches ``secret://`` URLs
     to the plugin registry."""
-    from detx.engine.config import Profiles, resolve_secret_ref
-    from detx.types import SecretRef
+    from dtex.engine.config import Profiles, resolve_secret_ref
+    from dtex.types import SecretRef
 
     register_secret_resolver("fake", FakeResolver)
     ref = SecretRef(name="token", ref="secret://fake/abc")
@@ -528,8 +528,8 @@ def test_resolve_secret_ref_secret_url_failure_wrapped() -> None:
     """An unresolvable ``secret://`` ref surfaces as the engine's
     :class:`ConfigError` (not :class:`SecretResolutionError`) so the
     runner's existing error path stays uniform."""
-    from detx.engine.config import ConfigError, Profiles, resolve_secret_ref
-    from detx.types import SecretRef
+    from dtex.engine.config import ConfigError, Profiles, resolve_secret_ref
+    from dtex.types import SecretRef
 
     ref = SecretRef(name="token", ref="secret://unknown/abc")
     profiles = Profiles(destinations={}, secret_profiles={}, threads=1)
@@ -545,7 +545,7 @@ def teardown_module(module: object) -> None:
     _reset_resolvers_for_testing()
     # Detach any test loggers we created so they don't accumulate in other suites.
     for name in list(logging.Logger.manager.loggerDict):
-        if name.startswith("detx.run.test-"):
+        if name.startswith("dtex.run.test-"):
             logger = logging.getLogger(name)
             for h in list(logger.handlers):
                 logger.removeHandler(h)

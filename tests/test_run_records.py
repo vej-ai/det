@@ -2,9 +2,9 @@
 
 Two surfaces cooperate to give every run a queryable history:
 
-* the per-run JSON-lines file at ``.detx/logs/<run_id>/run.jsonl`` (the
+* the per-run JSON-lines file at ``.dtex/logs/<run_id>/run.jsonl`` (the
   *narrative*); and
-* the destination-side ``_detx_runs`` audit table (the *receipt*) written via
+* the destination-side ``_dtex_runs`` audit table (the *receipt*) written via
   ``@destination.write_run_record`` when the destination declares
   ``Capability.RUN_RECORDS``.
 
@@ -25,9 +25,9 @@ import duckdb
 import pytest
 from click.testing import CliRunner
 
-import detx
-from detx.cli import cli
-from detx.engine.runner import EngineError
+import dtex
+from dtex.cli import cli
+from dtex.engine.runner import EngineError
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -39,7 +39,7 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    """Copy the fixture project into a temp dir so .detx/ writes are isolated."""
+    """Copy the fixture project into a temp dir so .dtex/ writes are isolated."""
     dst = tmp_path / "project"
     shutil.copytree(FIXTURES_DIR, dst)
     return dst
@@ -72,13 +72,13 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Successful run: _detx_runs row + JSONL log
+# Successful run: _dtex_runs row + JSONL log
 # ---------------------------------------------------------------------------
 
 
-def test_successful_run_writes_detx_runs_row(project: Path, warehouse: str) -> None:
-    """A successful run lands one fully-populated row in _detx_runs."""
-    result = detx.run(
+def test_successful_run_writes_dtex_runs_row(project: Path, warehouse: str) -> None:
+    """A successful run lands one fully-populated row in _dtex_runs."""
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
@@ -89,7 +89,7 @@ def test_successful_run_writes_detx_runs_row(project: Path, warehouse: str) -> N
         warehouse,
         "SELECT run_id, config, source, destination, target, status, "
         "rows_loaded, full_refresh, duration_s, error_type, error_message "
-        "FROM _detx_runs",
+        "FROM _dtex_runs",
     )
     assert len(rows) == 1
     row = rows[0]
@@ -110,14 +110,14 @@ def test_successful_run_streams_json_carries_per_stream_detail(
     project: Path, warehouse: str
 ) -> None:
     """streams_json holds the same per-stream shape as StreamResult.to_dict."""
-    result = detx.run(
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
     )
     assert result.status.value == "succeeded"
 
-    raw = _query(warehouse, "SELECT streams_json FROM _detx_runs")[0][0]
+    raw = _query(warehouse, "SELECT streams_json FROM _dtex_runs")[0][0]
     streams = json.loads(raw) if isinstance(raw, str) else raw
     by_name = {s["name"]: s for s in streams}
     assert set(by_name) == {"events", "items"}
@@ -131,12 +131,12 @@ def test_successful_run_writes_jsonl_log_with_expected_events(
     project: Path, warehouse: str
 ) -> None:
     """The JSONL log carries the docs/09 §2 event sequence in order."""
-    result = detx.run(
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
     )
-    log_path = project / ".detx" / "logs" / result.run_id / "run.jsonl"
+    log_path = project / ".dtex" / "logs" / result.run_id / "run.jsonl"
     assert log_path.exists()
 
     events = _read_jsonl(log_path)
@@ -166,22 +166,22 @@ def test_successful_run_writes_jsonl_log_with_expected_events(
     assert re_evt["rows_loaded"] == 9
 
 
-def test_two_consecutive_runs_produce_two_detx_runs_rows(
+def test_two_consecutive_runs_produce_two_dtex_runs_rows(
     project: Path, warehouse: str
 ) -> None:
     """Each run is one distinct PK row; idempotent upsert does not collapse them."""
-    a = detx.run(
+    a = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
     )
-    b = detx.run(
+    b = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
     )
     assert a.run_id != b.run_id
-    rows = _query(warehouse, "SELECT count(*) FROM _detx_runs")
+    rows = _query(warehouse, "SELECT count(*) FROM _dtex_runs")
     assert rows[0][0] == 2
 
 
@@ -214,7 +214,7 @@ def _write_breaking_stream_source(project: Path) -> None:
     (src_dir / "source.py").write_text(
         textwrap.dedent(
             """
-            from detx import stream
+            from dtex import stream
 
             @stream(name="items")
             def items():
@@ -238,12 +238,12 @@ def _write_breaking_stream_source(project: Path) -> None:
     )
 
 
-def test_failed_run_writes_detx_runs_row_with_error(
+def test_failed_run_writes_dtex_runs_row_with_error(
     project: Path, warehouse: str
 ) -> None:
-    """A failed run still lands one _detx_runs row, with FAILED + error_type."""
+    """A failed run still lands one _dtex_runs row, with FAILED + error_type."""
     _write_breaking_stream_source(project)
-    result = detx.run(
+    result = dtex.run(
         config="broken_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
@@ -252,7 +252,7 @@ def test_failed_run_writes_detx_runs_row_with_error(
 
     rows = _query(
         warehouse,
-        "SELECT run_id, status, error_type, error_message FROM _detx_runs",
+        "SELECT run_id, status, error_type, error_message FROM _dtex_runs",
     )
     assert len(rows) == 1
     row = rows[0]
@@ -267,12 +267,12 @@ def test_failed_run_writes_jsonl_with_stream_failed_event(
 ) -> None:
     """A failed run's JSONL ends with stream_failed → run_end(status=failed)."""
     _write_breaking_stream_source(project)
-    result = detx.run(
+    result = dtex.run(
         config="broken_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
     )
-    log_path = project / ".detx" / "logs" / result.run_id / "run.jsonl"
+    log_path = project / ".dtex" / "logs" / result.run_id / "run.jsonl"
     assert log_path.exists()
     events = _read_jsonl(log_path)
     types = [e["event"] for e in events]
@@ -280,7 +280,7 @@ def test_failed_run_writes_jsonl_with_stream_failed_event(
     sf = next(e for e in events if e["event"] == "stream_failed")
     assert sf["error_type"] == "RuntimeError"
     assert "boom" in sf["error_message"]
-    # The traceback lands in the JSONL (NOT in _detx_runs — docs/09 §4 NOTE).
+    # The traceback lands in the JSONL (NOT in _dtex_runs — docs/09 §4 NOTE).
     assert "Traceback" in sf["traceback"]
 
     re_evt = next(e for e in events if e["event"] == "run_end")
@@ -308,7 +308,7 @@ def _install_minimal_destination(project: Path) -> None:
     (dest_dir / "destination.py").write_text(
         textwrap.dedent(
             """
-            from detx import destination, Capability
+            from dtex import destination, Capability
 
             _STORE = {"state": [], "tables": {}}
 
@@ -380,10 +380,10 @@ def test_destination_without_run_records_capability_still_writes_jsonl(
         )
     )
 
-    result = detx.run(config="echo_tiny", project_dir=str(project))
+    result = dtex.run(config="echo_tiny", project_dir=str(project))
     assert result.status.value == "succeeded"
 
-    log_path = project / ".detx" / "logs" / result.run_id / "run.jsonl"
+    log_path = project / ".dtex" / "logs" / result.run_id / "run.jsonl"
     assert log_path.exists()
     events = _read_jsonl(log_path)
     types = [e["event"] for e in events]
@@ -416,7 +416,7 @@ def _install_broken_run_records_destination(project: Path) -> None:
     (dest_dir / "destination.py").write_text(
         textwrap.dedent(
             """
-            from detx import destination, Capability
+            from dtex import destination, Capability
 
             @destination.capabilities
             def capabilities():
@@ -480,7 +480,7 @@ def test_declaring_run_records_without_hook_fails_engine_error(project: Path) ->
         )
     )
 
-    result = detx.run(config="echo_claims", project_dir=str(project))
+    result = dtex.run(config="echo_claims", project_dir=str(project))
     assert result.status.value == "failed"
     assert isinstance(result.error, EngineError)
     assert "Capability.RUN_RECORDS" in str(result.error)
@@ -520,7 +520,7 @@ def _install_secret_source(project: Path, secret_value: str) -> None:
     (src_dir / "source.py").write_text(
         textwrap.dedent(
             """
-            from detx import stream
+            from dtex import stream
 
             @stream(name="items")
             def items(config, log):
@@ -557,7 +557,7 @@ def test_secret_redacted_in_jsonl_and_stdlib_logger(
     monkeypatch.setenv("DET_TEST_SECRET", secret)
     _install_secret_source(project, secret)
 
-    result = detx.run(
+    result = dtex.run(
         config="echo_secret_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
@@ -568,14 +568,14 @@ def test_secret_redacted_in_jsonl_and_stdlib_logger(
     assert secret not in captured.err
     assert secret not in captured.out
 
-    log_path = project / ".detx" / "logs" / result.run_id / "run.jsonl"
+    log_path = project / ".dtex" / "logs" / result.run_id / "run.jsonl"
     body = log_path.read_text()
     assert secret not in body
     assert "***" in body  # the masked form did make it into the log
 
 
 # ---------------------------------------------------------------------------
-# CLI surface: detx runs list / detx runs show
+# CLI surface: dtex runs list / dtex runs show
 # ---------------------------------------------------------------------------
 
 
@@ -587,8 +587,8 @@ def runner() -> CliRunner:
 def test_cli_runs_list_shows_run_rows(
     runner: CliRunner, project: Path, warehouse: str
 ) -> None:
-    """detx runs list -p echo_dev shows the run rows from _detx_runs."""
-    result = detx.run(
+    """dtex runs list -p echo_dev shows the run rows from _dtex_runs."""
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
@@ -619,9 +619,9 @@ def test_cli_runs_list_shows_run_rows(
 def test_cli_runs_list_empty_message(
     runner: CliRunner, project: Path, warehouse: str
 ) -> None:
-    """detx runs list against an empty destination prints a 'no records' message."""
+    """dtex runs list against an empty destination prints a 'no records' message."""
     # Open the destination once to create an empty database, but never run.
-    # _detx_runs does not yet exist; the query helper treats that as 'no rows'.
+    # _dtex_runs does not yet exist; the query helper treats that as 'no rows'.
     duckdb.connect(warehouse).close()
     out = runner.invoke(
         cli,
@@ -643,8 +643,8 @@ def test_cli_runs_list_empty_message(
 def test_cli_runs_show_prints_record_and_jsonl(
     runner: CliRunner, project: Path, warehouse: str
 ) -> None:
-    """detx runs show <run_id> prints the audit row + every JSONL event."""
-    result = detx.run(
+    """dtex runs show <run_id> prints the audit row + every JSONL event."""
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
@@ -681,7 +681,7 @@ def test_successful_run_populates_log_path_on_runresult(
     project: Path, warehouse: str
 ) -> None:
     """RunResult.log_path points at the JSONL file — docs/09 §6 orchestrator hook."""
-    result = detx.run(
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},
@@ -718,7 +718,7 @@ def _install_breaking_run_records_destination(project: Path) -> None:
     (dest_dir / "destination.py").write_text(
         textwrap.dedent(
             """
-            from detx import destination, Capability
+            from dtex import destination, Capability
 
             _STORE = {"state": [], "tables": {}}
 
@@ -788,13 +788,13 @@ def test_write_run_record_failure_is_logged_not_raised(project: Path) -> None:
         )
     )
 
-    result = detx.run(config="echo_breaks", project_dir=str(project))
+    result = dtex.run(config="echo_breaks", project_dir=str(project))
     # The streams loaded successfully; a downstream audit-write failure
     # must not flip the run's real outcome.
     assert result.status.value == "succeeded"
     assert result.error is None
     # And the JSONL run_end still landed, with the real status.
-    log_path = project / ".detx" / "logs" / result.run_id / "run.jsonl"
+    log_path = project / ".dtex" / "logs" / result.run_id / "run.jsonl"
     assert log_path.exists()
     events = _read_jsonl(log_path)
     re_evt = next(e for e in events if e["event"] == "run_end")
@@ -804,8 +804,8 @@ def test_write_run_record_failure_is_logged_not_raised(project: Path) -> None:
 def test_cli_runs_show_accepts_short_id(
     runner: CliRunner, project: Path, warehouse: str
 ) -> None:
-    """detx runs show accepts the trimmed (no ``run-`` prefix) id form."""
-    result = detx.run(
+    """dtex runs show accepts the trimmed (no ``run-`` prefix) id form."""
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(project),
         destination_params_override={"path": warehouse},

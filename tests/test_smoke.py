@@ -1,7 +1,7 @@
-"""THE detx smoke test — the executable specification of the engine's job.
+"""THE dtex smoke test — the executable specification of the engine's job.
 
 Stage 5 built the engine; stage 8.B made *configs* the runtime unit. The seam
-:func:`_drive_one_run` is now a one-line call to :func:`detx.run` with a
+:func:`_drive_one_run` is now a one-line call to :func:`dtex.run` with a
 config NAME (the fixture's ``echo_dev``) — discovery + RESOLVE + the full
 lifecycle collapse into that one call.
 
@@ -21,22 +21,22 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-import detx
-from detx import Config, Cursor, RunResult, StreamMeta
-from detx.types import StreamDef
+import dtex
+from dtex import Config, Cursor, RunResult, StreamMeta
+from dtex.types import StreamDef
 from tests.conftest import (
     ECHO_CONNECTOR_DIR,
     LoadedConnector,
     load_connector,
 )
 
-# The detx project the engine discovers `echo` and the `echo_dev` config from —
-# tests/fixtures/ is a real project with detx_project.yml + configs/echo.yml.
+# The dtex project the engine discovers `echo` and the `echo_dev` config from —
+# tests/fixtures/ is a real project with dtex_project.yml + configs/echo.yml.
 PROJECT_DIR = ECHO_CONNECTOR_DIR.parent.parent
 
 
 # ==========================================================================
-# The seam — one call to detx.run(config=…) drives the full lifecycle.
+# The seam — one call to dtex.run(config=…) drives the full lifecycle.
 # ==========================================================================
 
 
@@ -48,7 +48,7 @@ def _drive_one_run(db_path: str) -> RunResult:
     destination-config layer (docs/12), so each test gets its own warehouse
     file.
     """
-    return detx.run(
+    return dtex.run(
         config="echo_dev",
         project_dir=str(PROJECT_DIR),
         destination_params_override={"path": db_path},
@@ -64,9 +64,9 @@ def test_smoke_first_run_lands_rows_state_and_synced_at(
     duckdb_path: str,
     query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
 ) -> None:
-    """One run lands data, fills _detx_synced_at, and advances the cursor.
+    """One run lands data, fills _dtex_synced_at, and advances the cursor.
 
-    This is the core spec: after ``detx.run()``, the DuckDB file must hold
+    This is the core spec: after ``dtex.run()``, the DuckDB file must hold
     the source's data and the state table must show the incremental stream's
     cursor advanced to its max.
     """
@@ -90,11 +90,11 @@ def test_smoke_first_run_lands_rows_state_and_synced_at(
 
     null_synced = query_duckdb(
         duckdb_path,
-        "SELECT count(*) FROM echo_events WHERE _detx_synced_at IS NULL",
+        "SELECT count(*) FROM echo_events WHERE _dtex_synced_at IS NULL",
     )[0][0]
     assert null_synced == 0
     synced_sample = query_duckdb(
-        duckdb_path, "SELECT _detx_synced_at FROM echo_items LIMIT 1"
+        duckdb_path, "SELECT _dtex_synced_at FROM echo_items LIMIT 1"
     )[0][0]
     assert isinstance(synced_sample, datetime)
 
@@ -103,11 +103,11 @@ def test_smoke_first_run_lands_rows_state_and_synced_at(
     )[0][0]
     assert score == "10"
 
-    # _detx_state.connector is the SOURCE name, not the config name — state is
+    # _dtex_state.connector is the SOURCE name, not the config name — state is
     # a property of where the data was extracted from, not which pipeline.
     state = query_duckdb(
         duckdb_path,
-        "SELECT cursor_value, cursor_type, rows_total FROM _detx_state "
+        "SELECT cursor_value, cursor_type, rows_total FROM _dtex_state "
         "WHERE connector = 'echo' AND stream = 'items'",
     )
     assert len(state) == 1
@@ -117,7 +117,7 @@ def test_smoke_first_run_lands_rows_state_and_synced_at(
 
     events_state = query_duckdb(
         duckdb_path,
-        "SELECT cursor_value FROM _detx_state "
+        "SELECT cursor_value FROM _dtex_state "
         "WHERE connector = 'echo' AND stream = 'events'",
     )
     assert len(events_state) == 1
@@ -145,7 +145,7 @@ def test_smoke_second_run_resumes_from_committed_state(
 
     state = query_duckdb(
         duckdb_path,
-        "SELECT cursor_value, rows_total FROM _detx_state "
+        "SELECT cursor_value, rows_total FROM _dtex_state "
         "WHERE connector = 'echo' AND stream = 'items'",
     )
     assert int(str(state[0][0])) == 5

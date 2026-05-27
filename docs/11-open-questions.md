@@ -26,17 +26,17 @@ When this list reaches zero open items, declare v1 freeze.
 ### Q1 — Project config filename
 *Source: [02 — Architecture](./02-architecture.md), §The triad*
 
-`detx_project.yml` (symmetry with dbt's `dbt_project.yml`) vs. a shorter
-`detx.yml`.
+`dtex_project.yml` (symmetry with dbt's `dbt_project.yml`) vs. a shorter
+`dtex.yml`.
 
-- **Resolved:** `detx_project.yml` — the dbt mirror aids the "if you know dbt,
+- **Resolved:** `dtex_project.yml` — the dbt mirror aids the "if you know dbt,
   you know this" pitch. Never aliased.
 
 ### Q2 — `profiles.yml` location
 *Source: [06 — Project Anatomy](./06-project-anatomy.md), §profiles.yml*
 
 Project root (visible, version-controlled-by-default, easy to find) vs. a
-user-home location like `~/.detx/profiles.yml` (dbt's model — credentials
+user-home location like `~/.dtex/profiles.yml` (dbt's model — credentials
 physically separated from the repo).
 
 - **Resolved:** project root, with a hard `.gitignore` entry. Keeps everything
@@ -52,9 +52,9 @@ secret-manager resolver form.
 - **Resolved:** add a **third** form — `secret://<scheme>/<path>[#<field>]` —
   alongside the original two, and make it the plugin surface (the URL syntax
   is in the contract; the resolvers themselves are loaded via entry-points
-  OR a project-local `detx_plugins.py`). The `${env.X}` and `${profile.X.Y}`
+  OR a project-local `dtex_plugins.py`). The `${env.X}` and `${profile.X.Y}`
   built-ins stay unchanged. See [08 §3](./08-security.md) for the protocol
-  and registration. The `detx secrets test` command verifies wiring without
+  and registration. The `dtex secrets test` command verifies wiring without
   leaking values.
 
 ### Q6 — Schema evolution: `strict` vs `evolve` default
@@ -66,7 +66,7 @@ Should additive schema evolution be opt-in per stream via
 - **Resolved:** default `evolve`, allow `strict` opt-in. A stream with no
   declared schema infers it from the first batch and evolves additively; a
   `strict` stream fails the run if a batch diverges from the declared schema.
-  The `SchemaContract` enum is part of the public `detx.types` API.
+  The `SchemaContract` enum is part of the public `dtex.types` API.
 
 ### Q7 — Commit granularity: per-stream vs whole-run
 *Source: [02 — Architecture](./02-architecture.md), §Commit granularity*
@@ -87,20 +87,20 @@ Expose a dbt-style `--threads N` flag in v1 as a reserved no-op, or omit it
 until parallel streams actually ship.
 
 - **Resolved:** the flag shipped as a working knob, not a reserved no-op.
-  `detx run --tag <T> --threads N` runs matched configs through a
+  `dtex run --tag <T> --threads N` runs matched configs through a
   `ThreadPoolExecutor` sized at `N`, capped per destination by each
   destination's `@destination.max_concurrent_writes` hook (DuckDB clamps to
   1, BigQuery defaults to 10). `profiles.yml` carries a project-wide
   `threads:` default. Stream-level parallelism within one pipeline stays
   deferred.
 
-### Q10a — `detx logs` command
+### Q10a — `dtex logs` command
 *Source: [09 — Logging & Observability](./09-logging-and-observability.md)*
 
-A `detx logs <run_id>` command to pretty-print a past run's `run.jsonl`.
+A `dtex logs <run_id>` command to pretty-print a past run's `run.jsonl`.
 
-- **Resolved:** shipped as `detx runs show <run_id> -p <config>` — prints the
-  `_detx_runs` summary AND the events from `run.jsonl`, which is the strictly
+- **Resolved:** shipped as `dtex runs show <run_id> -p <config>` — prints the
+  `_dtex_runs` summary AND the events from `run.jsonl`, which is the strictly
   stronger form. (Retention is in the deferred section.)
 
 ### Q13 — The v1 baked source connectors
@@ -167,12 +167,12 @@ does not restart from zero.
 ### Q9 — A streaming / iterator library API
 *Source: [07 — CLI & Library API](./07-cli-and-library-api.md)*
 
-Should the library expose `for batch in detx.extract("stripe", "charges"): ...`
+Should the library expose `for batch in dtex.extract("stripe", "charges"): ...`
 for users who want to handle loading themselves, in addition to whole-run
-`detx.run()`?
+`dtex.run()`?
 
 - **Lean:** v1 stays whole-run only; revisit after real demand. The public
-  library surface today is `detx.run()` and `detx.run_tag()`.
+  library surface today is `dtex.run()` and `dtex.run_tag()`.
 - **Stakes:** supported API surface area and the "the library is the product"
   promise — a wider surface is a wider maintenance commitment.
 - **Decide by:** post-v1.
@@ -180,9 +180,9 @@ for users who want to handle loading themselves, in addition to whole-run
 ### Q10b — Log retention
 *Source: [09 — Logging & Observability](./09-logging-and-observability.md)*
 
-A `--keep-logs <n>` retention flag for `.detx/logs/`.
+A `--keep-logs <n>` retention flag for `.dtex/logs/`.
 
-- **Lean:** v2 quality-of-life. `.detx/logs/` is gitignored and operator-managed
+- **Lean:** v2 quality-of-life. `.dtex/logs/` is gitignored and operator-managed
   today.
 - **Stakes:** operator ergonomics only.
 - **Decide by:** v2.
@@ -217,11 +217,11 @@ Run each connector in a child process with a scrubbed environment, no
 ### Q14 — UI hosting model
 *Source: [10 — Roadmap & Scope](./10-roadmap-and-scope.md)*
 
-A local `detx ui` serving from `.detx/` and the destination, vs. a deployable
+A local `dtex ui` serving from `.dtex/` and the destination, vs. a deployable
 service, vs. both.
 
 - **Lean:** local-first — keeps the self-hosted, no-backend promise intact.
-- **Stakes:** whether detx stays a pure CLI/library tool or grows a service to
+- **Stakes:** whether dtex stays a pure CLI/library tool or grows a service to
   operate.
 - **Decide by:** v3, or when UI work starts.
 

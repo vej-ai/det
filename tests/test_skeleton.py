@@ -1,8 +1,8 @@
-"""Smoke test for the detx package skeleton."""
+"""Smoke test for the dtex package skeleton."""
 
-import detx
+import dtex
 
 
 def test_package_imports_and_has_version() -> None:
     """The package imports cleanly and exposes a non-empty version string."""
-    assert detx.__version__
+    assert dtex.__version__

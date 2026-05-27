@@ -28,14 +28,14 @@ from pathlib import Path
 import duckdb
 import pytest
 
-import detx
-from detx.engine import config as cfg
-from detx.engine import configs as cfgs
-from detx.engine import discovery as disc
-from detx.engine.config import ConfigError, Profiles
-from detx.engine.discovery import DiscoveryError
-from detx.engine.logger import RedactingFilter, build_logger
-from detx.types import (
+import dtex
+from dtex.engine import config as cfg
+from dtex.engine import configs as cfgs
+from dtex.engine import discovery as disc
+from dtex.engine.config import ConfigError, Profiles
+from dtex.engine.discovery import DiscoveryError
+from dtex.engine.logger import RedactingFilter, build_logger
+from dtex.types import (
     CursorType,
     Field,
     FieldType,
@@ -53,7 +53,7 @@ from detx.types import (
     WriteDisposition,
 )
 
-# The committed test project — tests/fixtures/ holds detx_project.yml,
+# The committed test project — tests/fixtures/ holds dtex_project.yml,
 # profiles.yml, sources/echo/, configs/echo.yml.
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -69,7 +69,7 @@ def _write_project(
     vars_block: str = "",
     profiles_override: str | None = None,
 ) -> None:
-    """Write a minimal post-8.B ``detx_project.yml`` and a profiles file.
+    """Write a minimal post-8.B ``dtex_project.yml`` and a profiles file.
 
     The default profiles.yml carries one DuckDB target (``dev``) with no
     ``path`` set — engine tests pass ``destination_params_override={"path":
@@ -77,7 +77,7 @@ def _write_project(
     default profiles.yml entirely when the test needs a different shape.
     """
     root.mkdir(parents=True, exist_ok=True)
-    (root / "detx_project.yml").write_text(
+    (root / "dtex_project.yml").write_text(
         textwrap.dedent(
             f"""\
             name: tmp_project
@@ -113,7 +113,7 @@ def _write_config(
 ) -> None:
     """Write a one-config-per-file under ``root/configs/<name>.yml``.
 
-    Used by every test that needs to drive ``detx.run(config=<name>)`` against
+    Used by every test that needs to drive ``dtex.run(config=<name>)`` against
     a tmp_path source the test just authored.
     """
     configs_dir = root / "configs"
@@ -156,7 +156,7 @@ def _write_source_clone(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -182,8 +182,8 @@ def test_find_project_root_walks_up(tmp_path: Path) -> None:
 
 
 def test_find_project_root_missing_raises(tmp_path: Path) -> None:
-    """A directory tree with no detx_project.yml raises DiscoveryError."""
-    with pytest.raises(DiscoveryError, match="no detx_project.yml"):
+    """A directory tree with no dtex_project.yml raises DiscoveryError."""
+    with pytest.raises(DiscoveryError, match="no dtex_project.yml"):
         disc.find_project_root(tmp_path)
 
 
@@ -198,12 +198,12 @@ def test_resolve_source_project_local(tmp_path: Path) -> None:
 
 
 def test_resolve_destination_baked(tmp_path: Path) -> None:
-    """The baked DuckDB destination resolves from detx/destinations/."""
+    """The baked DuckDB destination resolves from dtex/destinations/."""
     _write_project(tmp_path)
     loaded = disc.resolve_destination("duckdb", tmp_path, ["destinations"])
     assert loaded.manifest.name == "duckdb"
     assert loaded.manifest.kind.value == "destination"
-    assert "detx" in str(loaded.folder)
+    assert "dtex" in str(loaded.folder)
     assert "destinations" in str(loaded.folder)
 
 
@@ -307,7 +307,7 @@ def test_validation_rejects_bad_stream_signature(tmp_path: Path) -> None:
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -350,7 +350,7 @@ def test_config_precedence_register_default_only() -> None:
 
 
 def test_config_precedence_project_vars_over_default() -> None:
-    """detx_project.yml vars override the register.yaml default."""
+    """dtex_project.yml vars override the register.yaml default."""
     resolved = cfg.resolve_params(
         {"page_size": ParamSpec(type=ParamType.INT, default=50)},
         project_vars={"page_size": 100},
@@ -462,7 +462,7 @@ def test_secret_profile_value_nested_env(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_project_config_loads_fixture() -> None:
     """The committed fixture project parses with its post-8.B keys."""
     project = cfg.ProjectConfig.load(FIXTURES_DIR)
-    assert project.name == "detx_test_project"
+    assert project.name == "dtex_test_project"
     assert project.source_paths == ("sources",)
     assert project.destination_paths == ("destinations",)
     assert project.config_paths == ("configs",)
@@ -515,7 +515,7 @@ def test_redacting_filter_masks_secret() -> None:
     """The redacting filter replaces a secret value with the mask."""
     import logging
 
-    from detx.engine.logger import Redactor
+    from dtex.engine.logger import Redactor
 
     f = RedactingFilter(Redactor(["super-secret-token"]))
     record = logging.LogRecord(
@@ -528,7 +528,7 @@ def test_redacting_filter_masks_secret() -> None:
 
 def test_build_logger_redacts(capsys: pytest.CaptureFixture[str]) -> None:
     """A logger built with a secret value never emits that value."""
-    from detx.engine.logger import Redactor
+    from dtex.engine.logger import Redactor
 
     log = build_logger("test-run", Redactor(["leaked-credential-xyz"]))
     log.info("token is leaked-credential-xyz here")
@@ -538,7 +538,7 @@ def test_build_logger_redacts(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # ==========================================================================
-# The run lifecycle — end to end through detx.run (docs/02, docs/12)
+# The run lifecycle — end to end through dtex.run (docs/02, docs/12)
 # ==========================================================================
 
 
@@ -552,8 +552,8 @@ def _query(db_path: str, sql: str) -> list[tuple]:
 
 
 def test_run_succeeds_and_returns_runresult(duckdb_path: str) -> None:
-    """detx.run drives the echo_dev config and returns a SUCCEEDED RunResult."""
-    result = detx.run(
+    """dtex.run drives the echo_dev config and returns a SUCCEEDED RunResult."""
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(FIXTURES_DIR),
         destination_params_override={"path": duckdb_path},
@@ -570,7 +570,7 @@ def test_run_succeeds_and_returns_runresult(duckdb_path: str) -> None:
 
 def test_run_target_override(duckdb_path: str) -> None:
     """run(target_override=...) overrides the config's target field."""
-    result = detx.run(
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(FIXTURES_DIR),
         target_override="prod",
@@ -582,7 +582,7 @@ def test_run_target_override(duckdb_path: str) -> None:
 
 def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
     """--full-refresh ignores a committed cursor and re-extracts (docs/03 §3.2)."""
-    first = detx.run(
+    first = dtex.run(
         config="echo_dev",
         project_dir=str(FIXTURES_DIR),
         destination_params_override={"path": duckdb_path},
@@ -590,7 +590,7 @@ def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
     items_first = first.stream("items")
     assert items_first is not None and items_first.rows_loaded == 5
 
-    plain = detx.run(
+    plain = dtex.run(
         config="echo_dev",
         project_dir=str(FIXTURES_DIR),
         destination_params_override={"path": duckdb_path},
@@ -598,7 +598,7 @@ def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
     items_plain = plain.stream("items")
     assert items_plain is not None and items_plain.rows_loaded == 0
 
-    refreshed = detx.run(
+    refreshed = dtex.run(
         config="echo_dev",
         project_dir=str(FIXTURES_DIR),
         destination_params_override={"path": duckdb_path},
@@ -611,7 +611,7 @@ def test_run_full_refresh_re_extracts(duckdb_path: str) -> None:
 
 def test_run_select_replaces_config_select(duckdb_path: str) -> None:
     """run(select=...) replaces the config's `select:`; unnamed streams SKIP."""
-    result = detx.run(
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(FIXTURES_DIR),
         destination_params_override={"path": duckdb_path},
@@ -626,7 +626,7 @@ def test_run_select_replaces_config_select(duckdb_path: str) -> None:
 
 def test_run_failure_returns_failed_runresult(duckdb_path: str) -> None:
     """run() never raises — an unknown config becomes a FAILED RunResult."""
-    result = detx.run(
+    result = dtex.run(
         config="no_such_config",
         project_dir=str(FIXTURES_DIR),
         destination_params_override={"path": duckdb_path},
@@ -669,7 +669,7 @@ def test_run_failing_stream_keeps_prior_stream_state(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -687,7 +687,7 @@ def test_run_failing_stream_keeps_prior_stream_state(
     )
     _write_config(tmp_path, name="partial_dev", source="partial")
 
-    result = detx.run(
+    result = dtex.run(
         config="partial_dev",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -701,7 +701,7 @@ def test_run_failing_stream_keeps_prior_stream_state(
 
     state = _query(
         duckdb_path,
-        "SELECT stream, rows_total FROM _detx_state WHERE connector = 'partial'",
+        "SELECT stream, rows_total FROM _dtex_state WHERE connector = 'partial'",
     )
     streams_committed = {row[0]: row[1] for row in state}
     assert streams_committed.get("good") == 2
@@ -737,7 +737,7 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -752,7 +752,7 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
     )
     _write_config(tmp_path, name="crasher_dev", source="crasher")
 
-    result = detx.run(
+    result = dtex.run(
         config="crasher_dev",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -764,7 +764,7 @@ def test_run_append_stream_rollback_leaves_no_partial_rows(
     assert landed[0][0] == 0
     state = _query(
         duckdb_path,
-        "SELECT COUNT(*) FROM _detx_state WHERE connector = 'crasher'",
+        "SELECT COUNT(*) FROM _dtex_state WHERE connector = 'crasher'",
     )
     assert state[0][0] == 0
 
@@ -793,7 +793,7 @@ def test_run_inferred_schema_for_undeclared_stream(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -804,7 +804,7 @@ def test_run_inferred_schema_for_undeclared_stream(
         )
     )
     _write_config(tmp_path, name="noschema_dev", source="noschema")
-    result = detx.run(
+    result = dtex.run(
         config="noschema_dev",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -841,7 +841,7 @@ def test_run_strict_schema_rejects_divergence(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -852,7 +852,7 @@ def test_run_strict_schema_rejects_divergence(
         )
     )
     _write_config(tmp_path, name="strict_dev", source="strict")
-    result = detx.run(
+    result = dtex.run(
         config="strict_dev",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -873,7 +873,7 @@ def test_run_rejects_config_pointing_at_destination_as_source(
     # tmp_path has no destinations/duckdb folder; baked duckdb wins.
     # Build a destinations dir so resolve_destination succeeds, then the
     # source side is the one that fails.
-    result = detx.run(
+    result = dtex.run(
         config="bad_dev",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -885,7 +885,7 @@ def test_run_rejects_config_pointing_at_destination_as_source(
 
 def test_run_incremental_initial_value_seeds_cursor(duckdb_path: str) -> None:
     """The engine types initial_value per cursor_type when seeding (docs/03 §3.2)."""
-    result = detx.run(
+    result = dtex.run(
         config="echo_dev",
         project_dir=str(FIXTURES_DIR),
         destination_params_override={"path": duckdb_path},
@@ -896,7 +896,7 @@ def test_run_incremental_initial_value_seeds_cursor(duckdb_path: str) -> None:
     assert items.cursor_after == 5
     state = _query(
         duckdb_path,
-        "SELECT cursor_type FROM _detx_state "
+        "SELECT cursor_type FROM _dtex_state "
         "WHERE connector = 'echo' AND stream = 'items'",
     )
     assert state[0][0] == "int"
@@ -930,7 +930,7 @@ def test_run_legacy_destination_block_tolerated(
     (folder / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -943,8 +943,8 @@ def test_run_legacy_destination_block_tolerated(
     _write_config(tmp_path, name="legacy_dev", source="legacy")
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="detx.engine"):
-        result = detx.run(
+    with caplog.at_level(logging.WARNING, logger="dtex.engine"):
+        result = dtex.run(
             config="legacy_dev",
             project_dir=str(tmp_path),
             destination_params_override={"path": duckdb_path},
@@ -1008,7 +1008,7 @@ def test_configs_discover_fixtures() -> None:
 
 # ==========================================================================
 # Partition resolution — source default vs config override vs auto-default
-# (docs/05 §3.x — _resolve_partition in detx.engine.runner)
+# (docs/05 §3.x — _resolve_partition in dtex.engine.runner)
 # ==========================================================================
 
 
@@ -1052,7 +1052,7 @@ def _empty_pipeline(
 
 def test_resolve_partition_source_only_short_form_timestamp() -> None:
     """Source short form on a TIMESTAMP cursor column → TIME+DAY."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     sd, schema = _stream_def_for_partition_test(partition_by="created_date")
     pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
@@ -1064,7 +1064,7 @@ def test_resolve_partition_source_only_short_form_timestamp() -> None:
 
 def test_resolve_partition_source_only_long_form_range() -> None:
     """Source long form (range) on an INT cursor column → honored verbatim."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     declared = PartitionConfig(
         field="created",
@@ -1083,7 +1083,7 @@ def test_resolve_partition_source_only_long_form_range() -> None:
 
 def test_resolve_partition_config_only_overrides_when_source_silent() -> None:
     """A config override with no source-side declaration is honored."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     override = PartitionConfig(
         field="created",
@@ -1107,7 +1107,7 @@ def test_resolve_partition_config_only_overrides_when_source_silent() -> None:
 
 def test_resolve_partition_config_wins_over_source() -> None:
     """When both source and config declare partition_by, the config wins."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     declared_source = "created_date"
     override = PartitionConfig(
@@ -1128,7 +1128,7 @@ def test_resolve_partition_config_wins_over_source() -> None:
 
 def test_resolve_partition_auto_default_timestamp_cursor() -> None:
     """No declaration + incremental timestamp cursor → TIME+DAY on cursor field."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     sd, schema = _stream_def_for_partition_test(partition_by=None)
     pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
@@ -1140,7 +1140,7 @@ def test_resolve_partition_auto_default_timestamp_cursor() -> None:
 
 def test_resolve_partition_auto_default_date_cursor() -> None:
     """No declaration + incremental date cursor → TIME+DAY (same as timestamp)."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     sd, schema = _stream_def_for_partition_test(
         partition_by=None,
@@ -1157,7 +1157,7 @@ def test_resolve_partition_auto_default_int_cursor_no_partition_with_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """No declaration + int cursor → no partition + a warning naming the long form."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     sd, schema = _stream_def_for_partition_test(
         partition_by=None,
@@ -1179,7 +1179,7 @@ def test_resolve_partition_auto_default_string_cursor_no_partition_with_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """No declaration + string cursor → no partition + a warning naming the long form."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     sd, schema = _stream_def_for_partition_test(
         partition_by=None,
@@ -1195,7 +1195,7 @@ def test_resolve_partition_auto_default_string_cursor_no_partition_with_warning(
 
 def test_resolve_partition_non_incremental_stream_no_partition() -> None:
     """No declaration + no incremental block → no partition, no warning (silent)."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     sd, schema = _stream_def_for_partition_test(
         partition_by=None, cursor_type=None
@@ -1215,7 +1215,7 @@ def test_resolve_partition_short_form_on_int_cursor_degrades_with_warning(
     TIME+DAY would crash. The resolver instead degrades to no partition and
     logs a warning telling the user to switch to the long form.
     """
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     sd, schema = _stream_def_for_partition_test(
         partition_by="created",
@@ -1235,7 +1235,7 @@ def test_resolve_partition_short_form_on_string_schema_degrades_with_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Short form on a STRING-typed column (no cursor at all) also degrades."""
-    from detx.engine.runner import _resolve_partition
+    from dtex.engine.runner import _resolve_partition
 
     sd = StreamDef(
         name="rows",
@@ -1291,7 +1291,7 @@ def test_partition_overrides_unknown_stream_name_fails_run(
         textwrap.dedent(
             """\
             from collections.abc import Iterator
-            from detx import Batch, stream
+            from dtex import Batch, stream
 
 
             @stream(name="rows")
@@ -1316,7 +1316,7 @@ def test_partition_overrides_unknown_stream_name_fails_run(
             """
         )
     )
-    result = detx.run(
+    result = dtex.run(
         config="tiny_dev",
         project_dir=tmp_path,
         destination_params_override={"path": duckdb_path},
@@ -1372,7 +1372,7 @@ def test_stream_start_event_carries_partition_when_auto_default_kicks_in(
             """\
             from datetime import datetime, UTC
             from collections.abc import Iterator
-            from detx import Batch, stream
+            from dtex import Batch, stream
 
 
             @stream(name="rows")
@@ -1386,7 +1386,7 @@ def test_stream_start_event_carries_partition_when_auto_default_kicks_in(
     )
     _write_config(tmp_path, name="ts_dev", source="ts_source")
 
-    result = detx.run(
+    result = dtex.run(
         config="ts_dev",
         project_dir=tmp_path,
         destination_params_override={"path": duckdb_path},
@@ -1408,7 +1408,7 @@ def test_stream_start_event_carries_partition_when_auto_default_kicks_in(
 
 
 # ==========================================================================
-# detx.run_tag — multi-config tag-based runs (stage 8d)
+# dtex.run_tag — multi-config tag-based runs (stage 8d)
 # ==========================================================================
 
 
@@ -1446,7 +1446,7 @@ def _write_tagged_source(
     (folder / "source.py").write_text(
         textwrap.dedent(
             f"""\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -1496,7 +1496,7 @@ def test_run_tag_runs_every_matching_config(
     # gamma is daily — not tagged 'hourly', should NOT run
     _write_tagged_config(tmp_path, name="gamma_dev", source="gamma", tags=["daily"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "hourly",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1516,7 +1516,7 @@ def test_run_tag_zero_matches_returns_empty_list(
     _write_tagged_source(tmp_path, name="alpha")
     _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["hourly"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "no_such_tag",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1534,7 +1534,7 @@ def test_run_tag_continues_past_failure(
     _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["test"])
     _write_tagged_config(tmp_path, name="boom_dev", source="boom", tags=["test"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "test",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1556,7 +1556,7 @@ def test_run_tag_case_insensitive_match(
     _write_tagged_source(tmp_path, name="alpha")
     _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["hourly"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "Hourly",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1586,7 +1586,7 @@ def test_run_tag_target_override_applies_to_every_config(
     _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["hourly"])
     _write_tagged_config(tmp_path, name="beta_dev", source="beta", tags=["hourly"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "hourly",
         project_dir=str(tmp_path),
         target_override="staging",
@@ -1607,7 +1607,7 @@ def test_run_tag_alphabetical_order_three_configs(
             tmp_path, name=f"{name}_run", source=name, tags=["everything"]
         )
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "everything",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1672,7 +1672,7 @@ def _write_slow_source(
         textwrap.dedent(
             f"""\
             import time
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
 
@@ -1714,7 +1714,7 @@ def test_run_tag_threads_default_is_sequential(
     _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["test"])
     _write_tagged_config(tmp_path, name="beta_dev", source="beta", tags=["test"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "test",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1733,7 +1733,7 @@ def test_run_tag_threads_explicit_one_is_sequential(
     _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["test"])
     _write_tagged_config(tmp_path, name="beta_dev", source="beta", tags=["test"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "test",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1758,7 +1758,7 @@ def test_run_tag_threads_parallel_returns_in_matched_order(
     # serialization isn't a concern — we're testing pure ORDERING.
     """
     _install_lockedfake(tmp_path)
-    (tmp_path / "detx_project.yml").write_text(
+    (tmp_path / "dtex_project.yml").write_text(
         textwrap.dedent(
             """\
             name: order_proj
@@ -1778,7 +1778,7 @@ def test_run_tag_threads_parallel_returns_in_matched_order(
     _write_lockedfake_config(tmp_path, name="banana_run", source="banana", tags=["sweep"])
     _write_lockedfake_config(tmp_path, name="cherry_run", source="cherry", tags=["sweep"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "sweep",
         project_dir=str(tmp_path),
         threads=4,
@@ -1816,7 +1816,7 @@ def test_run_tag_threads_parallel_runs_faster_than_sequential(
     import shutil as _sh
     import time as _time
 
-    (tmp_path / "detx_project.yml").write_text(
+    (tmp_path / "dtex_project.yml").write_text(
         textwrap.dedent(
             """\
             name: par_proj
@@ -1857,7 +1857,7 @@ def test_run_tag_threads_parallel_runs_faster_than_sequential(
         )
 
     start = _time.monotonic()
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "parallel_speed",
         project_dir=str(tmp_path),
         threads=4,
@@ -1879,7 +1879,7 @@ def test_run_tag_threads_one_matching_config_runs_once(
     _write_tagged_source(tmp_path, name="alpha")
     _write_tagged_config(tmp_path, name="alpha_dev", source="alpha", tags=["solo"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "solo",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1902,7 +1902,7 @@ def test_run_tag_threads_parallel_continues_past_failure(
     _write_tagged_config(tmp_path, name="beta_dev", source="beta", tags=["mixed"])
     _write_tagged_config(tmp_path, name="boom_dev", source="boom", tags=["mixed"])
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "mixed",
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
@@ -1933,7 +1933,7 @@ def test_run_tag_per_destination_cap_serializes_lockedfake(
     import uuid as _uuid
 
     _install_lockedfake(tmp_path)
-    (tmp_path / "detx_project.yml").write_text(
+    (tmp_path / "dtex_project.yml").write_text(
         textwrap.dedent(
             """\
             name: cap_proj
@@ -1970,7 +1970,7 @@ def test_run_tag_per_destination_cap_serializes_lockedfake(
     finally:
         _sys.modules.pop(unique_name, None)
 
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "capped",
         project_dir=str(tmp_path),
         threads=4,
@@ -2035,7 +2035,7 @@ def test_run_tag_per_destination_cap_independent_destinations(
     import shutil as _sh
 
     _install_lockedfake(tmp_path)
-    (tmp_path / "detx_project.yml").write_text(
+    (tmp_path / "dtex_project.yml").write_text(
         textwrap.dedent(
             """\
             name: indep_proj
@@ -2091,7 +2091,7 @@ def test_run_tag_per_destination_cap_independent_destinations(
     import time as _time
 
     start = _time.monotonic()
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "independent",
         project_dir=str(tmp_path),
         threads=4,
@@ -2178,7 +2178,7 @@ def test_run_tag_reads_threads_from_profiles(tmp_path: Path) -> None:
     the engine path.
     """
     _install_lockedfake(tmp_path)
-    (tmp_path / "detx_project.yml").write_text(
+    (tmp_path / "dtex_project.yml").write_text(
         textwrap.dedent(
             """\
             name: read_proj
@@ -2198,7 +2198,7 @@ def test_run_tag_reads_threads_from_profiles(tmp_path: Path) -> None:
     # threads omitted — engine reads profiles.threads=4. The lockedfake
     # cap still serializes them. The assertion is "no crash + correct
     # results" — proving the parallel path was taken.
-    results = detx.run_tag(
+    results = dtex.run_tag(
         "read",
         project_dir=str(tmp_path),
     )

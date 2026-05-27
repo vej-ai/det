@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "detx"
+name = "dtex"
 version = "0.1.0"
-description = "detx (data extraction tool) — an open-source Python EL tool: pipelines as configs, connectors as folders, CLI-first."
+description = "dtex (data extraction tool) — an open-source Python EL tool: pipelines as configs, connectors as folders, CLI-first."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -26,8 +26,8 @@ classifiers = [
 ]
 # Base install includes everything needed for the baked connectors to work
 # at full capacity. Specifying extras to use a *baked* destination (e.g.
-# BigQuery, which detx ships and tests in its own repo) is backwards; the
-# baked toolkit should Just Work after `pip install detx`.
+# BigQuery, which dtex ships and tests in its own repo) is backwards; the
+# baked toolkit should Just Work after `pip install dtex`.
 #
 # Genuine extras remain for opt-in cloud paths that are NOT required for a
 # connector's basic operation:
@@ -74,31 +74,31 @@ aws-secrets = ["boto3>=1.28"]
 vault = ["hvac>=2.0"]
 
 [project.scripts]
-detx = "detx.cli:main"
+dtex = "dtex.cli:main"
 
-[project.entry-points."detx.secret_resolvers"]
-gcp-secret-manager = "detx.secrets._gcp:GcpSecretManagerResolver"
-aws-secrets-manager = "detx.secrets._aws:AwsSecretsManagerResolver"
-vault = "detx.secrets._vault:VaultResolver"
+[project.entry-points."dtex.secret_resolvers"]
+gcp-secret-manager = "dtex.secrets._gcp:GcpSecretManagerResolver"
+aws-secrets-manager = "dtex.secrets._aws:AwsSecretsManagerResolver"
+vault = "dtex.secrets._vault:VaultResolver"
 
 [project.urls]
-Homepage = "https://github.com/vej-ai/detx"
-Documentation = "https://github.com/vej-ai/detx/tree/main/docs"
-Source = "https://github.com/vej-ai/detx"
-"Bug Tracker" = "https://github.com/vej-ai/detx/issues"
-Changelog = "https://github.com/vej-ai/detx/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/vej-ai/dtex"
+Documentation = "https://github.com/vej-ai/dtex/tree/main/docs"
+Source = "https://github.com/vej-ai/dtex"
+"Bug Tracker" = "https://github.com/vej-ai/dtex/issues"
+Changelog = "https://github.com/vej-ai/dtex/blob/main/CHANGELOG.md"
 
 [tool.hatch.build]
 include = [
-    "detx/**",
+    "dtex/**",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["detx"]
+packages = ["dtex"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "detx/**",
+    "dtex/**",
     "docs/**",
     "tests/**",
     "README.md",

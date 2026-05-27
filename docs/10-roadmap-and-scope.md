@@ -1,6 +1,6 @@
 # 10 — Roadmap and Scope
 
-> Part of the detx design handbook. See [README.md](./README.md) for the full table of contents.
+> Part of the dtex design handbook. See [README.md](./README.md) for the full table of contents.
 
 This section draws the line around **v1** — what ships, what explicitly does not — and lays out the phased path beyond it. The governing principle is unchanged: **keep it as simple as possible.** A scope decision that adds ceremony has to earn its place.
 
@@ -14,23 +14,23 @@ v1 is the smallest thing that is genuinely useful in production: a dbt-style CLI
 
 - **Core engine** — connector discovery, the `@stream` / `@resource` / `@destination` contract, incremental state, write dispositions, additive schema evolution (with `strict` opt-in). ([03](./03-connector-contract.md), [04](./04-connector-body.md), [05](./05-destinations-and-state.md))
 - **CLI** — `init`, `new {source,destination,config}`, `list`, `validate`, `run` (with `-p` and `--tag`), `state`, `runs`, `secrets test`. Synchronous, scriptable exit codes. ([07](./07-cli-and-library-api.md))
-- **Python library** — `detx.run()`, `detx.run_tag()`, `RunResult`. CLI and library are the same engine. ([07](./07-cli-and-library-api.md))
+- **Python library** — `dtex.run()`, `dtex.run_tag()`, `RunResult`. CLI and library are the same engine. ([07](./07-cli-and-library-api.md))
 - **5 baked source connectors** — `filesystem` (CSV/JSONL/Parquet from local, GCS, or S3), `rest` (paginated REST APIs — 4 pagination strategies, 4 auth modes), `postgres` (keyset pagination, no `OFFSET`), `shiphero` (GraphQL), `stripe` (resource-as-stream over the REST API).
 - **2 baked destinations** — **DuckDB** (zero-config local dev, the default `dev` target) and **BigQuery** (production warehouse, Parquet-staged via GCS + LOAD jobs, MERGE upserts, smart cursor-based partitioning). ([05 §2](./05-destinations-and-state.md))
-- **State in the destination** — `_detx_state` table; sidecar JSON for the (single) Tier-B path. ([05 §5](./05-destinations-and-state.md))
-- **Structured logging + run records** — per-run JSON-lines logs, `_detx_runs` table on both baked destinations. ([09](./09-logging-and-observability.md))
+- **State in the destination** — `_dtex_state` table; sidecar JSON for the (single) Tier-B path. ([05 §5](./05-destinations-and-state.md))
+- **Structured logging + run records** — per-run JSON-lines logs, `_dtex_runs` table on both baked destinations. ([09](./09-logging-and-observability.md))
 - **Security baseline + 3 secret-manager resolvers** — `profiles.yml`, `${env.X}` / `${profile.X.Y}` interpolation, `secret://` URL plugin surface, GCP Secret Manager / AWS Secrets Manager / HashiCorp Vault adapters (each as an opt-in extra), log redaction, `.gitignore` defaults, an honest trust model. ([08](./08-security.md))
-- **Pipeline-level parallelism** — `detx run --tag <T> --threads N` runs matched configs concurrently, with per-destination caps (DuckDB clamps to 1, BigQuery defaults to 10). ([02 §Concurrency](./02-architecture.md))
+- **Pipeline-level parallelism** — `dtex run --tag <T> --threads N` runs matched configs concurrently, with per-destination caps (DuckDB clamps to 1, BigQuery defaults to 10). ([02 §Concurrency](./02-architecture.md))
 
 **v1 explicitly does NOT include:**
 
 - **No UI.** None. The whole "not Airbyte" thesis is no blackbox; the UI is deferred until the CLI/library are proven (§2, v3).
-- **No orchestrator adapters.** detx runs *under* an orchestrator via the plain library API; no `dagster-detx` package yet.
+- **No orchestrator adapters.** dtex runs *under* an orchestrator via the plain library API; no `dagster-dtex` package yet.
 - **No connector sandboxing.** Connectors run in-process as trusted code. ([08 §7](./08-security.md))
 - **No CDC / log-based replication.** Cursor-based incremental only. ([Q5](./11-open-questions.md))
 - **No streaming/iterator library API, no per-batch state commit, no stream-level parallelism, no merge-on-object-storage.** All deferred — see [chapter 11](./11-open-questions.md).
 
-The test of v1: a senior data engineer can `pip install detx`, `detx init`, write or pick a connector, and have an incremental BigQuery pipeline running under cron or Dagster the same afternoon — with no UI and no surprises.
+The test of v1: a senior data engineer can `pip install dtex`, `dtex init`, write or pick a connector, and have an incremental BigQuery pipeline running under cron or Dagster the same afternoon — with no UI and no surprises.
 
 ---
 
@@ -46,7 +46,7 @@ Once the core is proven, widen it — without changing the contract:
 
 - **More destinations** — Snowflake, ClickHouse, Postgres, the GCS/S3 filesystem destination, generic SQLAlchemy. The capability-tier model ([05 §2](./05-destinations-and-state.md)) was designed for exactly this; adding a destination is adding a connector, not changing the engine.
 - **More source connectors** — driven by community contribution and demand.
-- **Orchestrator integration** — an official thin `dagster-detx` helper (assets/ops wrapping `detx.run()`), and documented Airflow/Prefect patterns. The library API is already orchestrator-ready ([07 §4.2](./07-cli-and-library-api.md)); this is convenience, not capability.
+- **Orchestrator integration** — an official thin `dagster-dtex` helper (assets/ops wrapping `dtex.run()`), and documented Airflow/Prefect patterns. The library API is already orchestrator-ready ([07 §4.2](./07-cli-and-library-api.md)); this is convenience, not capability.
 - **CDC** — log-based replication for the `postgres` source (and similar). ([Q5](./11-open-questions.md))
 - **Schema evolution, expanded** — type-widening across more destinations, clearer migration errors.
 - **Pluggable state backends** — a real Postgres/DynamoDB `StateBackend` for concurrency-safe Tier-B state. ([05 §5.4](./05-destinations-and-state.md))
@@ -54,7 +54,7 @@ Once the core is proven, widen it — without changing the contract:
 
 ### v3 — UI and ecosystem
 
-- **A UI** — a *reader* over the data detx already writes (`_detx_runs`, `_detx_state`, `run.jsonl`): run history, stream health, state inspection, log drill-down. It deliberately does not become a connector-authoring blackbox — connectors stay as folders of Python. Hosting model is open — local-first vs. deployable service — see [chapter 11 Q14](./11-open-questions.md).
+- **A UI** — a *reader* over the data dtex already writes (`_dtex_runs`, `_dtex_state`, `run.jsonl`): run history, stream health, state inspection, log drill-down. It deliberately does not become a connector-authoring blackbox — connectors stay as folders of Python. Hosting model is open — local-first vs. deployable service — see [chapter 11 Q14](./11-open-questions.md).
 - **Connector registry / marketplace** — a discoverable index of community connectors, with signing and checksum-pinning so audited code is the code that runs ([08 §7](./08-security.md)). Curated vs. open is still open — see [chapter 11 Q15](./11-open-questions.md).
 - **Possible managed/hosted offering** — out of scope for the open-source roadmap; noted only so the architecture does not foreclose it.
 
@@ -65,8 +65,8 @@ Roadmap ordering is a hypothesis, not a contract. v2's exact connector set follo
 ## 3. Open-source release considerations
 
 - **License** — **Apache-2.0**. The explicit patent grant is the safer choice for a tool meant to be embedded and have connectors freely shared. See [LICENSE](../LICENSE).
-- **Repository structure** — a single repo: the `detx` engine package, the baked sources under `detx/sources/` and baked destinations under `detx/destinations/`, the docs in `docs/` (this handbook). One repo keeps the engine and its baked connectors versioned together and contribution friction low. Community connectors live in their own repos (and, later, the registry).
-- **Contribution model for connectors** — the connector contract ([03](./03-connector-contract.md)) is the public API. A connector is a folder; contributing one is a small, reviewable PR or an independently published package. The scaffolding commands (`detx new source`, `detx new destination`) and `detx validate` make a contribution self-validating before review.
+- **Repository structure** — a single repo: the `dtex` engine package, the baked sources under `dtex/sources/` and baked destinations under `dtex/destinations/`, the docs in `docs/` (this handbook). One repo keeps the engine and its baked connectors versioned together and contribution friction low. Community connectors live in their own repos (and, later, the registry).
+- **Contribution model for connectors** — the connector contract ([03](./03-connector-contract.md)) is the public API. A connector is a folder; contributing one is a small, reviewable PR or an independently published package. The scaffolding commands (`dtex new source`, `dtex new destination`) and `dtex validate` make a contribution self-validating before review.
 - **Registry / marketplace** — see v3. The near-term path is a curated list in the docs; the registry is the scaled version once enough connectors exist to warrant it.
 - **Governance** — start owner-led with clear `CONTRIBUTING.md` and a connector style guide; formalize only if the contributor base grows enough to need it. Do not build governance ceremony ahead of the community that needs it.
 
@@ -76,14 +76,14 @@ Roadmap ordering is a hypothesis, not a contract. v2's exact connector set follo
 
 An honest list. Each pairs a real failure mode with the mitigation already built into the design.
 
-- **The connector long tail.** EL lives or dies on connector coverage; this is Airbyte's moat and a solo/small project cannot match it. *Mitigation:* make connectors trivially cheap to write (the entire thesis of [03](./03-connector-contract.md)/[04](./04-connector-body.md)) and lean on community contribution. detx does not need 300 connectors — it needs the 10 a given team actually uses to be a one-afternoon job.
+- **The connector long tail.** EL lives or dies on connector coverage; this is Airbyte's moat and a solo/small project cannot match it. *Mitigation:* make connectors trivially cheap to write (the entire thesis of [03](./03-connector-contract.md)/[04](./04-connector-body.md)) and lean on community contribution. dtex does not need 300 connectors — it needs the 10 a given team actually uses to be a one-afternoon job.
 - **Trust in third-party connectors.** Arbitrary in-process Python is a real attack surface ([08 §7](./08-security.md)). A single supply-chain incident in a popular community connector could brand the tool unsafe. *Mitigation:* honesty now, least-privilege guidance, the `--allow-unsafe-connectors` gate (v2), and a signed registry (v3).
-- **Scope creep into Airbyte.** Every "add a UI / a scheduler / a server" request erodes the simplicity that is the entire reason to choose detx. *Mitigation:* this document. The UI is a deferred *reader*, scheduling is the orchestrator's job, and "keep it simple" is a stated veto on features.
+- **Scope creep into Airbyte.** Every "add a UI / a scheduler / a server" request erodes the simplicity that is the entire reason to choose dtex. *Mitigation:* this document. The UI is a deferred *reader*, scheduling is the orchestrator's job, and "keep it simple" is a stated veto on features.
 - **dlt / Airbyte / Fivetran move into the niche.** dlt is the closest competitor and is well-funded. *Mitigation:* the differentiator is the *dbt-shaped* developer experience — projects, profiles, `run`/`test`, connectors-as-folders — aimed squarely at teams already living in dbt. That ergonomic fit, not raw connector count, is the wedge.
 - **Maintainer bandwidth.** A small team cannot review every connector PR and chase every warehouse quirk. *Mitigation:* the self-validating contribution model (template + `test` harness), a tight pre-baked set the core team actually owns, and resisting the temptation to absorb every community connector into the main repo.
 - **Incremental-state correctness bugs.** Silent data loss or duplication from a state bug would be fatal to trust. *Mitigation:* the conservative "commit state only after a fully successful load" rule ([05 §5.3](./05-destinations-and-state.md)), at-least-once semantics, and state correctness as the first thing the test suite proves.
 
-If detx stays small, makes connectors cheap, and never becomes a blackbox, none of these is fatal. The biggest self-inflicted risk is forgetting principle #1.
+If dtex stays small, makes connectors cheap, and never becomes a blackbox, none of these is fatal. The biggest self-inflicted risk is forgetting principle #1.
 
 ### Reference
 

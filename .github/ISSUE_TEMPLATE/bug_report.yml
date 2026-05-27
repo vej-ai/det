@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in detx is broken, behaves incorrectly, or surprises you.
+description: Something in dtex is broken, behaves incorrectly, or surprises you.
 title: "[Bug]: "
 labels: ["bug"]
 body:
@@ -9,7 +9,7 @@ body:
         Thanks for taking the time to file a bug. The more concrete the
         report, the faster we can act on it. **Security vulnerabilities
         should be reported privately — see
-        [SECURITY.md](https://github.com/vej-ai/detx/blob/main/SECURITY.md).**
+        [SECURITY.md](https://github.com/vej-ai/dtex/blob/main/SECURITY.md).**
 
   - type: checkboxes
     id: preflight
@@ -22,10 +22,10 @@ body:
           required: true
 
   - type: input
-    id: detx-version
+    id: dtex-version
     attributes:
-      label: detx version
-      description: Output of `detx --version`.
+      label: dtex version
+      description: Output of `dtex --version`.
       placeholder: "0.1.0"
     validations:
       required: true
@@ -63,9 +63,9 @@ body:
         Be specific. Include the config file (with secrets redacted),
         the exact command you ran, and any relevant environment.
       placeholder: |
-        1. `detx init my_project && cd my_project`
+        1. `dtex init my_project && cd my_project`
         2. ...
-        3. `detx run -p my_pipeline`
+        3. `dtex run -p my_pipeline`
     validations:
       required: true
 
@@ -90,7 +90,7 @@ body:
       label: Logs and traceback
       description: |
         Paste the full traceback if any. If the failure is mid-run, attach
-        the relevant lines from `.detx/logs/<run_id>/run.jsonl`. Redact
+        the relevant lines from `.dtex/logs/<run_id>/run.jsonl`. Redact
         anything sensitive — the run log redacts secrets automatically but
         connector-side `print()`s are not redacted.
       render: shell

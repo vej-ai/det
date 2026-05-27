@@ -6,7 +6,7 @@ name: Publish to PyPI
 # in GitHub secrets.
 #
 # Prerequisites (one-time, see docs/_internal/release.md):
-#   1. Register a Trusted Publisher on PyPI for project `detx` pointing at
+#   1. Register a Trusted Publisher on PyPI for project `dtex` pointing at
 #      this repository, workflow filename `publish.yml`, environment `pypi`.
 #   2. Create a GitHub Environment named `pypi` in repo Settings.
 #
@@ -33,7 +33,7 @@ jobs:
     # rejected by PyPI at upload time.
     environment:
       name: pypi
-      url: https://pypi.org/project/detx/
+      url: https://pypi.org/project/dtex/
     steps:
       - uses: actions/checkout@v4
 

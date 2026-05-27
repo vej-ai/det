@@ -15,7 +15,7 @@ isolation and is the durable detection surface: if the engine's
 per-destination semaphore failed to serialize the test pipelines, two
 ``open()`` calls would race on the file lock and the second would raise.
 
-Cleanup: the lock file lives at ``/tmp/det_lockedfake_<dest>.lock`` and
+Cleanup: the lock file lives at ``/tmp/dtex_lockedfake_<dest>.lock`` and
 is best-effort-removed on each ``close()``. A leaked lock file from a
 previous test run is harmless — the next test acquires + releases it.
 """
@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from detx import (
+from dtex import (
     Batch,
     Capability,
     Config,
@@ -49,7 +49,7 @@ _LOCK_DIR = Path(tempfile.gettempdir())
 
 def _lock_path(destination_name: str) -> Path:
     """The lock file path for one destination instance."""
-    return _LOCK_DIR / f"det_lockedfake_{destination_name}.lock"
+    return _LOCK_DIR / f"dtex_lockedfake_{destination_name}.lock"
 
 
 def _try_acquire_lock(destination_name: str) -> int | None:
@@ -221,7 +221,7 @@ def commit_state(conn: LockedConn, run_id: str, records: list[StateRecord]) -> N
         for record in records:
             existing = _state_store.setdefault(record.connector, [])
             # Replace any prior record for the same stream — same upsert
-            # semantic as a real destination's _detx_state.
+            # semantic as a real destination's _dtex_state.
             existing[:] = [r for r in existing if r.stream != record.stream]
             existing.append(record)
 

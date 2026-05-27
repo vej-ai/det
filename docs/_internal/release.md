@@ -1,6 +1,6 @@
 # Release runbook (maintainer-only)
 
-This is the internal checklist for cutting a `detx` release to PyPI. It is
+This is the internal checklist for cutting a `dtex` release to PyPI. It is
 **not user-facing** — public release info lives in
 [`CHANGELOG.md`](../../CHANGELOG.md) and the GitHub Releases page.
 
@@ -19,12 +19,12 @@ release follows the per-release checklist below.
 
 1. Go to <https://pypi.org/manage/account/publishing/>.
 2. Click **"Add a new pending publisher"** (it is "pending" because the
-   `detx` project does not exist on PyPI yet — it will be created by the
+   `dtex` project does not exist on PyPI yet — it will be created by the
    first successful publish from this workflow).
 3. Fill in:
-   - **PyPI Project Name**: `detx`
+   - **PyPI Project Name**: `dtex`
    - **Owner**: `vej-ai`
-   - **Repository name**: `detx`
+   - **Repository name**: `dtex`
    - **Workflow name**: `publish.yml`
    - **Environment name**: `pypi`
 
@@ -69,7 +69,7 @@ For every release after the one-time setup:
 6. The tag push fires `publish.yml`. It builds the sdist + wheel with
    hatchling, runs `twine check`, and uploads to PyPI via OIDC. Wait
    ~2-3 minutes; verify the new version at
-   <https://pypi.org/project/detx/>.
+   <https://pypi.org/project/dtex/>.
 7. **Cut the GitHub Release.** On GitHub → **Releases → Draft a new
    release** → select the `v0.X.Y` tag → paste the matching CHANGELOG
    section as the release notes → **Publish release**.
@@ -85,7 +85,7 @@ broken:
 2. Cut `v0.X.(Y+1)` following the normal per-release checklist.
 3. On PyPI, navigate to the broken version's page → **Manage → Yank
    release**. Add a short reason ("Broken: …; use 0.X.(Y+1) or later").
-   Yanking hides the version from `pip install detx` resolutions for new
+   Yanking hides the version from `pip install dtex` resolutions for new
    installs but leaves it pinnable for anyone who already depends on it
    explicitly — the right semantics for "this exists but do not use it".
 4. Leave the original CHANGELOG entry in place. Add a short

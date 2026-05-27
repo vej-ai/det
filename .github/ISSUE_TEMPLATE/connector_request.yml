@@ -6,10 +6,10 @@ body:
   - type: markdown
     attributes:
       value: |
-        detx makes it cheap to write a **project-local** connector (a folder
+        dtex makes it cheap to write a **project-local** connector (a folder
         of plain Python under `connectors/`, see
-        [`docs/03`](https://github.com/vej-ai/detx/blob/main/docs/03-connector-contract.md)
-        and [`docs/04`](https://github.com/vej-ai/detx/blob/main/docs/04-connector-body.md)). The
+        [`docs/03`](https://github.com/vej-ai/dtex/blob/main/docs/03-connector-contract.md)
+        and [`docs/04`](https://github.com/vej-ai/dtex/blob/main/docs/04-connector-body.md)). The
         bar for *baking* a connector into the engine is higher: the source
         needs to be widely useful, durably maintained, and well-shaped to
         the contract. The strongest version of this request is a **PR
@@ -37,7 +37,7 @@ body:
     attributes:
       label: Why baked (rather than project-local)?
       description: |
-        What makes this one general enough to ship inside detx, vs. living
+        What makes this one general enough to ship inside dtex, vs. living
         in your own repo as a project-local connector?
     validations:
       required: true

@@ -27,21 +27,21 @@ from typing import Any
 
 import pytest
 
-import detx
-from detx import Config, Cursor
-from detx.engine.logger import build_logger
-from detx.sources.rest.client import AuthSpec, build_client
-from detx.sources.rest.extractors import ExtractionError, extract_records
-from detx.sources.rest.pagination import (
+import dtex
+from dtex import Config, Cursor
+from dtex.engine.logger import build_logger
+from dtex.sources.rest.client import AuthSpec, build_client
+from dtex.sources.rest.extractors import ExtractionError, extract_records
+from dtex.sources.rest.pagination import (
     CursorPagination,
     LinkHeaderPagination,
     OffsetPagination,
     PagePagination,
     build_strategy,
 )
-from detx.sources.rest.source import extract_stream
+from dtex.sources.rest.source import extract_stream
 
-# Reuse the fixtures project — it has detx_project.yml + profiles.yml and
+# Reuse the fixtures project — it has dtex_project.yml + profiles.yml and
 # the duckdb destination is the project's default. The smoke test does the same.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROJECT_DIR = _REPO_ROOT / "tests" / "fixtures"
@@ -347,7 +347,7 @@ def test_incremental_cursor_first_run_has_no_cursor_param() -> None:
         # cursor value at all (the bug to guard: sending an empty string).
         cursor = Cursor(
             cursor_field="id",
-            cursor_type=detx.CursorType.INT,
+            cursor_type=dtex.CursorType.INT,
             start_value=None,
         )
         list(
@@ -386,7 +386,7 @@ def test_incremental_cursor_second_run_sends_param() -> None:
         config = Config(params={"base_url": base_url}, secrets={})
         cursor = Cursor(
             cursor_field="id",
-            cursor_type=detx.CursorType.INT,
+            cursor_type=dtex.CursorType.INT,
             start_value=42,
         )
         list(
@@ -609,7 +609,7 @@ def test_malformed_json_raises_clear_error() -> None:
 
 
 # ==========================================================================
-# End-to-end via detx.run — lands rows in a tmp DuckDB
+# End-to-end via dtex.run — lands rows in a tmp DuckDB
 # ==========================================================================
 
 
@@ -618,7 +618,7 @@ def test_end_to_end_run_lands_rows(
     monkeypatch: pytest.MonkeyPatch,
     query_duckdb: Callable[[str, str], list[tuple[Any, ...]]],
 ) -> None:
-    """``detx.run('rest')`` against a stub API lands rows in a temp DuckDB.
+    """``dtex.run('rest')`` against a stub API lands rows in a temp DuckDB.
 
     Covers the full discovery → resolve → run → load path with the rest
     connector: the engine discovers it as a baked connector, resolves
@@ -680,7 +680,7 @@ def test_end_to_end_run_lands_rows(
     # Build a throwaway project that binds the baked rest source to duckdb.
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
-    (project_dir / "detx_project.yml").write_text(
+    (project_dir / "dtex_project.yml").write_text(
         "name: rest_test\nversion: '1.0.0'\nsource_paths: [sources]\n"
         "destination_paths: [destinations]\nconfig_paths: [configs]\n"
     )
@@ -695,7 +695,7 @@ def test_end_to_end_run_lands_rows(
     db_path = str(tmp_path / "warehouse.duckdb")
     with stub_server(routes) as (base_url, requests_seen):
         monkeypatch.setenv("REST_API_TOKEN", "secret-from-env")
-        result = detx.run(
+        result = dtex.run(
             config="rest_dev",
             project_dir=str(project_dir),
             params_override={"base_url": base_url, "auth_type": "bearer"},
@@ -728,7 +728,7 @@ def test_secret_resolves_from_env(
     """The engine resolves ``${env.REST_API_TOKEN}`` and hands it to the connector."""
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
-    (project_dir / "detx_project.yml").write_text(
+    (project_dir / "dtex_project.yml").write_text(
         "name: rest_test\nversion: '1.0.0'\nsource_paths: [sources]\n"
         "destination_paths: [destinations]\nconfig_paths: [configs]\n"
     )
@@ -746,7 +746,7 @@ def test_secret_resolves_from_env(
 
     with stub_server({"/items": handler, "/events": handler}) as (base_url, requests_seen):
         monkeypatch.setenv("REST_API_TOKEN", "env-secret-token-abcdef")
-        result = detx.run(
+        result = dtex.run(
             config="rest_dev",
             project_dir=str(project_dir),
             params_override={"base_url": base_url, "auth_type": "bearer"},
@@ -758,7 +758,7 @@ def test_secret_resolves_from_env(
 
     # Path 2 — env missing: the run fails cleanly with a non-leaking message.
     monkeypatch.delenv("REST_API_TOKEN", raising=False)
-    result = detx.run(
+    result = dtex.run(
         config="rest_dev",
         project_dir=str(project_dir),
         params_override={"base_url": "http://127.0.0.1:1", "auth_type": "bearer"},
@@ -782,7 +782,7 @@ def test_authorization_header_is_redacted(caplog: pytest.LogCaptureFixture) -> N
     then drives a stream against the stub. The captured log must not contain
     the literal token, even if a developer accidentally logged it.
     """
-    from detx.engine.logger import Redactor
+    from dtex.engine.logger import Redactor
 
     secret = "super-secret-token-shhh"
     log = build_logger("test-redact", Redactor([secret]))
@@ -906,4 +906,4 @@ def test_extract_stream_imports_clean() -> None:
     # The module is already imported at the top of this file; this assertion
     # exists so a future refactor that adds import-time side effects fails here.
     assert callable(extract_stream)
-    assert isinstance(logging.getLogger("detx"), logging.Logger)
+    assert isinstance(logging.getLogger("dtex"), logging.Logger)

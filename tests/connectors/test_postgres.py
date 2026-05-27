@@ -8,7 +8,7 @@ Unit tests (always run, no Postgres needed):
       stub connection injected via ``monkeypatch``.
 
 Integration tests (gated by ``POSTGRES_TEST_URL``):
-    * end-to-end ``detx.run`` into a tmp DuckDB, asserting all rows landed
+    * end-to-end ``dtex.run`` into a tmp DuckDB, asserting all rows landed
       on run 1 and 0 new rows on run 2 (cursor resume). Skipped when the
       env var is unset so the suite stays green on a fresh checkout.
 """
@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import psycopg
 import pytest
 
-from detx import (
+from dtex import (
     Config,
     Cursor,
     CursorType,
@@ -34,11 +34,11 @@ from detx import (
     FieldMode,
     FieldType,
 )
-from detx.sources.postgres import client, source, type_mapping
+from dtex.sources.postgres import client, source, type_mapping
 
 # Path the engine's discovery uses to find the postgres connector folder.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-POSTGRES_CONNECTOR_DIR = REPO_ROOT / "detx" / "sources" / "postgres"
+POSTGRES_CONNECTOR_DIR = REPO_ROOT / "dtex" / "sources" / "postgres"
 
 
 # ===========================================================================
@@ -250,7 +250,7 @@ def test_query_select_sql_wraps_user_query_as_subquery() -> None:
     sql_text = _normalise_sql(composed.as_string(None))
     assert sql_text.startswith(
         'SELECT * FROM (SELECT id, occurred_at FROM events WHERE kind = \'click\') '
-        'AS _detx_sub WHERE "occurred_at" > %s ORDER BY "occurred_at" LIMIT %s'
+        'AS _dtex_sub WHERE "occurred_at" > %s ORDER BY "occurred_at" LIMIT %s'
     )
 
 
@@ -370,7 +370,7 @@ def test_extract_table_keyset_batches_and_observes_cursor(
     config = Config(
         params={
             "host": "localhost", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "detx",
+            "sslmode": "prefer", "application_name": "dtex",
             "connect_timeout_seconds": 30, "batch_size": 2,
         },
         secrets={"password": "redacted"},
@@ -426,7 +426,7 @@ def test_extract_table_keyset_stops_on_stagnant_cursor(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "detx",
+            "sslmode": "prefer", "application_name": "dtex",
             "connect_timeout_seconds": 30, "batch_size": 2,
         },
         secrets={"password": "."},
@@ -460,7 +460,7 @@ def test_extract_query_mode_wraps_user_query(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "detx",
+            "sslmode": "prefer", "application_name": "dtex",
             "connect_timeout_seconds": 30, "batch_size": 100,
         },
         secrets={"password": "."},
@@ -485,7 +485,7 @@ def test_extract_query_mode_wraps_user_query(
         ]
     ]
     sql_text = _normalise_sql(fake_cursor.executes[0][0].as_string(None))
-    assert "AS _detx_sub" in sql_text
+    assert "AS _dtex_sub" in sql_text
     assert '"occurred_at"' in sql_text
     assert cursor.observed_max == 7
 
@@ -555,7 +555,7 @@ def test_extract_full_scan_runs_declare_fetch_close(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "detx",
+            "sslmode": "prefer", "application_name": "dtex",
             "connect_timeout_seconds": 30, "batch_size": 2,
         },
         secrets={"password": "."},
@@ -601,7 +601,7 @@ def test_connection_closes_on_exception(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "detx",
+            "sslmode": "prefer", "application_name": "dtex",
             "connect_timeout_seconds": 30, "batch_size": 1,
         },
         secrets={"password": "."},
@@ -640,7 +640,7 @@ def test_password_does_not_appear_in_rendered_sql(
     config = Config(
         params={
             "host": "h", "port": 5432, "database": "x", "user": "u",
-            "sslmode": "prefer", "application_name": "detx",
+            "sslmode": "prefer", "application_name": "dtex",
             "connect_timeout_seconds": 30, "batch_size": 100,
         },
         secrets={"password": secret},
@@ -669,9 +669,9 @@ def test_password_does_not_appear_in_rendered_sql(
 
 def test_postgres_connector_discovers_and_validates(tmp_path: Path) -> None:
     """The full discovery flow finds the source folder and validates it."""
-    from detx.engine.discovery import resolve_source
+    from dtex.engine.discovery import resolve_source
 
-    (tmp_path / "detx_project.yml").write_text(
+    (tmp_path / "dtex_project.yml").write_text(
         "name: test_project\nversion: '1.0.0'\nsource_paths: [sources]\n"
     )
     (tmp_path / "sources").mkdir()  # empty — forces fallback to baked
@@ -717,10 +717,10 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
 ) -> None:
     """End-to-end: 100 rows land on run 1, 0 new rows on run 2 (cursor resume).
 
-    Stands up a temp schema with a tiny ``users`` table, runs ``detx.run``
+    Stands up a temp schema with a tiny ``users`` table, runs ``dtex.run``
     into a tmp DuckDB twice, and asserts the spec's resume property.
     """
-    import detx
+    import dtex
 
     schema = f"det_pg_it_{os.getpid()}"
     with live_pg_conn.cursor() as cur:
@@ -745,7 +745,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
     # the @stream body inside a project-local fork of the connector.
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
-    (project_dir / "detx_project.yml").write_text(
+    (project_dir / "dtex_project.yml").write_text(
         "name: it\nversion: '1.0.0'\nsource_paths: [sources]\n"
         "destination_paths: [destinations]\nconfig_paths: [configs]\n"
     )
@@ -767,7 +767,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
         "  database: {type: string, required: true}\n"
         "  user: {type: string, required: true}\n"
         "  sslmode: {type: string, default: prefer}\n"
-        "  application_name: {type: string, default: detx}\n"
+        "  application_name: {type: string, default: dtex}\n"
         "  connect_timeout_seconds: {type: int, default: 30}\n"
         "  batch_size: {type: int, default: 30}\n"
         "secrets:\n  - {name: password, ref: '${env.PGPASSWORD}'}\n"
@@ -782,8 +782,8 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
         "      initial_value: '1970-01-01T00:00:00'\n"
     )
     (fork / "source.py").write_text(
-        "from detx import stream\n"
-        "from detx.sources.postgres.source import extract_stream\n\n"
+        "from dtex import stream\n"
+        "from dtex.sources.postgres.source import extract_stream\n\n"
         "@stream(name='users')\n"
         "def users(config, cursor, log):\n"
         "    yield from extract_stream(\n"
@@ -801,7 +801,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
         "user": info.user,
     }
     # Run 1 — every row lands.
-    r1 = detx.run(
+    r1 = dtex.run(
         config="pg_dev", project_dir=str(project_dir),
         params_override=overrides,
     )
@@ -809,7 +809,7 @@ def test_integration_end_to_end_first_run_loads_then_resumes(
     assert (r1.stream("users").rows_loaded if r1.stream("users") else 0) == 100  # type: ignore[union-attr]
 
     # Run 2 — cursor resumes, nothing new to fetch.
-    r2 = detx.run(
+    r2 = dtex.run(
         config="pg_dev", project_dir=str(project_dir),
         params_override=overrides,
     )

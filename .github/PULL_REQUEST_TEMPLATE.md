@@ -1,5 +1,5 @@
 <!--
-Thanks for contributing to detx. Please fill out the sections below.
+Thanks for contributing to dtex. Please fill out the sections below.
 For larger changes, open an issue first to discuss the design.
 -->
 
@@ -19,7 +19,7 @@ For larger changes, open an issue first to discuss the design.
 
 - [ ] `pytest -q` passes locally.
 - [ ] `ruff check .` passes.
-- [ ] `mypy detx` passes.
+- [ ] `mypy dtex` passes.
 - [ ] New code has tests (regression test for a bug fix; coverage for a new feature).
 - [ ] If a new source / destination / resolver: docs updated in the relevant chapter (`docs/03`, `docs/05`, `docs/08`).
 - [ ] [`CHANGELOG.md`](../CHANGELOG.md) updated under `[Unreleased]`.

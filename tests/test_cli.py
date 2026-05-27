@@ -1,11 +1,11 @@
-"""CLI tests — real ``detx`` invocations via click's :class:`CliRunner`.
+"""CLI tests — real ``dtex`` invocations via click's :class:`CliRunner`.
 
 The CLI is a thin shell over the engine, so these tests invoke the command
 group exactly as a shell would and assert on exit codes and printed output.
 
 Stage 8.B made *configs* the runtime unit (docs/12). The CLI's primary
-selection arg is now ``-p / --conf``; ``detx list`` and ``detx validate`` cover
-sources, destinations, and configs; ``detx new`` has source/destination/
+selection arg is now ``-p / --conf``; ``dtex list`` and ``dtex validate`` cover
+sources, destinations, and configs; ``dtex new`` has source/destination/
 config subcommands.
 
 Tests that need a real project copy ``tests/fixtures/`` into ``tmp_path``
@@ -24,8 +24,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner, Result
 
-import detx
-from detx.cli import cli
+import dtex
+from dtex.cli import cli
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -37,13 +37,13 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 @pytest.fixture
 def runner() -> CliRunner:
-    """A click test runner that invokes the ``detx`` command group."""
+    """A click test runner that invokes the ``dtex`` command group."""
     return CliRunner()
 
 
 @pytest.fixture
 def cli_project(tmp_path: Path) -> Path:
-    """A throwaway copy of ``tests/fixtures/`` — a real, runnable detx project.
+    """A throwaway copy of ``tests/fixtures/`` — a real, runnable dtex project.
 
     Copied per test so a ``run`` / ``state reset`` mutates a temp tree, never
     the committed fixture. Returns the project root.
@@ -79,14 +79,14 @@ def _show(result: Result) -> str:
 
 
 def test_version(runner: CliRunner) -> None:
-    """``detx --version`` prints the package version and exits 0."""
+    """``dtex --version`` prints the package version and exits 0."""
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0, _show(result)
-    assert detx.__version__ in result.output
+    assert dtex.__version__ in result.output
 
 
 def test_help_lists_every_command(runner: CliRunner) -> None:
-    """``detx --help`` lists each top-level command group."""
+    """``dtex --help`` lists each top-level command group."""
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0, _show(result)
     for command in ("run", "list", "validate", "init", "new", "state"):
@@ -269,7 +269,7 @@ def test_run_tag_failure_exits_1_with_summary(
 ) -> None:
     """A failure among successes exits 1 and the summary names the failed config."""
     # Build a tmp project with two tagged configs — one ok, one that raises.
-    (tmp_path / "detx_project.yml").write_text(
+    (tmp_path / "dtex_project.yml").write_text(
         textwrap.dedent(
             """\
             name: tag_fail_proj
@@ -302,7 +302,7 @@ def test_run_tag_failure_exits_1_with_summary(
     (good / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
             @stream(name="rows")
@@ -330,7 +330,7 @@ def test_run_tag_failure_exits_1_with_summary(
     (bad / "source.py").write_text(
         textwrap.dedent(
             """\
-            from detx import Batch, stream
+            from dtex import Batch, stream
             from collections.abc import Iterator
 
             @stream(name="rows")
@@ -588,7 +588,7 @@ def test_init_scaffolds_project(runner: CliRunner, tmp_path: Path) -> None:
     target = tmp_path / "fresh_project"
     result = runner.invoke(cli, ["init", str(target)])
     assert result.exit_code == 0, _show(result)
-    assert (target / "detx_project.yml").is_file()
+    assert (target / "dtex_project.yml").is_file()
     assert (target / "profiles.yml").is_file()
     assert (target / ".gitignore").is_file()
     assert (target / "README.md").is_file()
@@ -617,7 +617,7 @@ def test_init_force_overwrites(runner: CliRunner, tmp_path: Path) -> None:
 
 
 def test_init_scaffolds_runnable_project(runner: CliRunner, tmp_path: Path) -> None:
-    """A scaffolded project's detx_project.yml is a valid, parseable project."""
+    """A scaffolded project's dtex_project.yml is a valid, parseable project."""
     target = tmp_path / "p"
     runner.invoke(cli, ["init", str(target)])
     result = runner.invoke(cli, ["list", "--project-dir", str(target)])
@@ -667,7 +667,7 @@ def test_new_config_scaffolds(runner: CliRunner, tmp_path: Path) -> None:
 
 
 def test_new_source_is_validatable(runner: CliRunner, tmp_path: Path) -> None:
-    """A scaffolded source passes ``detx validate`` out of the box."""
+    """A scaffolded source passes ``dtex validate`` out of the box."""
     project = tmp_path / "proj"
     runner.invoke(cli, ["init", str(project)])
     runner.invoke(cli, ["new", "source", "fresh", "--project-dir", str(project)])
@@ -857,7 +857,7 @@ def test_state_reset_never_run_is_clean(
 
 
 # ==========================================================================
-# Stage 8e — `detx run --threads N`
+# Stage 8e — `dtex run --threads N`
 # ==========================================================================
 
 
@@ -867,17 +867,17 @@ def test_run_tag_threads_flag_passes_through(
     """``run --tag test --threads 4`` reaches ``run_tag(threads=4)``."""
     captured: dict[str, object] = {}
 
-    real_run_tag = detx.run_tag
+    real_run_tag = dtex.run_tag
 
     def _spy_run_tag(*args, **kwargs):  # type: ignore[no-untyped-def]
         captured["args"] = args
         captured["kwargs"] = kwargs
         return real_run_tag(*args, **kwargs)
 
-    monkeypatch.setattr(detx, "run_tag", _spy_run_tag)
-    # The CLI module references ``detx.run_tag`` via the ``detx`` package, so
+    monkeypatch.setattr(dtex, "run_tag", _spy_run_tag)
+    # The CLI module references ``dtex.run_tag`` via the ``dtex`` package, so
     # monkeypatching on the package surface is sufficient (no second
-    # patch on detx.cli needed).
+    # patch on dtex.cli needed).
 
     result = runner.invoke(
         cli,
@@ -997,14 +997,14 @@ def test_run_tag_parallel_output_has_progress_lines(
 
 
 # ==========================================================================
-# detx secrets test — stage 9a
+# dtex secrets test — stage 9a
 # ==========================================================================
 
 
 @pytest.fixture
 def _isolate_resolvers() -> Iterator[None]:
     """Wipe the secrets module registry around CLI secrets tests."""
-    from detx.secrets import _reset_resolvers_for_testing
+    from dtex.secrets import _reset_resolvers_for_testing
 
     _reset_resolvers_for_testing()
     try:
@@ -1014,7 +1014,7 @@ def _isolate_resolvers() -> Iterator[None]:
 
 
 def test_secrets_help_shows_test(runner: CliRunner) -> None:
-    """``detx secrets --help`` lists the ``test`` subcommand."""
+    """``dtex secrets --help`` lists the ``test`` subcommand."""
     result = runner.invoke(cli, ["secrets", "--help"])
     assert result.exit_code == 0, _show(result)
     assert "test" in result.output
@@ -1066,7 +1066,7 @@ def test_secrets_test_env_var_resolves(
     (src_dir / "source.py").write_text(
         textwrap.dedent(
             """
-            from detx import stream
+            from dtex import stream
 
             @stream(name="things")
             def things():
@@ -1127,7 +1127,7 @@ def test_secrets_test_missing_env_var_fails(
     (src_dir / "source.py").write_text(
         textwrap.dedent(
             """
-            from detx import stream
+            from dtex import stream
 
             @stream(name="things")
             def things():
@@ -1181,7 +1181,7 @@ def test_secrets_test_unknown_scheme_fails(
     (src_dir / "source.py").write_text(
         textwrap.dedent(
             """
-            from detx import stream
+            from dtex import stream
 
             @stream(name="things")
             def things():
@@ -1213,20 +1213,20 @@ def test_secrets_test_unknown_scheme_fails(
 def test_secrets_test_secret_url_with_project_plugin(
     runner: CliRunner, cli_project: Path, _isolate_resolvers: None
 ) -> None:
-    """A ``detx_plugins.py`` registering a ``secret://`` scheme makes that
-    scheme resolvable from ``detx secrets test``."""
-    (cli_project / "detx_plugins.py").write_text(
+    """A ``dtex_plugins.py`` registering a ``secret://`` scheme makes that
+    scheme resolvable from ``dtex secrets test``."""
+    (cli_project / "dtex_plugins.py").write_text(
         textwrap.dedent(
             """
             from typing import ClassVar
-            import detx
+            import dtex
 
             class P:
                 scheme: ClassVar[str] = 'plugin'
                 def resolve(self, path, field):
                     return f'val-for-{path}'
 
-            detx.register_secret_resolver('plugin', P)
+            dtex.register_secret_resolver('plugin', P)
             """
         ).strip()
     )
@@ -1252,7 +1252,7 @@ def test_secrets_test_secret_url_with_project_plugin(
     (src_dir / "source.py").write_text(
         textwrap.dedent(
             """
-            from detx import stream
+            from dtex import stream
 
             @stream(name="things")
             def things():
