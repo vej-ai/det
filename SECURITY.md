@@ -31,7 +31,7 @@ Two ways to report, in order of preference:
    This keeps the report private until a fix is ready and lets us
    coordinate a CVE if appropriate.
 
-2. **Email** — `security@vej.ai`. Include a description of the issue, the
+2. **Email** — `hello@vej.ai`. Include a description of the issue, the
    dtex version (`dtex --version`), reproduction steps, and any proof-of-
    concept code. PGP is not currently required.
 
