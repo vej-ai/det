@@ -22,11 +22,14 @@ The lookup algorithm is unchanged; the only thing that changed is which roots
 are searched.
 
 The connector-folder *import* mechanism — open a
-:func:`~dtex.registry.registration_scope`, exec every ``.py`` file under a
-process-unique module name so a re-import genuinely re-runs the decorators — is
-the same one ``tests/conftest.py`` uses. It is reused here verbatim, per the
-task's "reuse the harness, do not reinvent it" rule; that harness *is* the
-engine's discovery-import step (its own docstring says so).
+:func:`~dtex.registry.registration_scope`, load the folder as a **synthetic
+Python package** under a process-unique name (so a re-import genuinely re-runs
+the decorators, and submodule files can use relative imports like
+``from .client import X``) — lives in :func:`_load_connector_folder`. The
+harness in ``tests/conftest.py`` predates the package shape and loads each
+``.py`` as a standalone synthetic module; it is fine for the single-file
+fixture connectors that drive the harness's tests but is *not* what the
+engine does in production.
 
 This module also owns discovery-time validation (docs/03 §7): manifest schema
 (enforced by the ``types.py`` ``from_dict`` parsers), ``kind`` consistency,
@@ -36,6 +39,7 @@ and vice versa), and ``@stream`` signature injectability.
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import sys
 import uuid
@@ -204,40 +208,40 @@ def find_destination_folder(
 
 
 # ---------------------------------------------------------------------------
-# Connector-folder import — the conftest harness, reused (registry.py docstring)
+# Connector-folder import — load-as-package (stage 11)
 # ---------------------------------------------------------------------------
-
-
-def _import_module_from_path(path: Path) -> None:
-    """Execute one connector ``.py`` file under a process-unique module name.
-
-    A fresh synthetic name per call (``<stem>_<uuid>``) means a re-import of the
-    same connector genuinely re-runs the module body — and therefore its
-    decorators — instead of hitting a stale ``sys.modules`` cache that would
-    leave the second :class:`ConnectorRegistry` empty. This is the exact
-    mechanism ``tests/conftest.py`` documents and the registry module's
-    docstring assumes; it is reused, not reinvented.
-    """
-    unique_name = f"_dtex_connector_{path.stem}_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(unique_name, path)
-    if spec is None or spec.loader is None:  # pragma: no cover — defensive.
-        raise DiscoveryError(f"cannot load connector module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[unique_name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.modules.pop(unique_name, None)
+#
+# The connector folder IS a Python package: a project-local connector that
+# splits helpers into sibling files (``client.py``, ``helpers.py``, …) must be
+# able to write ``from .client import SigmaClient`` in ``source.py`` and have
+# it resolve. The historical mechanism — exec each ``.py`` as a *standalone*
+# synthetic module with no parent — could not do that: a relative import has
+# no parent package to bind to and raises ``ImportError: attempted relative
+# import with no known parent package``. Stage 11 fixes that by loading the
+# folder as a synthetic *package* under a process-unique name; every ``.py``
+# is then a submodule of that package and ``from .client import X`` resolves
+# through the standard import machinery.
 
 
 def _load_connector_folder(folder: Path) -> LoadedConnector:
-    """Parse + import one connector folder — the engine's discovery-import step.
+    """Parse + import one connector folder *as a Python package* — docs/03 §1.
 
-    Parses ``register.yaml`` into a :class:`ConnectorManifest`, then imports
-    every ``.py`` file in the folder inside a *single*
-    :func:`~dtex.registry.registration_scope`, so every ``@stream`` /
-    ``@destination`` decorator across all of the connector's files lands in one
-    :class:`ConnectorRegistry` (docs/03 §1, registry.py module docstring).
+    Parses ``register.yaml`` into a :class:`ConnectorManifest`, then loads the
+    folder under a process-unique synthetic *package* name so the connector's
+    own ``.py`` files form a real package — relative imports (``from .client
+    import SigmaClient``) resolve through Python's normal machinery. Every
+    decorator from every submodule registers into a single
+    :class:`ConnectorRegistry` because the whole package load happens inside
+    one :func:`~dtex.registry.registration_scope` (docs/03 §1, registry.py
+    module docstring).
+
+    The synthetic package name carries a UUID so a second load of the same
+    connector in one process genuinely re-runs the module bodies — and
+    therefore the decorators — instead of hitting a stale ``sys.modules``
+    cache that would leave the second registry empty. Both shapes are
+    supported: a folder *with* ``__init__.py`` is loaded as a regular
+    package; a folder *without* one as a PEP 420 namespace package via
+    ``submodule_search_locations``.
 
     A YAML parse error or a manifest-schema violation (an unknown
     ``register.yaml`` key, a missing required key — caught by the ``types.py``
@@ -259,16 +263,80 @@ def _load_connector_folder(folder: Path) -> LoadedConnector:
         raise DiscoveryError(f"invalid {manifest_path}: {exc}") from exc
 
     py_files = sorted(p for p in folder.glob("*.py") if p.name != "__init__.py")
+    init_file = folder / "__init__.py"
+    pkg_name = f"_dtex_local_{manifest.name}_{uuid.uuid4().hex}"
+
+    # NOTE: building a synthetic *package* spec. The key knob is
+    # ``submodule_search_locations`` — telling Python "treat this spec as a
+    # package; resolve submodule imports against this folder". We deliberately
+    # do NOT synthesize an ``__init__.py`` on disk: the folder may legitimately
+    # ship without one (PEP 420 namespace style) and writing into a user's
+    # project tree would be invasive. When ``__init__.py`` IS present we let
+    # Python build a normal FileLoader-backed package spec; when it is absent
+    # we construct a loader-less ``ModuleSpec`` that still carries the search
+    # locations, which is enough for child submodule imports to resolve.
+    pkg_spec: importlib.machinery.ModuleSpec | None
+    if init_file.exists():
+        pkg_spec = importlib.util.spec_from_file_location(
+            pkg_name,
+            init_file,
+            submodule_search_locations=[str(folder)],
+        )
+        if pkg_spec is None or pkg_spec.loader is None:  # pragma: no cover
+            raise DiscoveryError(
+                f"cannot build a package spec for connector {manifest.name!r} "
+                f"at {folder}"
+            )
+    else:
+        pkg_spec = importlib.machinery.ModuleSpec(
+            name=pkg_name, loader=None, origin=None, is_package=True
+        )
+        pkg_spec.submodule_search_locations = [str(folder)]
+
+    pkg_module = importlib.util.module_from_spec(pkg_spec)
+    sys.modules[pkg_name] = pkg_module
+
     try:
         with registration_scope(manifest.name) as registry:
+            # Execute __init__.py first if it exists, so any package-level
+            # setup (rare, but legal) runs before submodules import from it.
+            if init_file.exists() and pkg_spec.loader is not None:
+                pkg_spec.loader.exec_module(pkg_module)
             for py_file in py_files:
-                _import_module_from_path(py_file)
+                sub_name = f"{pkg_name}.{py_file.stem}"
+                sub_spec = importlib.util.spec_from_file_location(
+                    sub_name, py_file
+                )
+                if sub_spec is None or sub_spec.loader is None:  # pragma: no cover
+                    raise DiscoveryError(
+                        f"cannot load submodule {py_file.name} of connector "
+                        f"{manifest.name!r}"
+                    )
+                sub_module = importlib.util.module_from_spec(sub_spec)
+                sys.modules[sub_name] = sub_module
+                sub_spec.loader.exec_module(sub_module)
     except (ValueError, TypeError) as exc:
         # A decorator raised at import time — a duplicate stream name, a bad
         # @stream signature (docs/03 §7 rules 7-8). Surface it as discovery.
         raise DiscoveryError(
             f"connector {manifest.name!r} failed to import cleanly: {exc}"
         ) from exc
+    finally:
+        # NOTE: pop every sys.modules entry this load created — the synthetic
+        # package AND its submodules. The UUID-suffixed name is fresh per
+        # load, but a leftover entry would still hold a strong reference to a
+        # module whose decorators ran (the connector registry is on the
+        # module's stack frame, not in sys.modules), bloating memory and
+        # preventing a later load that happens to collide on a name from
+        # re-running. Done in ``finally`` so a half-finished load (decorator
+        # raised mid-import) also cleans up.
+        for key in [
+            k
+            for k in sys.modules
+            if k == pkg_name or k.startswith(pkg_name + ".")
+        ]:
+            sys.modules.pop(key, None)
+
     return LoadedConnector(manifest=manifest, registry=registry, folder=folder)
 
 

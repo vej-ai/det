@@ -630,7 +630,12 @@ def test_init_scaffolds_runnable_project(runner: CliRunner, tmp_path: Path) -> N
 
 
 def test_new_source_scaffolds(runner: CliRunner, tmp_path: Path) -> None:
-    """``new source <name>`` scaffolds ``sources/<name>/``."""
+    """``new source <name>`` scaffolds ``sources/<name>/``.
+
+    Stage 11: also emits an ``__init__.py`` marker so the folder is an
+    explicit Python package and ``source.py`` can use relative imports for
+    sibling helpers (``from .client import X``).
+    """
     project = tmp_path / "proj"
     runner.invoke(cli, ["init", str(project)])
     result = runner.invoke(
@@ -640,10 +645,16 @@ def test_new_source_scaffolds(runner: CliRunner, tmp_path: Path) -> None:
     folder = project / "sources" / "my_src"
     assert (folder / "register.yaml").is_file()
     assert (folder / "source.py").is_file()
+    assert (folder / "__init__.py").is_file()
 
 
 def test_new_destination_scaffolds(runner: CliRunner, tmp_path: Path) -> None:
-    """``new destination <name>`` scaffolds ``destinations/<name>/``."""
+    """``new destination <name>`` scaffolds ``destinations/<name>/``.
+
+    Stage 11: also emits an ``__init__.py`` marker so the folder is an
+    explicit Python package (a sibling ``ddl.py`` / ``client.py`` can be
+    imported with ``from .ddl import X``).
+    """
     project = tmp_path / "proj"
     runner.invoke(cli, ["init", str(project)])
     result = runner.invoke(
@@ -653,6 +664,7 @@ def test_new_destination_scaffolds(runner: CliRunner, tmp_path: Path) -> None:
     folder = project / "destinations" / "my_dst"
     assert (folder / "register.yaml").is_file()
     assert (folder / "destination.py").is_file()
+    assert (folder / "__init__.py").is_file()
 
 
 def test_new_config_scaffolds(runner: CliRunner, tmp_path: Path) -> None:

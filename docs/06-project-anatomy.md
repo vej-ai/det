@@ -30,16 +30,19 @@ acme_el/
 ├── sources/                # custom SOURCE connectors (kind: source)
 │   ├── shiphero/
 │   │   ├── register.yaml
-│   │   ├── source.py
+│   │   ├── __init__.py     # marker — makes the folder an explicit Python package
+│   │   ├── source.py       # uses `from .client import ...` / `from .schema import ...`
 │   │   ├── client.py
 │   │   └── schema.py
 │   └── internal_api/
 │       ├── register.yaml
+│       ├── __init__.py
 │       └── source.py
 │
 ├── destinations/           # custom DESTINATION connectors (kind: destination)
 │   └── snowflake_eu/
 │       ├── register.yaml
+│       ├── __init__.py
 │       └── destination.py
 │
 ├── configs/                # pipeline configs (one config = one pipeline)

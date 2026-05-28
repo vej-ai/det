@@ -125,6 +125,23 @@ params: {}
 destination_params: {}
 """
 
+# --- shared marker file for connector folders -----------------------------
+#
+# An empty ``__init__.py`` makes the connector folder an *explicit* Python
+# package, so ``source.py`` / ``destination.py`` can use relative imports for
+# sibling helpers (``from .client import SigmaClient``). The engine's
+# load-as-package mechanism (stage 11, ``dtex/engine/discovery.py``) treats a
+# folder *without* one as a PEP 420 namespace package, so this file is purely
+# explicit-is-better-than-implicit — it makes the package shape obvious to
+# IDEs and to readers.
+
+_INIT_PY = (
+    "# Marker file — makes this folder a Python package so source.py / "
+    "destination.py can use relative imports for sibling helpers "
+    "(e.g. `from .client import X`).\n"
+)
+
+
 # --- source connector templates -------------------------------------------
 
 _SOURCE_REGISTER_YML = """\
@@ -333,9 +350,11 @@ def scaffold_project(directory: Path, *, force: bool = False) -> Path:
 def scaffold_source(sources_dir: Path, name: str) -> Path:
     """Write a new source folder ``sources_dir/<name>/`` — docs/03, docs/06.
 
-    Writes a ``register.yaml`` with one example stream plus a ``source.py``
-    carrying a ``@stream`` stub. Refuses to overwrite an existing folder.
-    Returns the source folder path.
+    Writes a ``register.yaml`` with one example stream, a ``source.py``
+    carrying a ``@stream`` stub, and an empty ``__init__.py`` marker so the
+    folder is an explicit Python package (a sibling ``client.py`` /
+    ``helpers.py`` can then be imported with ``from .client import X``).
+    Refuses to overwrite an existing folder. Returns the source folder path.
     """
     folder = sources_dir / name
     if folder.exists():
@@ -345,15 +364,19 @@ def scaffold_source(sources_dir: Path, name: str) -> Path:
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(_SOURCE_REGISTER_YML.format(name=name))
     (folder / "source.py").write_text(_SOURCE_PY.format(name=name))
+    (folder / "__init__.py").write_text(_INIT_PY)
     return folder
 
 
 def scaffold_destination(destinations_dir: Path, name: str) -> Path:
     """Write a new destination folder ``destinations_dir/<name>/`` — docs/05, docs/06.
 
-    Writes a ``register.yaml`` plus a ``destination.py`` carrying the full
-    ``@destination`` hook stub set. Refuses to overwrite an existing folder.
-    Returns the destination folder path.
+    Writes a ``register.yaml``, a ``destination.py`` carrying the full
+    ``@destination`` hook stub set, and an empty ``__init__.py`` marker so
+    the folder is an explicit Python package (a sibling ``ddl.py`` /
+    ``client.py`` can then be imported with ``from .ddl import X``).
+    Refuses to overwrite an existing folder. Returns the destination folder
+    path.
     """
     folder = destinations_dir / name
     if folder.exists():
@@ -363,6 +386,7 @@ def scaffold_destination(destinations_dir: Path, name: str) -> Path:
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(_DEST_REGISTER_YML.format(name=name))
     (folder / "destination.py").write_text(_DEST_PY.format(name=name))
+    (folder / "__init__.py").write_text(_INIT_PY)
     return folder
 
 

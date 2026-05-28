@@ -2204,3 +2204,93 @@ def test_run_tag_reads_threads_from_profiles(tmp_path: Path) -> None:
     )
     assert len(results) == 2
     assert all(r.status.value == "succeeded" for r in results)
+
+
+# ==========================================================================
+# Stage 11 — project-local connector loaded as a Python package
+# ==========================================================================
+#
+# The engine loads each connector folder as a *synthetic Python package*, so
+# a connector that splits helpers into sibling files (``client.py``,
+# ``helpers.py``, …) can use ``from .client import X`` in ``source.py`` /
+# ``destination.py``. The historical per-file standalone-module load could
+# not — relative imports raised ``ImportError: attempted relative import
+# with no known parent package``. These two tests pin down the new
+# capability end to end against a real DuckDB target.
+
+# The on-disk multi-file fixture: tests/fixtures/sources/multifile_echo/
+_MULTIFILE_ECHO_DIR = (
+    Path(__file__).resolve().parent / "fixtures" / "sources" / "multifile_echo"
+)
+
+
+def _install_multifile_echo(project_root: Path, *, include_init: bool) -> None:
+    """Copy the multifile_echo fixture into ``project_root/sources/``.
+
+    When ``include_init=False`` the destination folder is created *without*
+    ``__init__.py`` — exercising the PEP 420 namespace-package fallback that
+    keeps an older project (scaffolded before stage 11) working.
+    """
+    import shutil
+
+    dst = project_root / "sources" / "multifile_echo"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(_MULTIFILE_ECHO_DIR, dst)
+    if not include_init:
+        (dst / "__init__.py").unlink()
+
+
+def test_project_local_connector_with_relative_imports(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """A project-local connector folder may use ``from .helper import X``.
+
+    Loads the multifile_echo fixture (source.py + helper.py, with an
+    __init__.py marker) end-to-end through ``dtex.run`` against a DuckDB
+    target. Under the historical per-file load this fails at import time
+    with ``ImportError: attempted relative import with no known parent
+    package``; under the stage-11 load-as-package mechanism it succeeds and
+    both fixture records land.
+    """
+    _write_project(tmp_path)
+    _install_multifile_echo(tmp_path, include_init=True)
+    _write_config(tmp_path, name="multi", source="multifile_echo")
+
+    result = dtex.run(
+        config="multi",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "succeeded", result.error
+    records_stream = result.stream("records")
+    assert records_stream is not None
+    assert records_stream.rows_loaded == 2
+
+    rows = _query(duckdb_path, "SELECT id FROM multifile_echo_records ORDER BY id")
+    assert rows == [(1,), (2,)]
+
+
+def test_project_local_connector_without_init_file_still_works(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """A connector folder without ``__init__.py`` still loads (PEP 420 fallback).
+
+    Backward-compat case: a project authored before the stage-11 scaffold
+    update may not ship an ``__init__.py`` next to its ``source.py``. The
+    engine treats the folder as a PEP 420 namespace package, so relative
+    imports still resolve.
+    """
+    _write_project(tmp_path)
+    _install_multifile_echo(tmp_path, include_init=False)
+    assert not (tmp_path / "sources" / "multifile_echo" / "__init__.py").exists()
+    _write_config(tmp_path, name="multi_no_init", source="multifile_echo")
+
+    result = dtex.run(
+        config="multi_no_init",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "succeeded", result.error
+    records_stream = result.stream("records")
+    assert records_stream is not None
+    assert records_stream.rows_loaded == 2

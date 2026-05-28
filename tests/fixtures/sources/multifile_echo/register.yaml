@@ -1,0 +1,20 @@
+# multifile_echo — a tiny fixture SOURCE connector split across TWO .py files.
+#
+# Exists to prove the engine loads a project-local connector folder as a real
+# Python *package* (stage 11) — source.py uses `from .helper import ...` and
+# the relative import must resolve. The historical per-file standalone-module
+# load could not do this; loading the folder as a package can.
+name: multifile_echo
+kind: source
+version: "1.0.0"
+summary: Multi-file fixture source proving relative imports work end-to-end.
+tags: [test, fixture, stage-11]
+
+streams:
+  # An append stream with a tiny explicit schema. The @stream function in
+  # source.py yields data sourced from `from .helper import FIXTURE_BATCHES`.
+  - name: records
+    table: multifile_echo_records
+    write_disposition: append
+    schema:
+      - {name: id, type: INTEGER, mode: REQUIRED}

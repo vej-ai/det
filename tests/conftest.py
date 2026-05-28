@@ -1,14 +1,21 @@
-"""Shared test fixtures + the connector-folder import harness.
+"""Shared test fixtures + a small connector-folder import harness.
 
-The engine (stage 5) does not exist yet, so these tests have to do for
-themselves the one thing the engine will do: import a connector folder's
-``.py`` files *inside* a :func:`~dtex.registry.registration_scope` so the
-``@stream`` / ``@destination`` decorators register into one
-:class:`~dtex.registry.ConnectorRegistry`.
+:func:`load_connector` is the test-only loader the registry-layer tests use to
+exercise one connector folder in isolation. It opens a
+:func:`~dtex.registry.registration_scope` and execs every ``.py`` file in the
+folder as a standalone synthetic module, so the connector's decorators
+populate one :class:`~dtex.registry.ConnectorRegistry`.
 
-:func:`load_connector` is that harness. The DuckDB destination and the ``echo``
-fixture source are both loaded through it — exactly the path the engine's
-discovery step will take.
+This harness pre-dates the engine and is *not* the engine's production load
+path. As of stage 11 the engine loads each connector folder as a synthetic
+*Python package* under a process-unique name — see
+``dtex/engine/discovery.py:_load_connector_folder``. That mechanism is what
+lets a project-local connector use ``from .client import X`` between its own
+sibling files. The harness here is still fine for the single-file fixture
+connectors (``echo`` source, baked DuckDB destination) it drives, because
+neither uses a relative import; tests that need to assert on the engine's
+real load behaviour go through ``dtex.run`` / ``disc.resolve_*`` and exercise
+the package-load path directly.
 """
 
 from __future__ import annotations
@@ -54,7 +61,7 @@ class LoadedConnector:
 
 
 def load_connector(folder: Path) -> LoadedConnector:
-    """Discover + import one connector folder — the engine's discovery step.
+    """Test-only loader for one connector folder.
 
     Parses ``register.yaml`` into a :class:`ConnectorManifest`, then imports
     every ``.py`` file in the folder *inside a single*
@@ -65,6 +72,13 @@ def load_connector(folder: Path) -> LoadedConnector:
     the same connector twice in one test session genuinely re-executes its
     decorators (no ``sys.modules`` cache hit that would leave the second
     registry empty).
+
+    This is *not* the engine's production load path — the engine loads each
+    connector folder as a synthetic Python package
+    (``dtex/engine/discovery.py:_load_connector_folder``). For the single-file
+    fixture connectors this harness drives, the two paths are observationally
+    equivalent; tests that need the engine's exact behaviour go through
+    ``dtex.run`` or ``disc.resolve_*``.
     """
     manifest_path = folder / "register.yaml"
     raw = yaml.safe_load(manifest_path.read_text())

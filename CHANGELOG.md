@@ -11,6 +11,12 @@ For what is *planned* — versus what has shipped — see
 ## [Unreleased]
 
 ### Added
+- Project-local connectors are now loaded as Python packages. A connector
+  folder may split helpers into sibling files (`client.py`, `helpers.py`,
+  etc.) and use `from .client import ...` in `source.py` / `destination.py`.
+  The `dtex new source` and `dtex new destination` scaffolds emit an empty
+  `__init__.py` to make the package shape explicit; folders without one
+  still work (PEP 420 namespace package).
 - GitHub Actions CI: pytest matrix on Python 3.11/3.12/3.13, ruff + mypy lint.
 - PyPI Trusted Publishing workflow triggered by `v*` tags.
 

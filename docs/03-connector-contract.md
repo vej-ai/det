@@ -33,6 +33,7 @@ file at its root. Everything else is convention.
 ```
 meta_ads/
 ├── register.yaml        # MANDATORY — the discovery manifest
+├── __init__.py          # marker — makes the folder an explicit Python package
 ├── source.py            # the connector body: @stream functions live here
 ├── streams.py           # (optional) additional streams, split for readability
 ├── schema.py            # (optional) shared schema definitions / helpers
@@ -45,12 +46,23 @@ meta_ads/
 |---|---|---|
 | `register.yaml` | **Yes** | The manifest. The *only* file the engine needs to discover and validate the connector before importing any Python. |
 | `*.py` (≥ 1) | **Yes** | The connector body. At least one file must define the decorated functions named in `register.yaml`. File names are free; `source.py` / `destination.py` are convention. |
+| `__init__.py` | No | Empty marker. Makes the folder an *explicit* Python package, which `dtex new source` / `dtex new destination` scaffolds today. A folder without one still works (the engine treats it as a [PEP 420 namespace package](https://peps.python.org/pep-0420/)), so older project trees are not broken. |
 | `requirements.txt` | No | Extra dependencies. Installed into the connector's environment at build time. Pre-baked connectors keep this minimal; the core engine's deps are always available. |
 | `schema.py`, `client.py`, any helper | No | Ordinary Python modules. Imported by the body files. No decorators, no contract — just code. |
 | `README.md` | No | Documentation. Ignored by the engine. |
 
 The folder name is the connector's **directory id** but not its authoritative
 name — the `name:` key in `register.yaml` is. They should match by convention.
+
+> **The folder IS a Python package.** The engine loads each connector folder
+> under a process-unique synthetic package name, so the body files are real
+> submodules of one package. Splitting helpers into sibling files
+> (`client.py`, `helpers.py`, `schema.py`) and pulling them in with
+> `from .client import X` from `source.py` / `destination.py` is **idiomatic
+> and fully supported**. The same pattern works in baked connectors (which
+> are installed as real packages — e.g. `dtex.sources.stripe`) and in
+> project-local connectors (which the engine wraps in a synthetic per-load
+> package).
 
 The internal layout of the body (`source.py` vs `streams.py` vs `client.py`) is
 covered in detail in chapter **04 — Connector Body**. This chapter covers the
@@ -361,6 +373,14 @@ destination_params:
 
 The `shipping_labels` / `line_items` nested objects are declared as `JSON`
 columns. *(See chapter 04 for the flatten-vs-JSON-column discussion.)*
+
+The baked ShipHero connector splits its body across `source.py` (`@stream`
+functions), `client.py` (auth + HTTP calls), and `schema.py` (record shaping)
+and uses `from .client import refresh_access_token` / `from .schema import
+extract_records` between them — it ships installed as a real package
+(`dtex.sources.shiphero`). A *project-local* connector gets the same
+capability via the engine's load-as-package mechanism (§1): the same
+`from .client import …` pattern works in `<project>/sources/<name>/source.py`.
 
 ## 3. The decorator API
 

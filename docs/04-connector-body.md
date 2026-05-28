@@ -42,6 +42,7 @@ defines the decorated functions. Everything below is **convention** — the layo
 ```
 shiphero/
 ├── register.yaml      # manifest (chapter 03)
+├── __init__.py        # marker — makes the folder an explicit Python package
 ├── source.py          # @stream functions — the entry points
 ├── streams.py         # (optional) extra @stream functions, when source.py gets long
 ├── schema.py          # (optional) shared schema constants / record-shaping helpers
@@ -68,11 +69,27 @@ A connector author should be able to delete `streams.py` and `schema.py` and
 fold their contents into `source.py` with no behavior change. They are
 organizational, not structural.
 
+> **Sibling files use relative imports.** Because the connector folder is a
+> Python package (chapter 03 §1), `source.py` pulls in helpers from sibling
+> files with the standard relative-import form:
+>
+> ```python
+> # sources/shiphero/source.py
+> from .client import refresh_access_token, execute_graphql
+> from .schema import extract_records
+> ```
+>
+> This is the same pattern the baked connectors use and the pattern
+> `dtex new source <name>` is scaffolded for (it emits an `__init__.py`
+> marker alongside `source.py`). Project-local connectors get the same
+> capability via the engine's per-load synthetic package — see chapter 03 §1.
+
 ### A destination connector
 
 ```
 bigquery/
 ├── register.yaml      # manifest, kind: destination
+├── __init__.py        # marker — makes the folder an explicit Python package
 ├── destination.py     # the @destination hooks — the entry points
 ├── ddl.py             # (optional) table create / schema-evolution helpers
 └── requirements.txt   # (optional) extra deps (e.g. google-cloud-bigquery)
