@@ -10,13 +10,20 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-28
+
 ### Added
-- Project-local connectors are now loaded as Python packages. A connector
-  folder may split helpers into sibling files (`client.py`, `helpers.py`,
-  etc.) and use `from .client import ...` in `source.py` / `destination.py`.
-  The `dtex new source` and `dtex new destination` scaffolds emit an empty
-  `__init__.py` to make the package shape explicit; folders without one
-  still work (PEP 420 namespace package).
+- **Multi-file project-local connectors.** A project-local connector folder
+  may split helpers into sibling files (`client.py`, `helpers.py`, etc.) and
+  use relative imports like `from .client import SigmaClient` in `source.py`
+  / `destination.py`. Previously failed with `ImportError: attempted relative
+  import with no known parent package` because the engine loaded each `.py`
+  as a standalone module. The engine now loads a connector folder as a
+  synthetic Python package; the existing baked connectors are unaffected.
+- **Scaffolds emit `__init__.py`.** `dtex new source <name>` and
+  `dtex new destination <name>` now write an empty `__init__.py` to make
+  the package shape explicit. Folders without one still work via PEP 420
+  namespace packages — fully backward-compatible.
 - GitHub Actions CI: pytest matrix on Python 3.11/3.12/3.13, ruff + mypy lint.
 - PyPI Trusted Publishing workflow triggered by `v*` tags.
 
@@ -101,7 +108,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/vej-ai/dtex/releases/tag/v0.1.3
 [0.1.2]: https://github.com/vej-ai/dtex/releases/tag/v0.1.2
 [0.1.1]: https://github.com/vej-ai/dtex/releases/tag/v0.1.1
 [0.1.0]: https://github.com/vej-ai/dtex/releases/tag/v0.1.0
