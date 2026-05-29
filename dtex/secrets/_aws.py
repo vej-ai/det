@@ -273,9 +273,9 @@ class AwsSecretsManagerResolver:
       ``"secret X not found"``.
     * ``ClientError`` with ``Code=AccessDeniedException`` →
       ``"permission denied accessing secret X"``.
-    * Any other ``ClientError`` → wrapped; only the class name is
-      surfaced (the SDK's message body MAY echo metadata that brushes
-      the secret name or policy text, mirror GCP's caution).
+    * Any other ``ClientError`` → wrapped; the SDK's own message is
+      included (operator-diagnostic; the response object at the error
+      point does not contain the secret value).
     * Binary secret (``SecretBinary`` present, ``SecretString`` absent)
       → ``"binary secrets not supported in v1"``.
     * ``#field`` requested but ``SecretString`` is not JSON → clear
@@ -353,10 +353,10 @@ class AwsSecretsManagerResolver:
         except botocore_exceptions.ClientError as exc:
             # ClientError carries a structured ``response`` dict with the
             # AWS error code under ``Error.Code``. We branch on a small
-            # set of well-known codes; everything else surfaces with
-            # just the class name (mirroring the GCP resolver's caution
-            # about not inlining exotic server error messages that
-            # could echo metadata).
+            # set of well-known codes for operator-friendly hints;
+            # everything else surfaces with the SDK's own message
+            # included (it's diagnostic and the response object at the
+            # error point does not contain the secret value).
             err_obj = getattr(exc, "response", None) or {}
             err_section = err_obj.get("Error", {}) if isinstance(err_obj, dict) else {}
             code = err_section.get("Code", "") if isinstance(err_section, dict) else ""
@@ -372,12 +372,17 @@ class AwsSecretsManagerResolver:
                     f"in region {region!r}; verify the IAM principal has "
                     f"secretsmanager:GetSecretValue on this secret's ARN"
                 ) from exc
-            # Catch-all for every other ClientError — class name only,
-            # no SDK message body inlined. ``__cause__`` carries full
-            # detail for tracebacks.
+            # Catch-all for every other ClientError. The SDK's message
+            # is included because it is operator-diagnostic ("Could not
+            # connect to the endpoint URL", token-expired details, etc.);
+            # the response object at this point does not yet contain
+            # the secret value, so the message body cannot leak it. The
+            # engine's per-run Redactor masks any value that did slip
+            # through, as defense in depth. ``__cause__`` carries the
+            # full traceback for forensics.
             raise SecretResolutionError(
                 f"AWS Secrets Manager error resolving secret {secret_id!r} "
-                f"in region {region!r}: {type(exc).__name__}"
+                f"in region {region!r}: {type(exc).__name__}: {exc}"
             ) from exc
 
         # The response has either ``SecretString`` (UTF-8 text) or

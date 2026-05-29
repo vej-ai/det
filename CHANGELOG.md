@@ -10,6 +10,21 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-05-29
+
+### Fixed
+- **Secret-resolver errors now include the SDK's actual message.** Previously,
+  catch-all branches in the GCP, AWS, and Vault resolvers surfaced only the
+  exception class name (e.g. `RetryError`, `_FakeClientError`,
+  `_FakeForbidden`) — defensive paranoia that the SDK message body might
+  leak secret-adjacent metadata. In practice the SDK has not yet received
+  the secret value at the point those exceptions raise, so the message
+  bodies carry only operator-diagnostic text ("Reauthentication is needed",
+  "permission denied", "Could not connect to the endpoint URL", etc.).
+  Operators were left to manually debug 57-second hangs with no actionable
+  output. The engine's per-run Redactor remains the safety net for any
+  value that does slip into a log line.
+
 ## [0.1.3] — 2026-05-28
 
 ### Added
@@ -108,7 +123,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/vej-ai/dtex/releases/tag/v0.1.4
 [0.1.3]: https://github.com/vej-ai/dtex/releases/tag/v0.1.3
 [0.1.2]: https://github.com/vej-ai/dtex/releases/tag/v0.1.2
 [0.1.1]: https://github.com/vej-ai/dtex/releases/tag/v0.1.1

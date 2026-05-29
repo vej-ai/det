@@ -288,14 +288,18 @@ class GcpSecretManagerResolver:
                 f"and that the version exists"
             ) from exc
         except gapi_exceptions.GoogleAPIError as exc:
-            # Catch-all for every other google-api-core surface (DeadlineExceeded,
-            # ServiceUnavailable after SDK retries exhausted, etc.). The class
-            # name surfaces; the SDK's message body is NOT inlined here because
-            # an exotic server-side error MIGHT echo metadata that brushes the
-            # secret. The chained ``__cause__`` carries full detail for tracebacks.
+            # Catch-all for every other google-api-core surface
+            # (DeadlineExceeded, ServiceUnavailable, "Reauthentication is
+            # needed", etc.). The SDK's own message is included because
+            # it is operator-diagnostic — at this point in the request
+            # lifecycle the SDK has not yet received the secret value, so
+            # the message body cannot leak it. The engine's per-run
+            # Redactor masks any value that did slip through, as defense
+            # in depth. The chained ``__cause__`` carries the full
+            # traceback for forensics.
             raise SecretResolutionError(
                 f"GCP Secret Manager error resolving {path!r}: "
-                f"{type(exc).__name__}"
+                f"{type(exc).__name__}: {exc}"
             ) from exc
 
         # GCP returns ``response.payload.data`` as bytes. Decode as UTF-8 —

@@ -424,7 +424,14 @@ def test_access_denied_wrapped(
 def test_generic_client_error_wrapped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-NotFound/non-AccessDenied ClientError surfaces with class name."""
+    """A non-NotFound/non-AccessDenied ClientError surfaces class name + message.
+
+    The SDK message body is intentionally INCLUDED — the response object
+    at the error point does not contain the secret value, so the message
+    cannot leak it. The engine's per-run Redactor is the safety net for
+    any value that did slip through. See ``_aws.py::resolve`` and the
+    rationale comment on the catch-all ``ClientError`` branch.
+    """
     fake = _install_fake_sdk(monkeypatch)
     fake.pre_built["us-east-1"] = client = _FakeClient("us-east-1")
     client.raise_on_call = _FakeClientError(
@@ -435,8 +442,8 @@ def test_generic_client_error_wrapped(
         resolver.resolve("us-east-1/mysecret", None)
     msg = str(exc_info.value)
     assert "_FakeClientError" in msg
-    # SDK message body MUST NOT inline.
-    assert "rate-limited server-side" not in msg
+    # SDK message body IS inlined — operator-diagnostic, no value leak.
+    assert "rate-limited server-side" in msg
     assert isinstance(exc_info.value.__cause__, _FakeClientError)
 
 

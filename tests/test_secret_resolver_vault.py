@@ -377,11 +377,19 @@ def test_malformed_response_no_data_key(
 # ---------------------------------------------------------------------------
 
 
-def test_vault_error_wrapped_without_message_body(
+def test_vault_error_surfaces_class_name_and_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Vault SDK error class names surface; messages do not (they can
-    echo policy text including secret names)."""
+    """Vault SDK error class name AND message both surface.
+
+    The hvac message body is intentionally INCLUDED — Vault errors echo
+    the path (already known to the caller — it's in the `secret://` URL)
+    and policy template names, but the secret VALUE is never in the
+    message (the read failed before any value left Vault). The engine's
+    per-run Redactor is the safety net for any value that did slip
+    through. See ``_vault.py::resolve`` and the rationale comment on
+    the catch-all hvac-exception branch.
+    """
     fake = _install_fake_sdk(monkeypatch)
     _set_env(monkeypatch)
     fake.next_raise = _FakeForbidden(
@@ -392,8 +400,8 @@ def test_vault_error_wrapped_without_message_body(
         resolver.resolve("secret/data/warehouse", "password")
     msg = str(exc_info.value)
     assert "_FakeForbidden" in msg
-    # Policy message MUST NOT inline.
-    assert "denied by policy" not in msg
+    # Policy message IS inlined — operator-diagnostic, no value leak.
+    assert "denied by policy" in msg
     assert isinstance(exc_info.value.__cause__, _FakeForbidden)
 
 

@@ -335,7 +335,14 @@ def test_not_found_wrapped_with_clear_message(
 def test_generic_google_api_error_wrapped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-Permission/NotFound GoogleAPIError surfaces with class name."""
+    """A non-Permission/NotFound GoogleAPIError surfaces class name + message.
+
+    The SDK message body is intentionally INCLUDED — at the point the SDK
+    raises, the secret value has not yet been received, so the message
+    cannot leak it. The engine's per-run Redactor is the safety net for
+    any value that did slip through. See ``_gcp.py::resolve`` and the
+    rationale comment on the catch-all ``GoogleAPIError`` branch.
+    """
     fake_sm = _install_fake_sdk(monkeypatch)
     resolver = GcpSecretManagerResolver()
     resolver._build_client()
@@ -345,8 +352,8 @@ def test_generic_google_api_error_wrapped(
         resolver.resolve("projects/p/secrets/s/versions/latest", None)
     msg = str(exc_info.value)
     assert "_FakeDeadlineExceeded" in msg
-    # SDK message NOT inlined.
-    assert "504 timeout" not in msg
+    # SDK message IS inlined — operator-diagnostic, no value leak.
+    assert "504 timeout" in msg
     assert isinstance(exc_info.value.__cause__, _FakeDeadlineExceeded)
 
 

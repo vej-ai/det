@@ -97,8 +97,13 @@ Operator setup (one-time per Vault deployment):
 # :func:`dtex.secrets.resolvers.resolve_secret_url`'s NOTE.
 
 # NOTE: hvac exception messages can echo policy denial text including
-# secret names. The catch-all surfaces only ``type(exc).__name__``;
-# the chained ``__cause__`` preserves the original for tracebacks.
+# the secret path (already known to the caller — it's in the original
+# `secret://` URL) and policy template names. The catch-all surfaces
+# the SDK's own message because it is operator-diagnostic; the secret
+# VALUE is never in those messages (the read failed before any value
+# left Vault), and the engine's per-run Redactor masks any value that
+# did slip through as defense in depth. ``__cause__`` preserves the
+# full traceback for forensics.
 """
 
 from __future__ import annotations
@@ -196,9 +201,11 @@ class VaultResolver:
       secret at path Y"``.
     * Non-string field value (e.g. nested object) → ``"vault: field X
       is not a string (got type Y)"``.
-    * Any other ``hvac.exceptions.*`` → wrapped; only the class name
-      is surfaced (same caution as GCP/AWS — Vault errors can echo
-      policy text).
+    * Any other ``hvac.exceptions.*`` → wrapped; the SDK's own message
+      is included (it's operator-diagnostic — "permission denied",
+      "invalid path", etc.). The secret VALUE is never in the message
+      (the read failed before any value left Vault); the engine's
+      Redactor is the safety net.
     """
 
     scheme: ClassVar[str] = "vault"
@@ -286,13 +293,19 @@ class VaultResolver:
             result = client.read(path)
         except hvac_exceptions.VaultError as exc:
             # Catch-all for every hvac.exceptions surface (Forbidden,
-            # InvalidPath, InvalidRequest, etc.). The class name
-            # surfaces; the hvac message body is NOT inlined because
-            # Vault errors echo policy text that may include secret
-            # names or path templates. The chained ``__cause__``
-            # carries full detail for tracebacks.
+            # InvalidPath, InvalidRequest, etc.). The hvac message is
+            # included because it is operator-diagnostic ("permission
+            # denied — token expired", "invalid path", etc.). Vault
+            # error messages echo the path and any policy template
+            # involved — both of which are already known to the caller
+            # (the path is in the original ``secret://`` URL); the
+            # secret VALUE is never in the message because the read
+            # failed before the value left Vault. The engine's per-run
+            # Redactor masks any value that did slip through, as
+            # defense in depth. ``__cause__`` carries the full
+            # traceback for forensics.
             raise SecretResolutionError(
-                f"vault: error reading {path!r}: {type(exc).__name__}"
+                f"vault: error reading {path!r}: {type(exc).__name__}: {exc}"
             ) from exc
 
         if result is None:
