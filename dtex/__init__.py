@@ -51,6 +51,7 @@ from dtex.secrets import (
 from dtex.types import (
     Batch,
     Capability,
+    CoercionError,
     Config,
     ConnectorKind,
     Cursor,
@@ -114,6 +115,7 @@ __all__ = [
     # Contract types a connector author references (dtex.types)
     "Batch",
     "Capability",
+    "CoercionError",
     "Config",
     "ConnectorKind",
     "Cursor",

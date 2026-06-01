@@ -954,6 +954,215 @@ def test_run_legacy_destination_block_tolerated(
     assert any("legacy" in rec.message for rec in caplog.records)
 
 
+# --------------------------------------------------------------------------
+# NORMALIZE — the engine coerces batch values to the declared schema's types
+# (docs/02 §Normalize). End-to-end through dtex.run + DuckDB; the per-type
+# unit coverage lives in tests/test_normalize.py.
+# --------------------------------------------------------------------------
+
+
+def test_run_normalize_coerces_all_string_csv_style_batch(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """A connector yielding all-string records lands with correctly typed values."""
+    _write_project(tmp_path)
+    folder = tmp_path / "sources" / "csv_like"
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: csv_like
+            kind: source
+            version: "1.0.0"
+            summary: mimics a CSV-backed source (everything yielded as str).
+            streams:
+              - name: rows
+                table: csv_like_rows
+                write_disposition: append
+                schema:
+                  - {name: id,        type: INTEGER}
+                  - {name: amount,    type: FLOAT}
+                  - {name: active,    type: BOOLEAN}
+                  - {name: seen_at,   type: TIMESTAMP}
+                  - {name: day,       type: DATE}
+            """
+        )
+    )
+    (folder / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from dtex import Batch, stream
+            from collections.abc import Iterator
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                # Every value is a str — the CSV-backed source idiom.
+                # Without NORMALIZE this batch crashes the destination
+                # (the BigQuery one with ArrowInvalid; DuckDB is more
+                # forgiving but still benefits from canonical types).
+                yield [
+                    {
+                        "id": "1",
+                        "amount": "9.99",
+                        "active": "true",
+                        "seen_at": "2026-05-31T12:00:00Z",
+                        "day": "2026-05-31",
+                    },
+                    {
+                        "id": "2",
+                        "amount": "0",
+                        "active": "false",
+                        "seen_at": "1717200000",  # unix-epoch digit string
+                        "day": "2026-06-01",
+                    },
+                ]
+            """
+        )
+    )
+    _write_config(tmp_path, name="csv_like_dev", source="csv_like")
+
+    result = dtex.run(
+        config="csv_like_dev",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "succeeded", result.error
+    assert result.rows_loaded == 2
+
+    rows = _query(
+        duckdb_path,
+        "SELECT id, amount, active, day FROM csv_like_rows ORDER BY id",
+    )
+    assert rows == [
+        (1, 9.99, True, __import__("datetime").date(2026, 5, 31)),
+        (2, 0.0, False, __import__("datetime").date(2026, 6, 1)),
+    ]
+    # Timestamp lands as a real timestamp value (DuckDB type, not str).
+    ts_rows = _query(
+        duckdb_path,
+        "SELECT typeof(seen_at) FROM csv_like_rows LIMIT 1",
+    )
+    assert "TIMESTAMP" in ts_rows[0][0].upper()
+
+
+def test_run_normalize_uncoercible_value_strict_mode_rolls_back(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """A strict-mode stream with an uncoercible value in batch 2 fails atomically."""
+    _write_project(tmp_path)
+    folder = tmp_path / "sources" / "strict_norm"
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: strict_norm
+            kind: source
+            version: "1.0.0"
+            summary: strict-mode stream where batch 2 has an uncoercible cell.
+            streams:
+              - name: rows
+                table: strict_norm_rows
+                write_disposition: append
+                schema_contract: strict
+                schema:
+                  - {name: id,     type: INTEGER}
+                  - {name: amount, type: INTEGER}
+            """
+        )
+    )
+    (folder / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from dtex import Batch, stream
+            from collections.abc import Iterator
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1, "amount": "100"}, {"id": 2, "amount": "200"}]
+                # Batch 2 carries 'abc' for an INTEGER column — CoercionError.
+                yield [{"id": 3, "amount": "abc"}]
+            """
+        )
+    )
+    _write_config(tmp_path, name="strict_norm_dev", source="strict_norm")
+
+    result = dtex.run(
+        config="strict_norm_dev",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "failed"
+    assert result.error is not None
+    msg = str(result.error)
+    assert "amount" in msg
+    assert "INTEGER" in msg
+    assert "abc" in msg
+
+    # Batch 1 rolled back — table is empty (rollback semantic from
+    # _stream_transaction holds for CoercionError as for write_batch errors).
+    landed = _query(duckdb_path, "SELECT COUNT(*) FROM strict_norm_rows")
+    assert landed[0][0] == 0
+
+
+def test_run_normalize_uncoercible_value_evolve_mode_also_fails(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """Evolve mode also fails on uncoercible values — strict's distinction is about
+    schema changes, not value-type drift. Both paths surface the same error.
+    """
+    _write_project(tmp_path)
+    folder = tmp_path / "sources" / "evolve_norm"
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: evolve_norm
+            kind: source
+            version: "1.0.0"
+            summary: evolve-mode stream where batch 2 has an uncoercible cell.
+            streams:
+              - name: rows
+                table: evolve_norm_rows
+                write_disposition: append
+                schema:
+                  - {name: id,     type: INTEGER}
+                  - {name: amount, type: INTEGER}
+            """
+        )
+    )
+    (folder / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from dtex import Batch, stream
+            from collections.abc import Iterator
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1, "amount": "100"}]
+                yield [{"id": 2, "amount": "not-a-number"}]
+            """
+        )
+    )
+    _write_config(tmp_path, name="evolve_norm_dev", source="evolve_norm")
+
+    result = dtex.run(
+        config="evolve_norm_dev",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "failed"
+    assert result.error is not None
+    assert "INTEGER" in str(result.error)
+    assert "not-a-number" in str(result.error)
+
+    # Rollback held — table is empty.
+    landed = _query(duckdb_path, "SELECT COUNT(*) FROM evolve_norm_rows")
+    assert landed[0][0] == 0
+
+
 # A couple of contract-type sanity checks the engine depends on.
 
 

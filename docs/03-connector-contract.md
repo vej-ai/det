@@ -428,6 +428,20 @@ Each dict is one record; keys are column names. Batching is the connector's
 call (ShipHero uses `batch_size`); the engine loads each yielded batch
 independently and can checkpoint between them.
 
+> **# NOTE:** the engine **coerces** every cell to the declared schema's
+> `FieldType` between extract and load (chapter 02 §The extract → normalize →
+> load pipeline). A connector author may yield strings if that is natural
+> for the source (CSV-backed REST endpoints, Stripe Sigma's all-string CSV
+> exports, ad-platform spreadsheet drops): a column declared
+> `type: INTEGER` and yielded as `"1599"` lands as the Python `int` `1599`
+> in the destination. An empty string `""` for a non-`STRING` column is
+> coerced to `None`. A value the engine cannot coerce raises
+> `dtex.CoercionError` (a `ValueError` subclass) and fails the stream; the
+> destination's transaction rolls back any batches already loaded in this
+> stream. Connectors that already yield canonical Python types
+> (`int` / `float` / `bool` / `datetime` / `date` / `bytes`) pay at most
+> one `isinstance` check per cell and see no behavior change.
+
 ```python
 @stream(name="shipments")
 def shipments(config, state, cursor, log):

@@ -143,6 +143,8 @@ This single distinction — driven by the `Capability.STATE` flag — is the onl
 
 A source stream declares its schema (see [03 — The Connector Contract](./03-connector-contract.md)). dtex carries this as a `Schema` object: an ordered list of `(name, type, nullable)` fields, plus optional `primary_key`. The destination's `ensure_schema` translates `Schema` into native DDL.
 
+**Destinations receive batches with already-typed values.** The engine's NORMALIZE step (chapter 02) coerces every cell to the canonical Python representation of its declared `FieldType` before calling `write_batch`. A destination only needs to know how to *write* the canonical types (`int` / `float` / `bool` / tz-aware `datetime` / `date` / `bytes` / JSON-serializable for `JSON` / `str`); it never needs to coerce strings to ints, parse ISO-8601 timestamps, or decode base64. A value the engine cannot coerce raises `CoercionError` *before* `write_batch` runs, which fails the stream and rolls back the partial load via `transaction` — destinations therefore never see malformed cells.
+
 dtex uses a small, **portable type system**. Connectors never emit native warehouse types directly:
 
 | dtex type | BigQuery | DuckDB | Postgres | Snowflake |

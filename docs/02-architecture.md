@@ -139,15 +139,44 @@ the reason memory stays bounded.
 
 - **Extract.** The connector's `@stream` function is a generator. The engine
   *pulls* from it; the generator decides batch size by how much it `yield`s.
-- **Normalize.** The engine reconciles each batch against the stream's schema and
-  coerces values to the destination's type system. When a stream declares an
-  explicit `schema` in `register.yaml` — the **recommended default**, and what
-  the baked ShipHero connector does — that schema is authoritative. When `schema`
-  is omitted, the engine infers it from the first batch and evolves it
-  additively as later batches introduce new columns or wider types (a
-  convenience for prototyping; see chapter 03 §2.2.1).
+- **Normalize.** The engine does two things, in order. **(a)** Schema
+  resolution — when a stream declares an explicit `schema` in `register.yaml`
+  (the **recommended default**, and what the baked ShipHero connector does)
+  that schema is authoritative; when `schema` is omitted, the engine infers
+  it from the first batch and evolves it additively as later batches
+  introduce new columns or wider types. **(b)** Value coercion — every cell
+  in every batch is passed through `dtex.engine.normalize.coerce_value`
+  before reaching the destination, so the destination always sees the
+  canonical Python type for each `FieldType`. The per-`FieldType` rules:
+
+  | `FieldType` | Input shapes accepted | Canonical Python output |
+  |---|---|---|
+  | `STRING` | `str`, anything else → `str(value)` | `str` |
+  | `INTEGER` | `int` (not `bool`), digit-string (`"-7"`, `"+42"`, `" 99 "`), `1.0`-style float, `"1.0"` digit-string | `int` |
+  | `FLOAT` | `int` (not `bool`), `float`, parseable string (`"1.5"`, `"1.5e3"`) | `float` |
+  | `BOOLEAN` | `bool`, `0`/`1` int, `"true"`/`"false"`/`"yes"`/`"no"`/`"1"`/`"0"` (case-insensitive) | `bool` |
+  | `TIMESTAMP` | tz-aware/naive `datetime`, `date`, ISO-8601 string (with/without `T`, `Z`, offset, fractional seconds), Unix-epoch `int`/`float`/digit-string (seconds since epoch) | tz-aware UTC `datetime` |
+  | `DATE` | `date`, `datetime` (time dropped), `YYYY-MM-DD` string | `date` |
+  | `JSON` | `dict`/`list`/`str`/scalar — pass through (destination's encoder handles) | unchanged |
+  | `BYTES` | `bytes`, base64 string (alphabet + padding heuristic), any other string (utf-8 encoded) | `bytes` |
+
+  `None` passes through unchanged for every type — NULL means NULL.
+  An empty string `""` becomes `None` for every non-`STRING` type (the
+  CSV "no value" idiom). A value the table cannot map raises
+  `dtex.CoercionError` (a `ValueError` subclass) naming the column,
+  the truncated `repr` of the value, the source type, and the target
+  `FieldType`. The error fails the stream and rolls back the partial
+  load via the destination's `transaction` hook — same semantics as a
+  `write_batch` failure.
+
+  Connectors that pull from string-typed sources (CSV exports, Stripe
+  Sigma) can yield strings and rely on the engine to coerce; older
+  connectors yielding canonical types pay at most one `isinstance` check
+  per cell and see no behavior change.
 - **Load.** The normalized batch is handed to the destination connector, which
-  appends/merges/replaces per the configured write disposition.
+  appends/merges/replaces per the configured write disposition. Because the
+  engine has already coerced every cell, destinations need only know how to
+  write the canonical Python types — never how to coerce.
 
 ### How `@stream` generators keep memory bounded
 

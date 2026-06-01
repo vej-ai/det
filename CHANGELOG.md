@@ -10,6 +10,35 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-06-01
+
+### Added
+- **Engine NORMALIZE step now coerces values to declared schema types.**
+  The docs have always described the engine's pipeline as
+  "extract → normalize → load" with per-type value coercion as the engine's
+  job. In practice the engine only did *schema* normalization (declared vs
+  inferred; strict vs evolve) and passed dicts through to the destination
+  unchanged — a connector yielding all-string records (a CSV-backed source
+  like the Stripe Sigma connector) crashed the BigQuery destination with
+  `ArrowInvalid: Could not convert '1599' with type str: tried to convert
+  to int64`. The fix lives in the engine as a new
+  `dtex.engine.normalize.coerce_value` / `normalize_batch` pair: every cell
+  in every batch is coerced to the canonical Python representation of its
+  declared `FieldType` before reaching `write_batch`. Per-type rules cover
+  the common alternate input shapes (digit strings → `INTEGER`,
+  `true`/`false`/`yes`/`no`/`1`/`0` → `BOOLEAN`, ISO-8601 / Unix-epoch →
+  tz-aware UTC `datetime`, base64 / utf-8 → `BYTES`, etc.). Empty string
+  becomes `None` for non-`STRING` types (the CSV "no value" idiom).
+  Uncoercible values raise the new `dtex.CoercionError` (a `ValueError`
+  subclass) naming the column, value, source type, and target
+  `FieldType` — and roll back the partial load via the destination's
+  `transaction` hook. Connectors that already yield canonical Python
+  types see zero behavior change. Destinations no longer need per-
+  destination coercion: by the time they see a batch, every cell is the
+  type their writer expects. See [docs/02 §The extract → normalize → load
+  pipeline](./docs/02-architecture.md#the-extract--normalize--load-pipeline)
+  for the per-FieldType coercion table.
+
 ## [0.1.4] — 2026-05-29
 
 ### Fixed
@@ -123,7 +152,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/vej-ai/dtex/releases/tag/v0.1.5
 [0.1.4]: https://github.com/vej-ai/dtex/releases/tag/v0.1.4
 [0.1.3]: https://github.com/vej-ai/dtex/releases/tag/v0.1.3
 [0.1.2]: https://github.com/vej-ai/dtex/releases/tag/v0.1.2

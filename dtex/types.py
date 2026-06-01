@@ -167,6 +167,69 @@ class FieldType(_StrEnum):
     BYTES = "BYTES"
 
 
+class CoercionError(ValueError):
+    """One record-cell value could not be coerced to its declared :class:`FieldType`.
+
+    Raised by the engine's NORMALIZE step (``dtex.engine.normalize``) when a
+    value the source yielded does not fit the target column's logical type and
+    the per-FieldType coercion table has no rule that accepts the input shape.
+    The message is built operator-first: column name, the offending value (
+    ``repr``-quoted so whitespace and quotes are visible, truncated to 80
+    chars), the source Python type, and the target :class:`FieldType` —
+    everything an operator needs to act without reading a traceback.
+
+    Subclasses :class:`ValueError` so existing ``except (ValueError, ...)``
+    handlers in connector / destination code still catch it; the engine's
+    ``_run_one_stream`` catches it inside the per-stream transaction, which
+    rolls back any batches written so far in the stream and bubbles the
+    error up through the same ``stream_failed`` event as any other batch-
+    write failure (docs/09 §2).
+
+    # NOTE: subclasses :class:`ValueError` (not a brand-new top-level
+    # exception class) deliberately — a coercion failure is, semantically,
+    # a value-domain error. Today's BigQuery destination raises
+    # ``ArrowInvalid`` from the same root cause; folding the new error into
+    # the same Python supertype keeps the engine's mid-stream-failure
+    # rollback path uniform (it already catches ``Exception``), and lets
+    # callers that want the structured fields (``column``, ``value``,
+    # ``source_type``, ``target_type``) isinstance-check for
+    # ``CoercionError`` while preserving compatibility for callers that
+    # only care it's a value error.
+    """
+
+    _VALUE_REPR_MAX = 80
+
+    def __init__(
+        self,
+        *,
+        column: str,
+        value: Any,
+        source_type: type,
+        target_type: FieldType,
+    ) -> None:
+        self.column = column
+        self.value = value
+        self.source_type = source_type
+        self.target_type = target_type
+        truncated = self._truncate(repr(value))
+        message = (
+            f"column {column!r}: could not coerce {truncated} "
+            f"({source_type.__name__}) to {target_type.value}"
+        )
+        super().__init__(message)
+
+    @classmethod
+    def _truncate(cls, text: str) -> str:
+        """Truncate a ``repr`` rendering to :attr:`_VALUE_REPR_MAX` chars + ellipsis.
+
+        The cap keeps a single rogue 12 MB JSON cell from blowing up an
+        operator's log line. The trailing ``…`` makes the truncation visible.
+        """
+        if len(text) <= cls._VALUE_REPR_MAX:
+            return text
+        return text[: cls._VALUE_REPR_MAX - 1] + "…"
+
+
 class FieldMode(_StrEnum):
     """Column nullability / repetition — docs/03 §2.2.1.
 

@@ -58,6 +58,7 @@ from dtex.engine import config as cfg
 from dtex.engine import configs as cfgs
 from dtex.engine import discovery as disc
 from dtex.engine.logger import Redactor, RunLog, build_logger
+from dtex.engine.normalize import normalize_batch
 from dtex.registry import compute_injection
 from dtex.secrets import load_project_plugins
 from dtex.types import (
@@ -540,10 +541,17 @@ def _run_one_stream(
     hooks["ensure_schema"](conn, stream_meta)
 
     # -- 5c/5d: LOAD + COMMIT — inside the per-stream transaction -----------
+    # The NORMALIZE step (docs/02 §Normalize) coerces each batch's values
+    # to the resolved schema's declared FieldType right before write_batch.
+    # A CoercionError raised mid-batch propagates out of the ``with`` and
+    # the destination's transaction rolls back any partial load — same
+    # crash-safety guarantee as a write_batch failure. See
+    # :mod:`dtex.engine.normalize` for the per-FieldType rules.
     with _stream_transaction(hooks, conn, stream_meta):
         if first_batch is not None:
             rows_extracted += len(first_batch)
-            written = hooks["write_batch"](conn, first_batch, stream_meta)
+            normalized = normalize_batch(first_batch, resolved_schema)
+            written = hooks["write_batch"](conn, normalized, stream_meta)
             rows_loaded += written
             if run_log is not None:
                 run_log.emit(
@@ -554,7 +562,8 @@ def _run_one_stream(
                 )
             for batch in batches:
                 rows_extracted += len(batch)
-                written = hooks["write_batch"](conn, batch, stream_meta)
+                normalized = normalize_batch(batch, resolved_schema)
+                written = hooks["write_batch"](conn, normalized, stream_meta)
                 rows_loaded += written
                 if run_log is not None:
                     run_log.emit(
