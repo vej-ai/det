@@ -28,6 +28,15 @@ from pathlib import Path
 
 from dtex.engine.discovery import PROJECT_FILE
 
+
+class ScaffoldError(Exception):
+    """A scaffold target already exists, or could not be written.
+
+    The CLI catches this and prints a clean message + non-zero exit, never a
+    traceback — the same friendly-error contract the engine errors get.
+    """
+
+
 # --- project scaffold templates -------------------------------------------
 
 _PROJECT_YML = """\
@@ -53,15 +62,36 @@ config_paths:
 vars: {{}}
 """
 
-_PROFILES_YML = """\
+_PROFILES_YML_HEADER = """\
 # profiles.yml - per-destination connection params (docs/06 post-8.B).
 #
 # NOT committed to version control - it is listed in .gitignore. CI and
 # production supply it out of band. Top-level keys are destination connector
 # names (dbt outputs-style); each carries its own `default_target` plus a
 # `targets:` map of named-environment connection params.
+"""
 
-# The pre-baked DuckDB destination. `path` is the .duckdb file location.
+_PROFILES_YML_FOOTER = """\
+
+# Per-target source-secret blocks. Resolved by ${profile.<block>.<key>}
+# secret refs in any source's register.yaml (docs/03 §2.5).
+#
+#   profiles:
+#     dev:
+#       my_source:
+#         api_token: ${env.MY_SOURCE_API_TOKEN_DEV}
+"""
+
+# Per-destination starter blocks. Keep them minimal: enough to be runnable
+# (or, for BigQuery, near-runnable) once the user fills in their values,
+# without ever scaffolding a key that has no sensible default. Crucially,
+# the BigQuery block does NOT scaffold a `credentials_path:` field — the
+# default `auth_type: oauth` path uses Application Default Credentials and
+# needs no path at all (see docs/05 §BigQuery / `auth_type`).
+_DESTINATION_PROFILE_BLOCKS: dict[str, str] = {
+    "duckdb": """\
+
+# Pre-baked DuckDB destination — zero-config local dev default.
 duckdb:
   default_target: dev
   targets:
@@ -69,15 +99,54 @@ duckdb:
       path: ".dtex/warehouse.duckdb"
     prod:
       path: "/var/data/dtex/warehouse.duckdb"
+""",
+    "bigquery": """\
 
-# Per-target source-secret blocks. Resolved by ${{profile.<block>.<key>}}
-# secret refs in any source's register.yaml (docs/03 §2.5).
-#
-#   profiles:
-#     dev:
-#       my_source:
-#         api_token: ${{env.MY_SOURCE_API_TOKEN_DEV}}
-"""
+# Pre-baked BigQuery destination — production warehouse.
+# Default `auth_type: oauth` uses Application Default Credentials
+# (`gcloud auth application-default login`). For CI / server use, switch to
+# `auth_type: service_account` and add `credentials_path: /path/to/sa.json`.
+bigquery:
+  default_target: dev
+  targets:
+    dev:
+      project: your-gcp-project        # <-- fill in
+      location: US                     # US / EU / single-region code
+      staging_bucket: your-bucket      # <-- fill in (must already exist)
+      staging_prefix: dtex/staging
+      auth_type: oauth
+""",
+}
+
+
+# The list of baked destinations the `dtex init --with <name>` flag can
+# scaffold a profile block for. Kept in sync with the bundled connectors
+# under dtex/destinations/.
+BAKED_DESTINATIONS: tuple[str, ...] = ("duckdb", "bigquery")
+
+
+def render_profiles_yml(destinations: list[str] | None = None) -> str:
+    """Render a starter ``profiles.yml`` with blocks for the named destinations.
+
+    Always scaffolds the ``duckdb`` block (the zero-config dev default).
+    Additional destinations from ``destinations`` are appended in order,
+    deduped, after ``duckdb``. Unknown names raise ``ScaffoldError``.
+    """
+    chosen: list[str] = ["duckdb"]
+    for name in destinations or []:
+        if name not in _DESTINATION_PROFILE_BLOCKS:
+            raise ScaffoldError(
+                f"unknown destination {name!r}; baked destinations are: "
+                f"{', '.join(BAKED_DESTINATIONS)}"
+            )
+        if name not in chosen:
+            chosen.append(name)
+
+    parts: list[str] = [_PROFILES_YML_HEADER]
+    for name in chosen:
+        parts.append(_DESTINATION_PROFILE_BLOCKS[name])
+    parts.append(_PROFILES_YML_FOOTER)
+    return "".join(parts)
 
 _GITIGNORE = """\
 # credentials - never commit
@@ -309,15 +378,12 @@ destination_params: {{}}
 """
 
 
-class ScaffoldError(Exception):
-    """A scaffold target already exists, or could not be written.
-
-    The CLI catches this and prints a clean message + non-zero exit, never a
-    traceback — the same friendly-error contract the engine errors get.
-    """
-
-
-def scaffold_project(directory: Path, *, force: bool = False) -> Path:
+def scaffold_project(
+    directory: Path,
+    *,
+    force: bool = False,
+    extra_destinations: list[str] | None = None,
+) -> Path:
     """Write a new dtex project tree into ``directory`` — docs/06 post-8.B.
 
     Creates ``dtex_project.yml``, ``profiles.yml`` (destination-keyed),
@@ -326,6 +392,10 @@ def scaffold_project(directory: Path, *, force: bool = False) -> Path:
     ``README.md``. Refuses to clobber an existing project (a
     ``dtex_project.yml`` already present) unless ``force`` is set. Returns the
     project root.
+
+    ``extra_destinations`` opts a baked destination's starter block into
+    ``profiles.yml`` alongside the default ``duckdb`` block — wired via
+    ``dtex init --with bigquery``. Unknown names raise ``ScaffoldError``.
     """
     project_file = directory / PROJECT_FILE
     if project_file.exists() and not force:
@@ -340,7 +410,7 @@ def scaffold_project(directory: Path, *, force: bool = False) -> Path:
     (directory / "configs").mkdir(exist_ok=True)
 
     project_file.write_text(_PROJECT_YML.format(name=name))
-    (directory / "profiles.yml").write_text(_PROFILES_YML)
+    (directory / "profiles.yml").write_text(render_profiles_yml(extra_destinations))
     (directory / ".gitignore").write_text(_GITIGNORE)
     (directory / "README.md").write_text(_README.format(name=name))
     (directory / "configs" / "example.yml").write_text(_EXAMPLE_CONFIG_YML)

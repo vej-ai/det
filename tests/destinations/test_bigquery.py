@@ -767,6 +767,71 @@ def test_open_requires_project_dataset_staging_bucket(
         hooks["open"](Config(params={"project": "my-proj", "dataset": "d"}))
 
 
+def test_open_default_auth_type_is_oauth(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """open() uses Application Default Credentials when auth_type is unset."""
+    conn = _open_with_fakes(bigquery_destination)
+    # ADC = None credentials passed to the BQ client factory.
+    assert conn.client.bq.credentials is None
+
+
+def test_open_oauth_ignores_leftover_credentials_path(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """auth_type=oauth ignores a leftover credentials_path — ADC, not a file load."""
+    conn = _open_with_fakes(
+        bigquery_destination,
+        auth_type="oauth",
+        credentials_path="/some/leftover/key.json",
+    )
+    assert conn.client.bq.credentials is None
+
+
+def test_open_service_account_requires_credentials_path(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """auth_type=service_account without a credentials_path raises a clear error."""
+    hooks = _hooks(bigquery_destination)
+    with pytest.raises(ValueError, match="auth_type='service_account' requires"):
+        hooks["open"](
+            Config(
+                params={
+                    "project": "my-proj-1",
+                    "dataset": "fake_ds",
+                    "staging_bucket": "fake-bucket",
+                    "auth_type": "service_account",
+                }
+            )
+        )
+
+
+def test_open_unknown_auth_type_raises(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """auth_type other than 'oauth' or 'service_account' raises with the valid options."""
+    hooks = _hooks(bigquery_destination)
+    with pytest.raises(ValueError, match="unknown auth_type 'sso'"):
+        hooks["open"](
+            Config(
+                params={
+                    "project": "my-proj-1",
+                    "dataset": "fake_ds",
+                    "staging_bucket": "fake-bucket",
+                    "auth_type": "sso",
+                }
+            )
+        )
+
+
 # --------------------------------------------------------------------------
 # ensure_schema — table creation + additive evolution
 # --------------------------------------------------------------------------

@@ -235,7 +235,10 @@ def open(config: Config) -> BQConn:  # noqa: A001 — hook name is fixed by the 
     * ``location`` — dataset location at creation time (default ``"US"``).
     * ``staging_bucket`` (required) / ``staging_prefix`` — the GCS path
       where one-batch Parquet objects are staged before each LOAD job.
-    * ``credentials_path`` — optional service-account JSON; empty = ADC.
+    * ``auth_type`` — ``"oauth"`` (default, uses Application Default
+      Credentials) or ``"service_account"`` (requires ``credentials_path``).
+    * ``credentials_path`` — required when ``auth_type=service_account``;
+      ignored otherwise (oauth uses ADC and needs no path).
     * ``job_timeout_seconds`` / ``retry_max_attempts`` / ``retry_backoff_seconds``
       — per-job timeout + transient-error retry policy.
 
@@ -259,7 +262,21 @@ def open(config: Config) -> BQConn:  # noqa: A001 — hook name is fixed by the 
 
     location = str(config.get("location") or "US")
     staging_prefix = str(config.get("staging_prefix") or "dtex/staging")
+    auth_type = str(config.get("auth_type") or "oauth")
     credentials_path = str(config.get("credentials_path") or "")
+    if auth_type == "service_account":
+        if not credentials_path:
+            raise ValueError(
+                "bigquery destination: auth_type='service_account' requires "
+                "'credentials_path' to point at a service-account JSON key"
+            )
+    elif auth_type == "oauth":
+        credentials_path = ""  # ADC; ignore any leftover path.
+    else:
+        raise ValueError(
+            f"bigquery destination: unknown auth_type {auth_type!r}; "
+            f"use 'oauth' (default) or 'service_account'"
+        )
     job_timeout = int(config.get("job_timeout_seconds") or 300)
     retry_max = int(config.get("retry_max_attempts") or 5)
     retry_backoff = float(config.get("retry_backoff_seconds") or 1.0)

@@ -624,6 +624,72 @@ def test_init_scaffolds_runnable_project(runner: CliRunner, tmp_path: Path) -> N
     assert result.exit_code == 0, _show(result)
 
 
+def test_init_default_profiles_has_only_duckdb(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Default ``dtex init`` scaffolds only the DuckDB block in profiles.yml."""
+    target = tmp_path / "p"
+    runner.invoke(cli, ["init", str(target)])
+    text = (target / "profiles.yml").read_text()
+    assert "\nduckdb:\n" in text
+    assert "\nbigquery:\n" not in text
+
+
+def test_init_with_bigquery_scaffolds_block(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """``dtex init --with bigquery`` adds a BigQuery block alongside DuckDB.
+
+    The scaffolded block must NOT include a `credentials_path:` field — the
+    default `auth_type: oauth` uses ADC and needs no path.
+    """
+    target = tmp_path / "p"
+    result = runner.invoke(cli, ["init", str(target), "--with", "bigquery"])
+    assert result.exit_code == 0, _show(result)
+    text = (target / "profiles.yml").read_text()
+    assert "\nduckdb:\n" in text
+    assert "\nbigquery:\n" in text
+    # Parse the YAML and assert on the structure — substring checks would
+    # false-positive on comment text mentioning the SA path.
+    import yaml
+
+    parsed = yaml.safe_load(text)
+    bq_target = parsed["bigquery"]["targets"]["dev"]
+    assert bq_target["auth_type"] == "oauth"
+    assert "credentials_path" not in bq_target
+
+
+def test_init_with_unknown_destination_errors(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """An unknown ``--with`` name fails with a clean error listing valid names."""
+    target = tmp_path / "p"
+    result = runner.invoke(cli, ["init", str(target), "--with", "frobnicate"])
+    assert result.exit_code != 0
+    assert "frobnicate" in result.output
+    assert "bigquery" in result.output  # valid options listed
+
+
+def test_init_with_repeated_dedupes(runner: CliRunner, tmp_path: Path) -> None:
+    """``--with bigquery --with bigquery`` writes the bigquery block once."""
+    target = tmp_path / "p"
+    runner.invoke(
+        cli, ["init", str(target), "--with", "bigquery", "--with", "bigquery"]
+    )
+    text = (target / "profiles.yml").read_text()
+    assert text.count("\nbigquery:\n") == 1
+
+
+def test_init_with_duckdb_explicit_is_noop(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Passing ``--with duckdb`` is allowed but doesn't double the block."""
+    target = tmp_path / "p"
+    runner.invoke(cli, ["init", str(target), "--with", "duckdb"])
+    text = (target / "profiles.yml").read_text()
+    assert text.count("\nduckdb:\n") == 1
+
+
 # ==========================================================================
 # new <source|destination|config>
 # ==========================================================================

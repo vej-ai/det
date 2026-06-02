@@ -58,6 +58,7 @@ from dtex.cli._runs import get_run as runs_get
 from dtex.cli._runs import list_runs as runs_list
 from dtex.cli._runs import read_log_lines
 from dtex.cli._scaffold import (
+    BAKED_DESTINATIONS,
     ScaffoldError,
     scaffold_config,
     scaffold_destination,
@@ -633,16 +634,32 @@ def validate(project_dir: Path | None) -> None:
 @click.option(
     "--force", is_flag=True, help="Overwrite an existing dtex_project.yml."
 )
-def init(directory: Path, force: bool) -> None:
+@click.option(
+    "--with",
+    "with_",
+    multiple=True,
+    metavar="DESTINATION",
+    help=(
+        "Scaffold a starter profiles.yml block for the named baked destination "
+        "(repeatable). DuckDB is always included; use --with bigquery to also "
+        "scaffold the BigQuery block. Valid: " + ", ".join(BAKED_DESTINATIONS) + "."
+    ),
+)
+def init(directory: Path, force: bool, with_: tuple[str, ...]) -> None:
     """Scaffold a new dtex project in DIRECTORY (default: current directory).
 
     Writes ``dtex_project.yml``, ``profiles.yml`` (destination-keyed),
     empty ``sources/`` and ``destinations/`` folders, a ``configs/`` folder
     seeded with one ``example.yml`` stub, ``.gitignore`` and a short
     ``README.md``. Refuses to clobber an existing project unless ``--force``.
+
+    Pass ``--with <destination>`` (repeatable) to scaffold an opt-in starter
+    block in ``profiles.yml`` for a baked destination — e.g.
+    ``dtex init --with bigquery`` lands a ready-to-fill BigQuery block
+    alongside the always-scaffolded DuckDB block.
     """
     try:
-        root = scaffold_project(directory, force=force)
+        root = scaffold_project(directory, force=force, extra_destinations=list(with_))
     except _FRIENDLY_ERRORS as exc:
         _fail(str(exc), code=2)
         return  # unreachable.

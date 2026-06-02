@@ -41,12 +41,23 @@ params:
     type: string
     default: "dtex/staging"
     description: GCS object prefix under the bucket.
-  # Optional service-account JSON path. Empty string = use Application
-  # Default Credentials (GOOGLE_APPLICATION_CREDENTIALS env or gcloud).
+  # How to authenticate to BigQuery + GCS. Two modes:
+  #   * "oauth" (default) — Application Default Credentials, i.e. the
+  #     `gcloud auth application-default login` cache OR the
+  #     `GOOGLE_APPLICATION_CREDENTIALS` env var. No `credentials_path`
+  #     param is needed in this mode (any value is ignored).
+  #   * "service_account" — load credentials from a service-account JSON
+  #     key file at `credentials_path` (required in this mode).
+  auth_type:
+    type: string
+    default: "oauth"
+    description: "Auth mode: 'oauth' (ADC, no path needed) or 'service_account'."
+  # Service-account JSON path. Required when auth_type=service_account;
+  # ignored otherwise (oauth uses ADC and needs no path).
   credentials_path:
     type: string
     default: ""
-    description: Optional service-account JSON path. Empty = use ADC.
+    description: Path to a service-account JSON key (required if auth_type=service_account).
   # Per-job wall-clock timeout (seconds) on the LOAD / MERGE jobs.
   job_timeout_seconds:
     type: int

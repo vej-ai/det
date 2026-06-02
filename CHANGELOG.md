@@ -10,6 +10,29 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Added
+
+- **`dtex init --with <destination>`** scaffolds a starter `profiles.yml`
+  block for a baked destination alongside the always-scaffolded `duckdb`
+  block. Repeatable: `dtex init --with bigquery --with duckdb`. Unknown
+  names fail with a clean error listing the valid options. New users no
+  longer have to copy a BigQuery block out of the docs to get started.
+
+- **BigQuery destination: new `auth_type` param.** Two modes —
+  `oauth` (default; uses Application Default Credentials, no path
+  needed) and `service_account` (requires a non-empty `credentials_path`
+  pointing at the JSON key). The scaffolded BigQuery block no longer
+  includes an empty `credentials_path:` field, which was confusing — the
+  oauth path has no path to set.
+
+### Changed
+
+- **BigQuery destination: `auth_type` is authoritative.** With
+  `auth_type=oauth` any value in `credentials_path` is ignored (ADC
+  always wins). With `auth_type=service_account` a missing
+  `credentials_path` fails with a clear message at `open()` time. An
+  unknown `auth_type` fails listing the valid options.
+
 ## [0.1.5] — 2026-06-01
 
 ### Added
