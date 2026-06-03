@@ -365,7 +365,13 @@ def _make_stripe_project(tmp_path: Path, base_url: str) -> Path:
             source: stripe
             destination: duckdb
             target: dev
-            streams: all
+            # Narrow to REST streams — these tests cover REST behavior.
+            # Sigma streams have their own coverage in this file.
+            streams:
+              charges:
+              invoices:
+              customers:
+              subscriptions:
             """
         )
     )
@@ -615,3 +621,225 @@ def test_api_key_never_appears_in_logs(
 
     full_log = "\n".join(record.getMessage() for record in caplog.records)
     assert api_key not in full_log, "Stripe API key leaked into captured logs"
+
+
+# ==========================================================================
+# Sigma SQL surface — drives SigmaClient against a stdlib HTTPServer stub
+# ==========================================================================
+#
+# These cover the SQL-as-stream half of the merged stripe connector. They
+# drive SigmaClient directly (no engine in the loop) against a tiny stub
+# that fakes Stripe's submit → poll → download-CSV protocol.
+
+import threading as _threading
+from collections.abc import Iterator as _Iterator
+from http.server import BaseHTTPRequestHandler as _BaseHandler, HTTPServer as _HTTPServer
+
+import requests as _requests
+
+from dtex.sources.stripe.sigma_client import SigmaClient as _SigmaClient
+
+_SIGMA_CSV_BODY = b"id,amount\r\nch_1,100\r\nch_2,250\r\nch_3,999\r\n"
+_SIGMA_EXPECTED_ROWS = [
+    {"id": "ch_1", "amount": "100"},
+    {"id": "ch_2", "amount": "250"},
+    {"id": "ch_3", "amount": "999"},
+]
+
+
+class _SigmaStubState:
+    """Mutable knobs the handler reads + counters the test asserts on."""
+
+    def __init__(self) -> None:
+        self.poll_calls = 0
+        self.download_calls = 0
+        # How many of the first download attempts should be truncated
+        # (Content-Length over-promises, socket closed early → the client
+        # sees ChunkedEncodingError mid-body).
+        self.truncate_first_n_downloads = 0
+        # Terminal poll status: "succeeded" or "failed".
+        self.final_status = "succeeded"
+        self.submitted_sql: str | None = None
+        self.auth_header: str | None = None
+
+
+def _make_sigma_handler(state: _SigmaStubState, base: str) -> type[_BaseHandler]:
+    class Handler(_BaseHandler):
+        def log_message(self, *_args: Any) -> None:  # silence test noise
+            pass
+
+        def _json(self, code: int, body: dict[str, Any]) -> None:
+            payload = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            state.submitted_sql = json.loads(raw).get("sql")
+            state.auth_header = self.headers.get("Authorization")
+            self._json(200, {"id": "qryrun_TEST123", "status": "running"})
+
+        def do_GET(self) -> None:
+            if self.path.endswith("/download.csv"):
+                state.download_calls += 1
+                truncate = state.download_calls <= state.truncate_first_n_downloads
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv")
+                if truncate:
+                    # Over-promise the length, write a fragment, then hang up.
+                    self.send_header(
+                        "Content-Length", str(len(_SIGMA_CSV_BODY) + 5000)
+                    )
+                    self.end_headers()
+                    self.wfile.write(_SIGMA_CSV_BODY[:12])
+                    self.wfile.flush()
+                    self.connection.close()  # IncompleteRead on the client
+                    return
+                self.send_header("Content-Length", str(len(_SIGMA_CSV_BODY)))
+                self.end_headers()
+                self.wfile.write(_SIGMA_CSV_BODY)
+                return
+            # Otherwise it's a poll: GET /v2/data/reporting/query_runs/{id}
+            state.poll_calls += 1
+            if state.poll_calls < 2:
+                self._json(200, {"status": "running"})
+                return
+            if state.final_status == "failed":
+                self._json(
+                    200,
+                    {
+                        "status": "failed",
+                        "status_details": {
+                            "failed": {"error_message": "line 1: Table not found"}
+                        },
+                    },
+                )
+                return
+            self._json(
+                200,
+                {
+                    "status": "succeeded",
+                    "result": {
+                        "type": "file",
+                        "file": {
+                            "content_type": "csv",
+                            "size": str(len(_SIGMA_CSV_BODY)),
+                            "download_url": {
+                                "url": f"{base}/download.csv",
+                                "expires_at": "2099-01-01T00:00:00Z",
+                            },
+                        },
+                    },
+                },
+            )
+
+    return Handler
+
+
+@pytest.fixture
+def sigma_stub() -> _Iterator[tuple[_SigmaStubState, str]]:
+    state = _SigmaStubState()
+    server = _HTTPServer(("127.0.0.1", 0), object)  # placeholder handler
+    base = f"http://127.0.0.1:{server.server_port}"
+    server.RequestHandlerClass = _make_sigma_handler(state, base)
+    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield state, base
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _sigma_client(base: str) -> _SigmaClient:
+    return _SigmaClient(
+        base_url=base,
+        api_key="rk_test_abc",
+        api_version="2026-04-22.preview",
+        account_id="acct_TEST",
+        poll_interval_seconds=0.0,  # don't sleep between polls in tests
+        poll_timeout_seconds=10,
+        max_retries=3,
+        retry_backoff_seconds=0.0,  # don't sleep between download retries
+    )
+
+
+def test_sigma_run_query_happy_path(
+    sigma_stub: tuple[_SigmaStubState, str],
+) -> None:
+    state, base = sigma_stub
+    rows = list(_sigma_client(base).run_query("SELECT id, amount FROM charges"))
+    assert rows == _SIGMA_EXPECTED_ROWS
+    assert state.submitted_sql == "SELECT id, amount FROM charges"
+    assert state.auth_header == "Bearer rk_test_abc"
+    assert state.download_calls == 1  # no retries on the happy path
+
+
+def test_sigma_download_retries_on_truncated_body(
+    sigma_stub: tuple[_SigmaStubState, str],
+) -> None:
+    """The bug this port fixes: a mid-body connection drop must retry, not fail."""
+    state, base = sigma_stub
+    state.truncate_first_n_downloads = 1  # first GET truncates, second is clean
+    rows = list(_sigma_client(base).run_query("SELECT id, amount FROM charges"))
+    assert rows == _SIGMA_EXPECTED_ROWS  # every row exactly once, no dupes from the retry
+    assert state.download_calls == 2  # one failed attempt + one success
+
+
+def test_sigma_download_gives_up_after_max_retries(
+    sigma_stub: tuple[_SigmaStubState, str],
+) -> None:
+    state, base = sigma_stub
+    state.truncate_first_n_downloads = 99  # every attempt truncates
+    with pytest.raises(_requests.exceptions.ChunkedEncodingError):
+        list(_sigma_client(base).run_query("SELECT id, amount FROM charges"))
+    # max_retries=3 → 1 initial + 3 retries = 4 download attempts.
+    assert state.download_calls == 4
+
+
+def test_sigma_download_retries_on_connect_failure(
+    sigma_stub: tuple[_SigmaStubState, str],
+) -> None:
+    """A connect-time ConnectionError (dead host) must retry, not leak the fd."""
+    state, base = sigma_stub
+    dead_url = "http://127.0.0.1:1/download.csv"  # nothing listening on port 1
+    live_url = f"{base}/download.csv"
+    calls = {"n": 0}
+    real_get = _requests.get
+
+    def flaky_get(url: str, **kwargs: Any) -> Any:
+        if url == dead_url:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_get(dead_url, **kwargs)  # refused → ConnectionError
+            return real_get(live_url, **kwargs)  # retry hits the live stub
+        return real_get(url, **kwargs)
+
+    client = _sigma_client(base)
+    import os
+
+    _requests.get = flaky_get  # type: ignore[assignment]
+    try:
+        path = client._download_to_tempfile(dead_url)
+    finally:
+        _requests.get = real_get  # type: ignore[assignment]
+    try:
+        assert calls["n"] == 2  # one refused connect + one success
+        with open(path, "rb") as fh:
+            assert fh.read() == _SIGMA_CSV_BODY
+    finally:
+        os.unlink(path)
+
+
+def test_sigma_failed_poll_surfaces_presto_error(
+    sigma_stub: tuple[_SigmaStubState, str],
+) -> None:
+    state, base = sigma_stub
+    state.final_status = "failed"
+    with pytest.raises(RuntimeError, match="Table not found"):
+        list(_sigma_client(base).run_query("SELECT * FROM nope"))

@@ -1,10 +1,25 @@
 # Stripe — baked source connector
 
-Extracts data from [Stripe](https://stripe.com)'s standard REST API at
-`https://api.stripe.com/v1`. One stream per resource type
-(`charges`, `invoices`, `customers`, `subscriptions`), incremental on the
-Unix `created` timestamp, paginated via Stripe's cursor model
-(`starting_after` + `has_more`).
+One Stripe connector, **two extraction surfaces**:
+
+* **REST** (default) — resource-as-stream over Stripe's GA REST API at
+  `https://api.stripe.com/v1`. One stream per resource type
+  (`charges`, `invoices`, `customers`, `subscriptions`), incremental on
+  the Unix `created` timestamp, paginated via Stripe's cursor model
+  (`starting_after` + `has_more`). Cheap, near-live, no extra
+  subscription.
+* **Sigma SQL** (opt-in per stream) — query-as-stream over Stripe's
+  Sigma API. Each Sigma stream's `register.yaml` entry carries a
+  `sigma: {query: queries/<name>.sql}` block; the connector reads the
+  SQL body, submits it via `POST /v2/data/reporting/query_runs`, polls
+  to completion, downloads the CSV result, and yields batches. Lets a
+  single stream JOIN/aggregate across Stripe's internal tables in
+  Stripe-side compute. Requires a **paid Sigma subscription** and
+  carries a **~3-hour data lag**.
+
+The two surfaces share one source folder, one set of connector params,
+and one `api_key` — a single Stripe restricted key with the relevant
+read scopes drives both. Configs mix REST and Sigma streams freely.
 
 ## Authentication
 
@@ -15,17 +30,21 @@ scopes** from the `STRIPE_API_KEY` environment variable:
 export STRIPE_API_KEY="rk_live_..."
 ```
 
-Recommended restricted-key scopes for the v1 streams:
+Recommended restricted-key scopes:
 
-| Resource | Scope |
-|---|---|
-| `/charges` | `charge:read` |
-| `/invoices` | `invoice:read` |
-| `/customers` | `customer:read` |
-| `/subscriptions` | `subscription:read` |
+| Surface | Resource | Scope |
+|---|---|---|
+| REST | `/charges` | `charge:read` |
+| REST | `/invoices` | `invoice:read` |
+| REST | `/customers` | `customer:read` |
+| REST | `/subscriptions` | `subscription:read` |
+| Sigma | `POST /v2/data/reporting/query_runs` | `sigma:read`, `reporting:read` |
+
+If your config only uses REST streams you don't need the Sigma scopes,
+and vice versa.
 
 The key is sent as `Authorization: Bearer <key>` on every request. It is
-**never logged** — the `Authorization` header is redacted at the client's
+**never logged** — the `Authorization` header is redacted at each client's
 single logging choke point.
 
 ## Supported resources (v1)
@@ -111,18 +130,59 @@ dtex run stripe --target prod --select charges
   [docs/connectors/stripe-research.md](../../../docs/connectors/stripe-research.md)
   for the source of that pin and where to check for the current GA.
 
-## What's not in v1 (deferred)
+## Sigma SQL streams
 
-The Stripe **Sigma API** (`POST /v2/data/reporting/query_runs`) lets you run
-SQL against ~100+ Stripe objects. It is:
+Three Sigma streams ship in `register.yaml`:
 
-- **preview**: `Stripe-Version: 2026-04-22.preview`;
-- **paid**: requires an active **Sigma subscription**;
-- **lagged**: data freshness ~3 hours;
-- async: POST → poll → download CSV from a 5-minute-TTL URL.
+- **`charges_daily`** → `charges` (incremental on `created`)
+- **`subscriptions_active`** → `subscriptions` (full refresh)
+- **`invoices_paid`** → `invoices` (incremental on `status_transitions_paid_at`)
 
-Because most users lack a Sigma subscription and the API is preview, v1 ships
-**only** the resource-as-stream model. A future opt-in
-`sigma_query`-typed stream is sketched in
-[docs/connectors/stripe-research.md](../../../docs/connectors/stripe-research.md)
-§"How query-as-stream would map"; see the locked design decision there.
+The SQL bodies live under `queries/<stream_name>.sql`. The connector binds
+the `{since}` placeholder from each stream's `Cursor.start_value()` (or
+the connector-level `sigma_initial_since` for non-incremental streams) as a
+Presto `TIMESTAMP 'YYYY-MM-DD HH:MM:SS'` literal — Sigma rejects ISO-8601's
+`T` separator and timezone suffixes.
+
+### Adding a 4th Sigma stream
+
+Two files + one function:
+
+1. Drop your query at `queries/<new_stream>.sql`. Use `{since}` if it's
+   incremental.
+2. Append a stream to `register.yaml` declaring the schema and the
+   `sigma:` block:
+   ```yaml
+   - name: my_new_stream
+     table: my_new_table
+     primary_key: id
+     write_disposition: merge
+     sigma:
+       query: queries/my_new_stream.sql
+     incremental:
+       cursor_field: <col>
+       cursor_type: timestamp
+       initial_value: "2024-01-01T00:00:00Z"
+     schema:
+       - {name: id,        type: STRING, mode: REQUIRED}
+       - {name: <col>,     type: TIMESTAMP, mode: REQUIRED}
+       - ...
+   ```
+3. Add a one-line `@stream` wrapper in `source.py` that delegates to
+   `_extract_sigma_stream` (the existing functions show the pattern).
+
+### Operational notes (Sigma-specific)
+
+- **Account ID required.** The config must set `params.account_id` to the
+  `acct_...` ID of the Stripe account being queried. Stripe rejects every
+  Sigma request with HTTP 403 otherwise.
+- **API version pin.** `sigma_api_version` defaults to
+  `2026-04-22.preview`; the Query Run API is preview. Bump deliberately.
+- **Polling.** `sigma_poll_interval_seconds` (default `2.0`) is the gap
+  between status polls; `sigma_poll_timeout_seconds` (default `600`) is the
+  hard ceiling per query. Heavy queries on large accounts approach the
+  ceiling; bump if needed.
+- **Download retries.** A truncated CSV mid-body retries the whole download
+  up to `max_retries` (default `5`) with exponential backoff
+  (`retry_backoff_seconds`, default `1.0`). Duplicate-free because no rows
+  are yielded until the full CSV is in hand.

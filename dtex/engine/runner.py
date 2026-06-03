@@ -585,6 +585,7 @@ def _run_one_stream(
         "config": stream_config,
         "state": state,
         "log": log,
+        "stream_def": stream_def,
     }
     if cursor is not None:
         available["cursor"] = cursor

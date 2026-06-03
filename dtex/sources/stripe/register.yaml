@@ -1,32 +1,33 @@
-# Stripe — baked source connector. Resource-as-stream over the standard REST
-# API at https://api.stripe.com/v1: one stream per Stripe object type, paginated
-# with cursor-based `starting_after` + `has_more`, incremental on the Unix
-# `created` timestamp (`cursor_type: int`) via `created[gte]=<ts>` filtering.
-# Auth: HTTP `Authorization: Bearer <restricted_key>`.
+# Stripe — baked source connector. ONE Stripe connector, TWO extraction surfaces:
 #
-# The v1 design decision (resource-as-stream, NOT Sigma query-as-stream) is
-# documented in docs/connectors/stripe-research.md. Sigma's POST /v2/data/
-# reporting/query_runs is a preview, paid, polled, CSV-download surface; it is
-# deferred to v2 as an opt-in second stream type.
+# * REST (default) — resource-as-stream over the standard API at
+#   https://api.stripe.com/v1. One stream per Stripe object type, paginated
+#   with `starting_after` + `has_more`, incremental on the Unix `created`
+#   timestamp (`cursor_type: int`) via `created[gte]=<ts>` filtering. Cheap,
+#   GA, ~live data. Auth: `Authorization: Bearer <restricted_key>`.
 #
-# NOTE: every stream that declares an explicit `schema` must include
+# * Sigma — opt-in per stream, marked by a `sigma: {query: ...}` block. Each
+#   such stream is one Sigma SQL query, submitted via the async Query Run API
+#   (POST /v2/data/reporting/query_runs), polled to completion, then
+#   downloaded as CSV. Lets a single stream JOIN/aggregate across Stripe's
+#   tables. Paid Sigma subscription required, ~3-hour data lag.
+#
+# A single restricted key can hold both REST + Sigma+Reporting scopes; one
+# Stripe connector + one config can mix REST and Sigma streams. See
+# README.md for the scope checklist and the dispatch model in source.py.
+#
+# NOTE: every REST stream that declares an explicit `schema` must include
 # `{name: created, type: INTEGER, mode: REQUIRED}` — `StreamDef.__post_init__`
-# enforces "incremental.cursor_field must appear in the declared schema", and
-# `cursor_type: int` means the cursor column is a Unix-timestamp integer, not
-# a TIMESTAMP. The research note's TIMESTAMP example was for `cursor_type:
-# timestamp`; this v1 pins `int` so the engine exercises that cursor type.
-#
-# NOTE: the Sigma query-as-stream model — each stream = a user SQL query, GAQL
-# analogue — is deliberately NOT shipped in v1. See
-# docs/connectors/stripe-research.md §"Recommended connector design for
-# dtex" for why (preview API, paid subscription, ~3h data lag) and the
-# sketch of how a future opt-in `sigma_query` stream type would map onto the
-# contract.
+# enforces "incremental.cursor_field must appear in the declared schema",
+# and `cursor_type: int` means the cursor column is a Unix-timestamp
+# integer. Sigma streams use `cursor_type: timestamp` (Sigma SQL returns
+# real timestamp values), so their schema declares `TIMESTAMP` for the
+# cursor column.
 name: stripe
 kind: source
-version: "1.0.0"
-summary: Stripe payments data via the standard REST API (resource-as-stream).
-tags: [saas, payments, stripe, rest]
+version: "2.0.0"
+summary: Stripe payments data via REST (default) or Sigma SQL (per-stream opt-in).
+tags: [saas, payments, stripe, rest, sigma]
 
 requires:
   - "requests>=2.31"
@@ -36,6 +37,53 @@ params:
     type: string
     default: "https://api.stripe.com/v1"
     description: Stripe REST API base URL — overridable for stubbed tests.
+
+  # The Sigma API uses a different base URL (v2 vs v1). When this connector
+  # dispatches a Sigma stream, it strips `/v1` from `base_url` and uses
+  # `https://api.stripe.com` — controllable via this param for stubbed tests.
+  sigma_base_url:
+    type: string
+    default: "https://api.stripe.com"
+    description: Stripe Sigma API base URL (v2 endpoints) — overridable for tests.
+
+  # The Sigma API version header value. Pin to the preview version we built
+  # against; bump deliberately when Stripe ships a newer one. ONLY used by
+  # Sigma streams; REST streams use the v1 `api_version` below.
+  sigma_api_version:
+    type: string
+    default: "2026-04-22.preview"
+    description: Stripe API version header value for Sigma requests (preview-pinned).
+
+  # Stripe Account ID for the v2 API's Stripe-Context header. v2 endpoints
+  # (including Sigma Query Run) require this — Stripe rejects with HTTP 403
+  # "Permission denied" without it. Source from the dashboard URL (the
+  # segment after dashboard.stripe.com/, format acct_XXXXXXXXX). Only
+  # required when the config runs at least one Sigma stream.
+  account_id:
+    type: string
+    default: ""
+    description: Stripe account id for Sigma's Stripe-Context header (e.g. acct_1Abc...).
+
+  # Polling cadence + ceiling for the async Sigma Query Run. REST extraction
+  # does not poll — these params are only consulted on the Sigma path.
+  sigma_poll_interval_seconds:
+    type: float
+    default: 2.0
+    description: Seconds between GET /query_runs/{id} polls (Sigma only).
+
+  sigma_poll_timeout_seconds:
+    type: int
+    default: 600
+    description: Hard ceiling on how long the connector waits for a Sigma Query Run.
+
+  # First-run cursor floor for Sigma streams whose state is empty. Sigma
+  # timestamps are stored as Unix seconds; this is the floor in ISO-8601
+  # that the connector converts at run time. Per-stream
+  # `incremental.initial_value` overrides this.
+  sigma_initial_since:
+    type: string
+    default: "2024-01-01T00:00:00Z"
+    description: Sigma first-run cursor floor; per-stream initial_value overrides.
 
   # The Stripe API version header pin. Per the research note this was the
   # latest GA at the time of authoring. Re-verify against
@@ -198,6 +246,74 @@ streams:
       - {name: currency,       type: STRING}
       - {name: items,          type: JSON}
       - {name: metadata,       type: JSON}
+
+  # ---------------------------------------------------------------------
+  # Sigma SQL streams — opt-in via the `sigma:` block. SQL bodies live in
+  # queries/<stream_name>.sql; the connector binds {since} from the
+  # engine's Cursor at run time. Each stream lands in a distinct table
+  # from the REST streams (no collision: REST uses `stripe_<resource>`,
+  # Sigma uses the resource name verbatim — different datasets in
+  # practice). Requires `account_id` and a restricted key with the
+  # Sigma + Reporting scopes.
+  # ---------------------------------------------------------------------
+  - name: charges_daily
+    table: charges
+    primary_key: id
+    write_disposition: merge
+    sigma:
+      query: queries/charges_daily.sql
+    incremental:
+      cursor_field: created
+      cursor_type: timestamp
+      initial_value: "2024-01-01T00:00:00Z"
+      lookback: 6h
+    schema:
+      - {name: id,            type: STRING,    mode: REQUIRED}
+      - {name: amount,        type: INTEGER}
+      - {name: currency,      type: STRING}
+      - {name: created,       type: TIMESTAMP, mode: REQUIRED}
+      - {name: status,        type: STRING}
+      - {name: customer_id,   type: STRING}
+      - {name: description,   type: STRING}
+      - {name: paid,          type: BOOLEAN}
+      - {name: refunded,      type: BOOLEAN}
+
+  - name: subscriptions_active
+    table: subscriptions
+    primary_key: id
+    write_disposition: replace
+    sigma:
+      query: queries/subscriptions_active.sql
+    schema:
+      - {name: id,                    type: STRING,    mode: REQUIRED}
+      - {name: customer_id,           type: STRING}
+      - {name: status,                type: STRING}
+      - {name: current_period_start,  type: TIMESTAMP}
+      - {name: current_period_end,    type: TIMESTAMP}
+      - {name: cancel_at_period_end,  type: BOOLEAN}
+      - {name: created,               type: TIMESTAMP}
+
+  - name: invoices_paid
+    table: invoices
+    primary_key: id
+    write_disposition: merge
+    sigma:
+      query: queries/invoices_paid.sql
+    incremental:
+      cursor_field: status_transitions_paid_at
+      cursor_type: timestamp
+      initial_value: "2024-01-01T00:00:00Z"
+      lookback: 6h
+    schema:
+      - {name: id,                         type: STRING,    mode: REQUIRED}
+      - {name: customer_id,                type: STRING}
+      - {name: subscription_id,            type: STRING}
+      - {name: total,                      type: INTEGER}
+      - {name: amount_paid,                type: INTEGER}
+      - {name: currency,                   type: STRING}
+      - {name: status_transitions_paid_at, type: TIMESTAMP, mode: REQUIRED}
+      - {name: status,                     type: STRING}
+      - {name: number,                     type: STRING}
 
 # As of build stage 8.B, the source's register.yaml no longer carries a
 # `destination:` block. A config (configs/<name>.yml) binds this source to

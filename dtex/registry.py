@@ -102,12 +102,23 @@ __all__ = [
 # Injection — the parameter names the engine may inject (docs/03 §3.1)
 # ---------------------------------------------------------------------------
 
-STREAM_INJECTABLES: frozenset[str] = frozenset({"config", "state", "cursor", "log"})
+STREAM_INJECTABLES: frozenset[str] = frozenset(
+    {"config", "state", "cursor", "log", "stream_def"}
+)
 """The parameter names the engine injects into a ``@stream`` function — docs/03 §3.1.
 
 The engine inspects the function signature and injects, *by name*, only the
 objects the function declares. A ``@stream`` function may declare any subset of
-these four; declaring anything else is a discovery-time error (docs/03 §7 rule 8).
+these; declaring anything else is a discovery-time error (docs/03 §7 rule 8).
+
+* ``config`` — resolved :class:`dtex.Config` (params + secrets, per-stream layered).
+* ``state`` — the per-stream state blob (a :class:`dtex.State` proxy).
+* ``cursor`` — the per-stream :class:`dtex.Cursor` (incremental streams only).
+* ``log`` — a standard logging-style logger pre-configured with run-correlation.
+* ``stream_def`` — the parsed :class:`dtex.StreamDef` declaration for this
+  stream (its own ``register.yaml`` entry). Lets a connector introspect its
+  own metadata — e.g. the ``stripe`` connector dispatches on
+  ``stream_def.sigma`` to choose REST-vs-Sigma extraction per stream.
 """
 
 # NOTE: docs/03 §4 says a ``@stream_method`` follows "the same injection rules

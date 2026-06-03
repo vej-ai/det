@@ -12,26 +12,50 @@ For what is *planned* — versus what has shipped — see
 
 ### Added
 
-- **Baked `stripe_sigma` source connector (SQL-as-stream).** The
-  query-as-stream counterpart to the existing resource-as-stream `stripe`
-  connector: each stream is one Stripe Sigma SQL query, submitted via the
-  async Query Run API (`POST /v2/data/reporting/query_runs`), polled to
-  completion, then downloaded as CSV and yielded as batches of dicts. Ships
-  three example streams (`charges_daily`, `subscriptions_active`,
-  `invoices_paid`) under `dtex/sources/stripe_sigma/`. Auth via the
-  `STRIPE_SIGMA_API_KEY` env var by default (any resolver-backed `secret://`
-  ref works in a profile).
+- **Stripe Sigma SQL-as-stream folded into the `stripe` connector.** One
+  baked connector, two extraction surfaces: REST (default) and Sigma SQL
+  (opt-in per stream via a new `sigma: {query: <path>}` block in
+  `register.yaml`). The shipped Sigma streams (`charges_daily`,
+  `subscriptions_active`, `invoices_paid`) each reference a `.sql` file
+  under `dtex/sources/stripe/queries/`; the connector submits the SQL via
+  Stripe's async Query Run API (`POST /v2/data/reporting/query_runs`),
+  polls, downloads the CSV result, and yields batches of dicts.
 
-  The CSV result is downloaded to a temp file in one continuous pass rather
-  than parsed straight off the socket: the engine pulls batches lazily and
-  loads each into the destination before requesting the next, so socket-side
-  parsing would leave the download connection idle for the duration of every
-  load job and Stripe's CDN would close it mid-body on large results
-  (`ChunkedEncodingError: IncompleteRead`). Draining the socket up front
-  decouples download speed from load pace; a dropped download retries from
-  scratch up to `max_retries` with the same exponential backoff as the
-  submit/poll calls, and is duplicate-free for `replace`/`merge` streams since
-  no rows are yielded until the full CSV is in hand.
+  The CSV is downloaded to a temp file in one continuous pass rather than
+  parsed straight off the socket — the engine pulls batches lazily and
+  loads each into the destination before requesting the next, so
+  socket-side parsing would leave the download connection idle for the
+  duration of every load job and Stripe's CDN would close it mid-body on
+  large results (`ChunkedEncodingError: IncompleteRead`). Draining the
+  socket up front decouples download speed from load pace; a dropped
+  download retries from scratch up to `max_retries` with the same
+  exponential backoff as the submit/poll calls, and is duplicate-free for
+  `replace`/`merge` streams since no rows are yielded until the full CSV
+  is in hand.
+
+  A single Stripe restricted key with both REST + Sigma+Reporting scopes
+  drives both surfaces; the merged connector reads it from `STRIPE_API_KEY`
+  by default (any resolver-backed `secret://` ref also works). REST streams
+  are unchanged from the prior `stripe` connector — same names, same schema,
+  same `cursor_type: int`. Existing configs continue to work; configs that
+  want Sigma data declare the corresponding stream in their `streams:` block.
+
+- **`stream_def` is now an engine-injected parameter on `@stream` functions.**
+  A connector can introspect its own `StreamDef` declaration — e.g. the
+  merged `stripe` connector dispatches to Sigma extraction when
+  `stream_def.sigma is not None`, reading the SQL filename from the
+  `sigma:` block in `register.yaml`. New injectable, alongside the existing
+  `config` / `state` / `cursor` / `log`. No existing function signatures
+  change; declare `stream_def` only when you need it.
+
+### Changed
+
+- **`stripe` connector version bumped to 2.0.0.** The REST half is unchanged
+  but the connector now also serves Sigma streams. The standalone
+  `stripe_sigma` source connector (briefly developed under
+  `dtex/sources/stripe_sigma/` during 0.2.0 dev) is removed in favor of
+  the merged shape — anyone iterating on that standalone version should
+  switch their config from `source: stripe_sigma` to `source: stripe`.
 
 ## [0.2.0] — 2026-06-03
 

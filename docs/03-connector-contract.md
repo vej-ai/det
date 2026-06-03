@@ -420,6 +420,7 @@ objects the function asks for. A function that needs nothing extra can be
 | `state` | `State` | Per-stream persisted state (chapter 04). Free-form key/value scratch space that survives between runs. |
 | `cursor` | `Cursor` | Incremental cursor helper, present only if the stream declares an `incremental` block. See §3.2. |
 | `log` | `Logger` | Structured logger. `log.info(...)`, `log.warning(...)`. Correlation ids attached by the engine. |
+| `stream_def` | `StreamDef` | The parsed `register.yaml` entry for this stream. Lets a connector introspect its own declaration — e.g. the baked `stripe` connector reads `stream_def.sigma.query` to decide which SQL file to submit for Sigma-backed streams. Use when one connector serves more than one extraction surface and the surface is declared in the manifest. |
 
 #### What a `@stream` function yields
 

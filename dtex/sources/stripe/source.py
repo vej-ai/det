@@ -3,37 +3,49 @@
 
 """Stripe source — the ``@stream`` functions the engine discovers and runs.
 
-One ``@stream`` per declared resource (``charges`` / ``invoices`` /
-``customers`` / ``subscriptions``). Each is a thin wrapper over
-:func:`_extract_stream`, the shared helper that:
+The connector exposes TWO extraction surfaces in one source folder:
 
-1. builds a :class:`StripeClient` from ``config`` and ``config.secrets["api_key"]``;
-2. translates the engine-supplied ``Cursor`` into a ``created[gte]=<ts>`` filter
-   (omitting it on the first run / under ``--full-refresh``);
-3. walks pages via :func:`paginate` — one ``list[dict]`` page per HTTP request;
-4. for every record calls ``cursor.observe(record["created"])`` so the engine
-   tracks the new high-water Unix timestamp;
-5. yields each page as a batch — Stripe's page IS the natural batch size.
+* **REST streams** (``charges`` / ``invoices`` / ``customers`` /
+  ``subscriptions``) wrap :func:`_extract_stream`, which builds a
+  :class:`StripeClient`, paginates the v1 REST endpoint, and yields each
+  page as a batch. Cheap, GA, near-live data.
 
-The v1 model is **resource-as-stream**, NOT Sigma query-as-stream — see
-``docs/connectors/stripe-research.md`` §"Recommended connector design" for
-the rationale and the locked decision. The Sigma SQL surface is preview +
-paid + 3h-lagged; it is deferred to v2.
+* **Sigma streams** (``charges_daily`` / ``subscriptions_active`` /
+  ``invoices_paid``) wrap :func:`_extract_sigma_stream`, which builds a
+  :class:`SigmaClient`, submits a Sigma SQL query (read from a .sql file
+  whose path is declared on the stream's ``sigma:`` block in
+  register.yaml), polls until the query run completes, downloads the CSV
+  result, and yields batches of dicts. Sigma is a paid Stripe product
+  with ~3-hour data lag; the upside is server-side SQL JOIN /
+  aggregation across Stripe's internal tables, in one stream.
 
-docs/03 §3.1 — a ``@stream`` generator yields batches (``list[dict]``), not
-single records; the engine handles per-batch loading and checkpointing.
+Each ``@stream`` function knows which surface it belongs to (REST or
+Sigma) — the dispatch is by name + decorator, not a per-call branch.
+The ``sigma:`` block in register.yaml is the metadata source of truth
+for the Sigma path (the SQL filename); the function reads its own
+:class:`StreamDef` (injected by the engine via ``stream_def``) and
+loads the file from there. Adding a 4th Sigma stream is two lines: a
+register.yaml entry with ``sigma: {query: queries/X.sql}`` and a
+one-line ``@stream`` wrapper here.
+
+docs/03 §3.1 — a ``@stream`` generator yields batches (``list[dict]``),
+not single records; the engine handles per-batch loading and checkpointing.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Iterator, Mapping
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
-from dtex import Batch, Config, Cursor, stream
+from dtex import Batch, Config, Cursor, State, StreamDef, stream
 from dtex.sources.stripe.client import StripeClient
 from dtex.sources.stripe.pagination import paginate
+from dtex.sources.stripe.sigma_client import SigmaClient
 
 # --------------------------------------------------------------------------
 # Stream-name → endpoint resolution
@@ -220,3 +232,208 @@ def subscriptions(
 ) -> Iterator[Batch]:
     """Extract ``/v1/subscriptions`` incrementally — see :func:`_extract_stream`."""
     yield from _extract_stream("subscriptions", config, cursor, log)
+
+
+# --------------------------------------------------------------------------
+# Sigma SQL extraction — the second extraction surface (queries/*.sql)
+# --------------------------------------------------------------------------
+
+_SIGMA_BATCH_SIZE = 500
+"""Records per yielded Sigma batch. The engine commits state after each batch
+durably lands, so smaller batches = finer-grained recovery on failure but
+more destination calls. 500 is a reasonable BigQuery load-job batch size."""
+
+# Folder-relative paths in `sigma: {query: ...}` are resolved against the
+# connector folder root — same convention every project-local connector
+# uses for its sibling files.
+_CONNECTOR_DIR = Path(__file__).parent
+
+# `{name}` placeholder substitution in SQL bodies. Chosen over `:name`
+# (Stripe's own preview syntax) because `:00` inside `00:00:00` collides
+# with that form. No SQL dialect uses braces, so collision is impossible.
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
+def _build_sigma_client(
+    config: Config, log: logging.Logger | logging.LoggerAdapter[Any]
+) -> SigmaClient:
+    """Construct a :class:`SigmaClient` from `config` — single construction site."""
+    return SigmaClient(
+        base_url=str(config.get("sigma_base_url", "https://api.stripe.com")),
+        api_key=config.secrets["api_key"],
+        api_version=str(config.get("sigma_api_version", "2026-04-22.preview")),
+        account_id=str(config.get("account_id") or ""),
+        poll_interval_seconds=float(config.get("sigma_poll_interval_seconds", 2.0)),
+        poll_timeout_seconds=int(config.get("sigma_poll_timeout_seconds", 600)),
+        max_retries=int(config.get("max_retries", 5)),
+        retry_backoff_seconds=float(config.get("retry_backoff_seconds", 1.0)),
+    )
+
+
+def _extract_sigma_stream(
+    stream_def: StreamDef,
+    config: Config,
+    cursor: Cursor | None,
+    log: logging.Logger | logging.LoggerAdapter[Any],
+) -> Iterator[Batch]:
+    """Shared Sigma extract — drives one SQL stream end to end.
+
+    Reads the SQL body from `stream_def.sigma.query` (a path relative to
+    the connector folder), substitutes `{since}` from the cursor floor
+    (or the connector's `sigma_initial_since` fallback for non-incremental
+    streams), submits the query to Sigma's Query Run API, streams the
+    CSV result, batches records at 500, observes the cursor field per
+    row, and yields each batch.
+    """
+    if stream_def.sigma is None:  # pragma: no cover — defensive guard
+        raise RuntimeError(
+            f"_extract_sigma_stream called on {stream_def.name!r} which has no "
+            f"`sigma:` block in register.yaml"
+        )
+    sql_path = _CONNECTOR_DIR / stream_def.sigma.query
+    sql_text = sql_path.read_text()
+    sql_bound = _bind_sigma_placeholders(
+        sql_text, since=_sigma_cursor_floor(cursor, config)
+    )
+
+    cursor_field = (
+        stream_def.incremental.cursor_field if stream_def.incremental is not None else None
+    )
+    log.info(
+        "stripe.sigma.%s: starting extract query=%s cursor_floor=%s",
+        stream_def.name,
+        stream_def.sigma.query,
+        _sigma_cursor_floor(cursor, config),
+    )
+
+    client = _build_sigma_client(config, log)
+    batch: list[dict[str, Any]] = []
+    for row in client.run_query(sql_bound, log=log):
+        # Sigma's CSV returns every cell as a string. The engine's NORMALIZE
+        # step coerces against the stream's declared schema (timestamps
+        # from ISO strings, ints from numeric strings, booleans), so we
+        # pass the raw row through and just observe the cursor.
+        if cursor is not None and cursor_field is not None:
+            value = row.get(cursor_field)
+            if value:
+                cursor.observe(value)
+        batch.append(row)
+        if len(batch) >= _SIGMA_BATCH_SIZE:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _sigma_cursor_floor(cursor: Cursor | None, config: Config) -> str:
+    """Return the Presto TIMESTAMP literal to bind into `{since}`.
+
+    Precedence:
+      1. The stream's `cursor.start_value()` if it's an incremental stream
+         with a value (covers both first-run `initial_value` and resumed
+         state).
+      2. The connector-level `sigma_initial_since` fallback for streams
+         without a cursor (the SQL might still reference `{since}` for
+         documentation or future-incremental use).
+
+    Always returns a Presto-compatible ``YYYY-MM-DD HH:MM:SS`` literal
+    body — Sigma rejects ISO-8601's `T` separator and timezone suffixes.
+    """
+    if cursor is not None:
+        start = cursor.start_value()
+        if start is not None:
+            return _to_presto_timestamp(start)
+    return _to_presto_timestamp(str(config.get("sigma_initial_since")))
+
+
+def _to_presto_timestamp(value: Any) -> str:
+    """Render any common timestamp shape as a Presto ``TIMESTAMP`` literal body.
+
+    Presto's ``TIMESTAMP 'literal'`` form expects ``YYYY-MM-DD HH:MM:SS``
+    (optionally with fractional seconds). It rejects the ``T`` separator,
+    any timezone suffix (``Z``, ``+00:00``), and ``YYYY-MM-DDTHH:MM:SS.fffZ``
+    JSON-style timestamps. Accepts datetime/date/ISO-8601 strings.
+    """
+    if isinstance(value, datetime):
+        dt = value.astimezone(UTC) if value.tzinfo else value
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return f"{value.isoformat()} 00:00:00"
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1]
+    if len(text) >= 6 and text[-6] in "+-" and text[-3] == ":":
+        text = text[:-6]
+    text = text.replace("T", " ")
+    if "." in text:
+        text = text.split(".", 1)[0]
+    return text
+
+
+def _bind_sigma_placeholders(sql: str, *, since: str) -> str:
+    """Substitute `{name}` placeholders in `sql` with safely-quoted literals.
+
+    Only `{since}` is supported — it becomes a single-quoted SQL string
+    literal. Unknown placeholders raise immediately (better than Sigma
+    failing with a parse error 10 minutes into a polled query run).
+    """
+    bindings = {"since": "'" + since.replace("'", "''") + "'"}
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        try:
+            return bindings[name]
+        except KeyError as exc:
+            raise KeyError(
+                f"sigma: SQL placeholder '{{{name}}}' is not bound. "
+                f"Supported placeholders: {sorted(bindings)}"
+            ) from exc
+
+    return _PLACEHOLDER_RE.sub(replace, sql)
+
+
+# --------------------------------------------------------------------------
+# Sigma @stream functions — one per declared Sigma stream in register.yaml.
+# --------------------------------------------------------------------------
+#
+# Each is a one-line wrapper over :func:`_extract_sigma_stream`. The function
+# names match register.yaml's ``streams[].name`` — the engine routes by name.
+# Adding a 4th Sigma stream is: a register entry with ``sigma: {query: ...}``,
+# a `.sql` file under queries/, and a one-line wrapper here.
+
+
+@stream(name="charges_daily")
+def charges_daily(
+    stream_def: StreamDef,
+    config: Config,
+    cursor: Cursor,
+    log: logging.Logger,
+) -> Iterator[Batch]:
+    """Extract every Stripe charge via Sigma SQL — see :func:`_extract_sigma_stream`."""
+    yield from _extract_sigma_stream(stream_def, config, cursor, log)
+
+
+@stream(name="subscriptions_active")
+def subscriptions_active(
+    stream_def: StreamDef,
+    config: Config,
+    log: logging.Logger,
+) -> Iterator[Batch]:
+    """Extract currently-active subscriptions via Sigma SQL (full-refresh).
+
+    No ``cursor`` arg — the stream has no ``incremental:`` block in
+    register.yaml, so the engine doesn't inject one. Every run pulls the
+    full set; ``write_disposition: replace`` cleans the prior load.
+    """
+    yield from _extract_sigma_stream(stream_def, config, cursor=None, log=log)
+
+
+@stream(name="invoices_paid")
+def invoices_paid(
+    stream_def: StreamDef,
+    config: Config,
+    cursor: Cursor,
+    log: logging.Logger,
+) -> Iterator[Batch]:
+    """Extract paid invoices via Sigma SQL — see :func:`_extract_sigma_stream`."""
+    yield from _extract_sigma_stream(stream_def, config, cursor, log)

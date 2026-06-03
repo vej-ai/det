@@ -605,7 +605,9 @@ def test_empty_registry_has_no_kind() -> None:
 def test_constants_are_consistent() -> None:
     """The exported constant sets are internally consistent."""
     assert MANDATORY_DESTINATION_HOOKS <= DESTINATION_HOOKS
-    assert STREAM_INJECTABLES == frozenset({"config", "state", "cursor", "log"})
+    assert STREAM_INJECTABLES == frozenset(
+        {"config", "state", "cursor", "log", "stream_def"}
+    )
     # Eleven hooks as of stage 8e (max_concurrent_writes added).
     assert len(DESTINATION_HOOKS) == 11
     assert "transaction" in DESTINATION_HOOKS

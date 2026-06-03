@@ -880,6 +880,45 @@ class Incremental:
 
 
 @dataclass(frozen=True)
+class SigmaConfig:
+    """Stream-level Sigma config — present iff this stream runs Sigma SQL.
+
+    A small marker block on a :class:`StreamDef` that opts an individual
+    stream into Stripe Sigma's SQL-as-stream model (the rest of the
+    connector's streams continue using whatever default surface the
+    connector implements — for the baked ``stripe`` connector, that's
+    REST).
+
+    A connector that supports Sigma checks ``stream_def.sigma is not None``
+    inside its ``@stream`` function and dispatches to its Sigma helper if
+    set, REST helper otherwise. Connectors with no Sigma support simply
+    never see this block on their streams.
+
+    Fields:
+
+    * ``query`` — path to the .sql file (relative to the connector folder)
+      whose body is submitted as the Sigma query. The cursor floor is
+      bound into the SQL by the connector (canonical placeholder:
+      ``{since}``).
+    """
+
+    query: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> SigmaConfig:
+        """Build a :class:`SigmaConfig` from a parsed YAML mapping."""
+        known = {"query"}
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(
+                f"sigma: unknown key(s) {sorted(unknown)}; valid: {sorted(known)}"
+            )
+        if "query" not in data:
+            raise ValueError("sigma: 'query' is required (path to the .sql file)")
+        return cls(query=str(data["query"]))
+
+
+@dataclass(frozen=True)
 class StreamDef:
     """One declared output table — mirrors a ``register.yaml`` ``streams[]`` entry.
 
@@ -894,6 +933,11 @@ class StreamDef:
     incremental: Incremental | None = None
     schema: Schema | None = None
     partition_by: str | PartitionConfig | None = None
+    sigma: SigmaConfig | None = None
+    """Stream-level Sigma config — present iff this stream runs Sigma SQL
+    instead of the connector's default extraction surface (see
+    :class:`SigmaConfig` for the rationale). Absent on every existing
+    stream; this is purely an opt-in extension."""
     """The declared partition spec, either:
 
     * a bare string column name (short form — defaults to TIME+DAY at
@@ -952,6 +996,7 @@ class StreamDef:
             "incremental",
             "schema",
             "partition_by",
+            "sigma",
             "params",
             "schema_contract",
         }
@@ -980,6 +1025,20 @@ class StreamDef:
         params_raw = data.get("params") or {}
         params = {k: ParamSpec.from_dict(v) for k, v in params_raw.items()}
 
+        sigma_raw = data.get("sigma")
+        if sigma_raw is None:
+            sigma_block: SigmaConfig | None = None
+        elif isinstance(sigma_raw, Mapping):
+            try:
+                sigma_block = SigmaConfig.from_dict(sigma_raw)
+            except ValueError as exc:
+                raise ValueError(f"stream {name!r}: {exc}") from exc
+        else:
+            raise ValueError(
+                f"stream {name!r}: 'sigma' must be a mapping; "
+                f"got {type(sigma_raw).__name__}"
+            )
+
         return cls(
             name=name,
             table=str(data.get("table", name)),
@@ -990,6 +1049,7 @@ class StreamDef:
             incremental=incremental,
             schema=Schema.from_list(data.get("schema")),
             partition_by=_parse_partition_by(data.get("partition_by")),
+            sigma=sigma_block,
             params=params,
             schema_contract=SchemaContract.parse(
                 data.get("schema_contract", SchemaContract.EVOLVE)

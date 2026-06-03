@@ -131,8 +131,8 @@ def customers(config: Config, state: State, cursor: Cursor, log) -> Iterator[Bat
 ### Injected arguments
 
 The engine declares which arguments it can inject — `config`, `state`,
-`cursor`, `log` — and supplies only the ones the function names. List
-only what you use; the engine matches by name.
+`cursor`, `log`, `stream_def` — and supplies only the ones the function
+names. List only what you use; the engine matches by name.
 
 - **`config`** — the resolved `Config` for this run. Read params via
   `config.get("key")` or attribute access. Read secrets via
@@ -143,6 +143,12 @@ only what you use; the engine matches by name.
   that need to remember more than a cursor.
 - **`log`** — a standard logging-style logger. `log.info(...)`,
   `log.warning(...)`.
+- **`stream_def`** — the parsed `StreamDef` for this stream — its own
+  `register.yaml` entry. Lets a connector introspect its own
+  declaration. Useful when one connector serves more than one
+  extraction surface (REST + Sigma SQL, GA + Reporting API, etc.) and
+  the surface choice is declared in the manifest. See "Dual-API
+  connectors" below.
 
 ### Three rules to drill in
 
@@ -161,6 +167,72 @@ The engine's NORMALIZE step coerces *values* to the declared FieldType,
 but it does not reshape nested dicts into flat columns. If the API returns
 `{"attributes": {"country": "US"}}` and your schema declares
 `country: STRING`, you must flatten in the `@stream` function before yielding.
+
+## Dual-API connectors — when one source serves two surfaces
+
+Some APIs come in two flavors that the same operator pulls from in one
+pipeline. Stripe is the canonical example: a standard REST API
+(resource-as-stream, GA) AND a Sigma SQL API (query-as-stream, paid,
+~3-hour lag). Both belong to one "Stripe" connector, not two.
+
+The dtex pattern is **one source folder, two extraction surfaces, per-stream
+opt-in**. The baked `stripe` connector demonstrates this:
+
+```yaml
+# dtex/sources/stripe/register.yaml — abbreviated
+streams:
+  - name: charges            # REST — no `sigma:` block
+    table: stripe_charges
+    incremental: {cursor_field: created, cursor_type: int}
+    schema: [...]
+
+  - name: charges_daily      # Sigma — opted in via `sigma:` block
+    table: charges
+    sigma:
+      query: queries/charges_daily.sql
+    incremental: {cursor_field: created, cursor_type: timestamp}
+    schema: [...]
+```
+
+In `source.py`, each `@stream` function knows which surface it belongs
+to by which helper it calls. The Sigma functions take the `stream_def`
+injectable, read `stream_def.sigma.query`, and load the SQL from the
+named file:
+
+```python
+@stream(name="charges_daily")
+def charges_daily(
+    stream_def: StreamDef, config: Config, cursor: Cursor, log
+) -> Iterator[Batch]:
+    yield from _extract_sigma_stream(stream_def, config, cursor, log)
+
+# _extract_sigma_stream(stream_def, ...) reads stream_def.sigma.query
+# from the connector folder, binds {since} from the cursor, submits to
+# Sigma, downloads CSV, yields batches.
+```
+
+The decision rules:
+
+* **One connector, not two.** Users binding `source: stripe` see one
+  surface; the `sigma:` block is the opt-in marker per stream. Don't
+  fork into `stripe` and `stripe_sigma`.
+* **Sigma streams declare `sigma: {query: <path>}`.** Path is relative
+  to the connector folder. The `@stream` function reads it from
+  `stream_def.sigma.query` (via the `stream_def` injectable) and
+  loads the SQL.
+* **REST streams don't change.** No `sigma:` block, no `stream_def`
+  arg required — existing connectors stay shaped exactly as they were.
+* **Shared client params, shared auth.** A single Stripe restricted
+  key with both REST + Sigma scopes drives both surfaces from one
+  `api_key` secret. Keep it that way; don't introduce per-surface
+  secrets unless the API genuinely demands separate keys.
+
+The same pattern fits other APIs with a "live REST + analytical SQL"
+shape — Shopify GraphQL + Shopify Bulk Operations, Salesforce REST +
+SOQL, GA Data API + BigQuery export, etc. The `sigma:` block is
+Stripe-specific naming today; future dual-surface connectors should
+either reuse it (if they have similar SQL semantics) or add a parallel
+marker (`bulk:`, `soql:`) following the same opt-in shape.
 
 ## The `client.py` pattern
 

@@ -317,6 +317,48 @@ def test_stream_def_rejects_unknown_key() -> None:
 
 
 # ---------------------------------------------------------------------------
+# StreamDef.sigma — opt-in Sigma SQL-as-stream marker (Stripe consolidation)
+# ---------------------------------------------------------------------------
+
+
+def test_stream_def_sigma_absent_by_default() -> None:
+    """Every existing stream is REST-shaped — `sigma` defaults to None."""
+    sd = StreamDef.from_dict({"name": "charges"})
+    assert sd.sigma is None
+
+
+def test_stream_def_sigma_block_parses_to_sigma_config() -> None:
+    """A `sigma: {query: ...}` block becomes a SigmaConfig on the StreamDef."""
+    from dtex.types import SigmaConfig
+
+    sd = StreamDef.from_dict(
+        {"name": "charges_daily", "sigma": {"query": "queries/charges_daily.sql"}}
+    )
+    assert isinstance(sd.sigma, SigmaConfig)
+    assert sd.sigma.query == "queries/charges_daily.sql"
+
+
+def test_stream_def_sigma_missing_query_rejected() -> None:
+    """A `sigma:` block without `query:` is a hard error."""
+    with pytest.raises(ValueError, match="'query' is required"):
+        StreamDef.from_dict({"name": "s", "sigma": {}})
+
+
+def test_stream_def_sigma_unknown_subkey_rejected() -> None:
+    """Unknown keys under `sigma:` catch typos."""
+    with pytest.raises(ValueError, match="sigma: unknown key"):
+        StreamDef.from_dict(
+            {"name": "s", "sigma": {"query": "q.sql", "extra": "nope"}}
+        )
+
+
+def test_stream_def_sigma_must_be_mapping() -> None:
+    """A bare string under `sigma:` is rejected (mapping form is canonical)."""
+    with pytest.raises(ValueError, match="'sigma' must be a mapping"):
+        StreamDef.from_dict({"name": "s", "sigma": "queries/foo.sql"})
+
+
+# ---------------------------------------------------------------------------
 # ConnectorManifest
 # ---------------------------------------------------------------------------
 
