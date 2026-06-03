@@ -10,6 +10,12 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-06-04
+
+A patch release that lands Stripe Sigma SQL-as-stream extraction inside
+the existing `stripe` connector, with a new `stream_def` injectable on
+`@stream` functions that makes the dual-surface dispatch clean.
+
 ### Added
 
 - **Stripe Sigma SQL-as-stream folded into the `stripe` connector.** One
@@ -52,10 +58,10 @@ For what is *planned* — versus what has shipped — see
 
 - **`stripe` connector version bumped to 2.0.0.** The REST half is unchanged
   but the connector now also serves Sigma streams. The standalone
-  `stripe_sigma` source connector (briefly developed under
-  `dtex/sources/stripe_sigma/` during 0.2.0 dev) is removed in favor of
-  the merged shape — anyone iterating on that standalone version should
-  switch their config from `source: stripe_sigma` to `source: stripe`.
+  `stripe_sigma` source connector (briefly developed during 0.2.0 dev but
+  never released as a separate package) is removed in favor of the merged
+  shape — anyone iterating on that standalone version should switch their
+  config from `source: stripe_sigma` to `source: stripe`.
 
 ## [0.2.0] — 2026-06-03
 
@@ -311,7 +317,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/vej-ai/dtex/releases/tag/v0.2.1
 [0.2.0]: https://github.com/vej-ai/dtex/releases/tag/v0.2.0
 [0.1.5]: https://github.com/vej-ai/dtex/releases/tag/v0.1.5
 [0.1.4]: https://github.com/vej-ai/dtex/releases/tag/v0.1.4
