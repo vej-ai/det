@@ -1722,6 +1722,211 @@ class RunRecord:
 # ---------------------------------------------------------------------------
 
 
+class StreamMode(str, Enum):
+    """How a stream is run THIS invocation — docs/12 §3.
+
+    Set per-stream in a config's ``streams:`` block. Independent of the
+    stream's *capability* (whether ``register.yaml`` declares an
+    ``incremental:`` block) — that's a property of the stream itself.
+
+    * ``INCREMENTAL`` — read the cursor from ``_dtex_state``, advance it
+      on success. Requires the stream to declare an ``incremental:``
+      block in its ``register.yaml``.
+    * ``FULL_REFRESH`` — do NOT read, advance, or reset the cursor.
+      Every run pulls from the stream's ``initial_value`` (or the
+      config-supplied ``since:`` override). State is left untouched so
+      a sibling incremental config keeps its cursor intact.
+
+    The string values match what a user writes in YAML
+    (``mode: full_refresh``).
+    """
+
+    INCREMENTAL = "incremental"
+    FULL_REFRESH = "full_refresh"
+
+
+@dataclass(frozen=True)
+class StreamRunConfig:
+    """Per-stream run-shape declared in a config's ``streams:`` block — docs/12 §3.
+
+    A ``register.yaml`` declares a stream's *identity* (cursor field/type,
+    primary key, schema, extraction logic). This object declares the
+    per-pipeline *run-shape* — what mode the stream runs in this
+    invocation, what cursor floor to use, what per-stream source-param
+    overrides apply, what physical partition layout the destination
+    should produce.
+
+    Fields:
+
+    * ``mode`` — ``incremental`` or ``full_refresh``. ``None`` means
+      "use the stream's natural mode" (incremental if the source
+      declares an ``incremental:`` block, full_refresh otherwise).
+    * ``since`` — one-shot cursor floor for this run only; ignored
+      when ``mode`` resolves to full_refresh. Does NOT mutate
+      ``_dtex_state``. The engine uses this VERBATIM as the seed
+      for the run (not max(since, prior_state)) — explicit "re-pull
+      from here" semantics.
+    * ``params`` — per-stream source-param overrides. Sits at
+      precedence layer 4 (between config-level ``params`` and
+      ``DTEX_PARAM_<NAME>``); see docs/03 §6.
+    * ``partition`` — destination partition declaration; same shape
+      as ``StreamDef.partition_by`` (string short form OR
+      :class:`PartitionConfig` long form). Overrides whatever the
+      source declares for this stream.
+    """
+
+    mode: StreamMode | None = None
+    since: Any | None = None
+    params: Mapping[str, Any] = field(default_factory=dict)
+    partition: PartitionConfig | None = None
+
+    @classmethod
+    def from_yaml_value(cls, value: Any, *, stream_name: str, config_name: str) -> StreamRunConfig:
+        """Parse one entry of a config's ``streams:`` block — docs/12 §2.
+
+        Accepts three forms:
+
+        * ``None`` (an empty mapping value, e.g. ``my_stream:``) — all defaults.
+        * A bare string (``my_stream: full_refresh``) — interpreted as
+          ``{mode: <string>}``.
+        * A mapping with any subset of {``mode``, ``since``, ``params``,
+          ``partition``}.
+
+        Unknown sub-keys are rejected (matches the codebase's "unknown
+        YAML key is a hard error" stance — catches typos like ``mod``).
+        """
+        if value is None:
+            return cls()
+        if isinstance(value, str):
+            return cls(mode=_parse_stream_mode(value, stream_name=stream_name, config_name=config_name))
+        if not isinstance(value, Mapping):
+            raise ValueError(
+                f"config {config_name!r}: streams[{stream_name!r}] must be a "
+                f"mapping, a bare mode string, or null; got {type(value).__name__}"
+            )
+        known = {"mode", "since", "params", "partition"}
+        unknown = set(value) - known
+        if unknown:
+            raise ValueError(
+                f"config {config_name!r}: streams[{stream_name!r}]: unknown key(s) "
+                f"{', '.join(repr(k) for k in sorted(unknown))}; "
+                f"valid: {', '.join(sorted(known))}"
+            )
+
+        mode_raw = value.get("mode")
+        mode = (
+            _parse_stream_mode(mode_raw, stream_name=stream_name, config_name=config_name)
+            if mode_raw is not None
+            else None
+        )
+
+        params_raw = value.get("params") or {}
+        if not isinstance(params_raw, Mapping):
+            raise ValueError(
+                f"config {config_name!r}: streams[{stream_name!r}].params must be "
+                f"a mapping; got {type(params_raw).__name__}"
+            )
+
+        partition_raw = value.get("partition")
+        if partition_raw is None:
+            partition: PartitionConfig | None = None
+        elif isinstance(partition_raw, (str, Mapping)):
+            # PartitionConfig.from_dict accepts both shapes — short string form
+            # becomes TIME+DAY on the named field (PartitionConfig.from_short),
+            # mapping is the explicit long form. Promoting here means the
+            # runner sees a uniform PartitionConfig regardless of YAML shape.
+            try:
+                partition = PartitionConfig.from_dict(partition_raw)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"config {config_name!r}: streams[{stream_name!r}].partition: {exc}"
+                ) from exc
+        else:
+            raise ValueError(
+                f"config {config_name!r}: streams[{stream_name!r}].partition must be "
+                f"a string (short form) or mapping (long form); "
+                f"got {type(partition_raw).__name__}"
+            )
+
+        return cls(
+            mode=mode,
+            since=value.get("since"),
+            params=dict(params_raw),
+            partition=partition,
+        )
+
+
+def _parse_stream_mode(value: Any, *, stream_name: str, config_name: str) -> StreamMode:
+    """Coerce a YAML scalar into a :class:`StreamMode` with a friendly error."""
+    if isinstance(value, StreamMode):
+        return value
+    try:
+        return StreamMode(str(value))
+    except ValueError:
+        valid = ", ".join(repr(m.value) for m in StreamMode)
+        raise ValueError(
+            f"config {config_name!r}: streams[{stream_name!r}]: unknown mode "
+            f"{value!r}; valid: {valid}"
+        ) from None
+
+
+# Sentinel string forms for ``streams: all`` / ``streams: "*"`` — the
+# explicit catch-all opt-in (docs/12 §2.3). Lowercased + stripped at
+# parse time so case/whitespace don't bite.
+_STREAMS_ALL_SENTINELS = frozenset({"all", "*"})
+
+
+def _parse_streams_block(
+    raw: Any, *, config_name: str
+) -> tuple[Mapping[str, StreamRunConfig], bool]:
+    """Parse a config's ``streams:`` block — docs/12 §2.
+
+    Three accepted shapes:
+
+    * Sentinel string ``"all"`` / ``"*"`` (case-insensitive, whitespace
+      stripped) → ``({}, True)``. Runner expands to every stream the
+      source declares at run time.
+    * Mapping ``{stream_name: <yaml>}`` → ``(dict, False)`` where each
+      value is parsed via :meth:`StreamRunConfig.from_yaml_value`.
+    * Anything else → :class:`ValueError`.
+
+    Empty mapping / empty list / missing-after-required-check all fail
+    with the "must not be empty" message. The mandatory-presence check
+    itself lives in :meth:`PipelineConfig.from_dict`.
+    """
+    if isinstance(raw, str):
+        normalized = raw.strip().lower()
+        if normalized in _STREAMS_ALL_SENTINELS:
+            return {}, True
+        raise ValueError(
+            f"config {config_name!r}: 'streams' string value must be "
+            f"'all' or '*' (the catch-all opt-in); got {raw!r}. To list "
+            f"streams explicitly, use a mapping like 'streams: {{my_stream: {{}} }}'"
+        )
+
+    if not isinstance(raw, Mapping):
+        raise ValueError(
+            f"config {config_name!r}: 'streams' must be a mapping of "
+            f"stream-name → per-stream-overrides, or the catch-all "
+            f"sentinel 'all'; got {type(raw).__name__}"
+        )
+
+    if not raw:
+        raise ValueError(
+            f"config {config_name!r}: 'streams' must not be empty (use "
+            f"'streams: all' to include every stream the source declares, "
+            f"or list streams by name with optional per-stream overrides)"
+        )
+
+    streams: dict[str, StreamRunConfig] = {}
+    for stream_name, value in raw.items():
+        name_str = str(stream_name)
+        streams[name_str] = StreamRunConfig.from_yaml_value(
+            value, stream_name=name_str, config_name=config_name
+        )
+    return streams, False
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     """One parsed pipeline config — a named binding of source + destination + target.
@@ -1784,17 +1989,22 @@ class PipelineConfig:
     target: str | None = None
     params: Mapping[str, Any] = field(default_factory=dict)
     destination_params: Mapping[str, Any] = field(default_factory=dict)
-    partition_overrides: Mapping[str, PartitionConfig] = field(default_factory=dict)
-    """Per-stream partition declarations that *override* the source's
-    :attr:`StreamDef.partition_by` — docs/05 §3.x, docs/12 §3.
+    streams: Mapping[str, StreamRunConfig] = field(default_factory=dict)
+    """Per-stream run-shape declarations — docs/12 §2.
 
-    Keys are stream names; values are :class:`PartitionConfig` objects parsed
-    from either the short string form or the long-form mapping. Same precedence
-    as other per-config overrides: a stream not named here keeps whatever the
-    source's ``register.yaml`` declared (or the cursor-based auto-default if
-    nothing was declared). Lets a pipeline tune the physical layout of a
-    third-party source without forking its connector folder."""
-    select: tuple[str, ...] = ()
+    Mandatory in every config. Keys are stream names, values are
+    :class:`StreamRunConfig` objects carrying the per-stream
+    ``mode`` / ``since`` / ``params`` / ``partition`` overrides.
+
+    When the user wrote ``streams: all`` (or ``streams: "*"``) this mapping
+    is empty AND :attr:`all_streams` is ``True`` — the runner expands "all"
+    against the source's declared streams at run time. When the user listed
+    streams explicitly, this mapping is non-empty and :attr:`all_streams`
+    is ``False``."""
+    all_streams: bool = False
+    """``True`` iff the config used the ``streams: all`` (or ``streams: "*"``)
+    catch-all sentinel — docs/12 §2.3. Mutually exclusive with a non-empty
+    :attr:`streams` mapping (enforced at parse time)."""
     schedule: str | None = None
     tags: tuple[str, ...] = ()
     """Free-form labels used by ``dtex run --tag <tag>`` to select every config
@@ -1810,13 +2020,35 @@ class PipelineConfig:
     def from_dict(cls, data: Mapping[str, Any]) -> PipelineConfig:
         """Build a :class:`PipelineConfig` from a parsed YAML mapping — docs/12.
 
-        Enforces the required keys (``name``, ``source``, ``destination``) and
-        rejects unknown top-level keys (catches typos like ``destintion``).
-        Coerces ``select`` from a string-or-list scalar into a tuple. The
-        ``partition_overrides:`` block, when present, is parsed per-entry into
-        :class:`PartitionConfig` objects (each entry may itself be the short
-        or the long form — see :meth:`PartitionConfig.from_dict`).
+        Enforces the required keys (``name``, ``source``, ``destination``,
+        ``streams``) and rejects unknown top-level keys (catches typos like
+        ``destintion``). The mandatory ``streams:`` block accepts either the
+        catch-all sentinels ``all`` / ``"*"`` (sets :attr:`all_streams`) or
+        a mapping of ``{stream_name: StreamRunConfig-shaped-yaml}`` (parsed
+        per-entry by :meth:`StreamRunConfig.from_yaml_value`).
+
+        Legacy keys ``select`` and ``partition_overrides`` raise a clear
+        error pointing at the new location — both were subsumed by
+        ``streams:`` in this redesign (docs/_internal/streams-redesign-plan).
         """
+        config_name = str(data.get("name", "<unknown>"))
+
+        # Legacy-key errors come BEFORE the unknown-key check so the message
+        # tells the user exactly where to move the value, instead of just
+        # "unknown key 'select'" (the unknown-key error is for typos).
+        if "select" in data:
+            raise ValueError(
+                f"config {config_name!r}: 'select' is no longer supported; "
+                f"list streams under 'streams:' instead (a listed stream is "
+                f"automatically selected)"
+            )
+        if "partition_overrides" in data:
+            raise ValueError(
+                f"config {config_name!r}: 'partition_overrides' is no longer "
+                f"supported; move partition specs under "
+                f"'streams.<stream_name>.partition'"
+            )
+
         known = {
             "name",
             "source",
@@ -1824,52 +2056,26 @@ class PipelineConfig:
             "target",
             "params",
             "destination_params",
-            "partition_overrides",
-            "select",
+            "streams",
             "schedule",
             "tags",
         }
         unknown = set(data) - known
         if unknown:
             raise ValueError(f"unknown config key(s): {', '.join(sorted(unknown))}")
-        for required in ("name", "source", "destination"):
+        for required in ("name", "source", "destination", "streams"):
             if required not in data:
+                if required == "streams":
+                    raise ValueError(
+                        f"config {config_name!r}: 'streams' is required (use "
+                        f"'streams: all' to include every stream the source "
+                        f"declares, or list streams by name with optional "
+                        f"per-stream overrides)"
+                    )
                 raise ValueError(f"config requires a {required!r} key")
 
-        select_raw = data.get("select") or ()
-        if isinstance(select_raw, str):
-            select: tuple[str, ...] = (select_raw,)
-        elif isinstance(select_raw, (list, tuple)):
-            select = tuple(str(s) for s in select_raw)
-        else:
-            raise ValueError(
-                f"config {data['name']!r}: 'select' must be a string or list of stream names"
-            )
-
-        # partition_overrides — per-stream, each value can be the short string
-        # form OR the long-form mapping. We promote everything to
-        # PartitionConfig here so the runner sees a uniform shape; the per-
-        # entry short-form interpretation (TIME+DAY default) lives in
-        # PartitionConfig.from_short. # NOTE: unlike StreamDef.partition_by we
-        # DO promote here — at the config layer we have no cursor info either
-        # way, and a per-config override is an explicit "I know what I want"
-        # decision, so the backward-compat short-form-on-int-cursor
-        # degradation rule does not apply to overrides.
-        partition_overrides_raw = data.get("partition_overrides") or {}
-        if not isinstance(partition_overrides_raw, Mapping):
-            raise ValueError(
-                f"config {data['name']!r}: 'partition_overrides' must be a mapping "
-                f"of stream name → partition spec (string or long form)"
-            )
-        partition_overrides: dict[str, PartitionConfig] = {}
-        for stream_name, raw in partition_overrides_raw.items():
-            try:
-                partition_overrides[str(stream_name)] = PartitionConfig.from_dict(raw)
-            except (ValueError, TypeError) as exc:
-                raise ValueError(
-                    f"config {data['name']!r}: partition_overrides[{stream_name!r}]: "
-                    f"{exc}"
-                ) from exc
+        streams_raw = data["streams"]
+        streams, all_streams = _parse_streams_block(streams_raw, config_name=config_name)
 
         # tags — bare list of strings, mirroring dbt's model `tags:`. A bare
         # string (`tags: hourly`) is REJECTED with a clear error so the
@@ -1917,8 +2123,8 @@ class PipelineConfig:
             target=None if target_raw is None else str(target_raw),
             params=dict(data.get("params") or {}),
             destination_params=dict(data.get("destination_params") or {}),
-            partition_overrides=partition_overrides,
-            select=select,
+            streams=streams,
+            all_streams=all_streams,
             schedule=None if schedule_raw is None else str(schedule_raw),
             tags=tuple(tags_list),
         )
