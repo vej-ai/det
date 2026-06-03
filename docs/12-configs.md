@@ -33,9 +33,9 @@ destination_params:
   # Per-pipeline destination overrides. Typically empty — the destination's
   # connection params live in profiles.yml's per-target row.
   dataset: shiphero_raw
-select:
-  - shipments
-  - orders
+streams:                       # mandatory — see §3 for the catch-all form
+  shipments:
+  orders:
 ```
 
 ### 1.2. Many configs per file
@@ -49,12 +49,14 @@ configs:
     source: shiphero
     destination: duckdb
     target: dev
+    streams: all
     params:
       page_size: 10
   - name: shiphero_prod
     source: shiphero
     destination: bigquery
     target: prod
+    streams: all
     params:
       page_size: 100
 ```
@@ -72,10 +74,11 @@ A config must declare:
 | `name` | The config's identifier — what `dtex run -p <name>` matches. |
 | `source` | The source connector's name (resolved project-local-first, then baked — docs/03 §5). |
 | `destination` | The destination connector's name (same resolution rule). |
+| `streams` | Which streams this pipeline runs. Either the catch-all sentinel `all` (or `"*"`) or a mapping of `{stream_name: per-stream-overrides}`. Never optional, never empty — see §3.1. |
 
 Everything else is optional with documented defaults (see §3).
 
-Unknown top-level keys are a hard error (catches typos like `destintion`).
+Unknown top-level keys are a hard error (catches typos like `destintion`). The legacy keys `select:` and `partition_overrides:` are **hard-removed** — both were subsumed by `streams:` (see §3.1).
 
 ## 3. Optional keys and defaults
 
@@ -84,14 +87,41 @@ Unknown top-level keys are a hard error (catches typos like `destintion`).
 | `target` | `profiles.yml[<destination>].default_target` (or the destination's only target if it has just one, else error) | Which row of `profiles.yml[<destination>].targets` supplies the destination's connection params. |
 | `params` | `{}` | Per-pipeline source param overrides — precedence layer 3 (docs/03 §6). |
 | `destination_params` | `{}` | Per-pipeline destination param overrides — layered on top of the destination's `profiles.yml` row. |
-| `partition_overrides` | `{}` | Per-stream physical-partition overrides — wins over the source's `register.yaml` `partition_by` (docs/05 §3.3). |
-| `select` | `[]` (= all streams) | Streams to run. Empty means every stream. |
 | `schedule` | `null` | Advisory cron expression. The engine itself never acts on it (docs/03 §2.6). |
 | `tags` | `[]` | Bare list of strings used by `dtex run --tag <tag>` to select every matching config (and by `dtex list --tag` for catalog filtering). Lowercased + deduplicated at parse time (see §3.2). |
 
-### 3.1 Worked example — `partition_overrides:`
+### 3.1 The `streams:` block
 
-A pipeline that lands Stripe into BigQuery wants `charges` partitioned by an integer-epoch range (Stripe's `created` is an INT cursor) and `invoices` partitioned by the date the engine writes. Neither needs forking the Stripe connector — the override block lives in the config:
+`streams:` is mandatory and accepts two shapes:
+
+**Catch-all sentinel.** `streams: all` (or `streams: "*"`, case-insensitive, whitespace-tolerant) means "include every stream the source declares." Expansion happens at run time, so a new stream added to the source flows through automatically.
+
+```yaml
+streams: all
+```
+
+**Explicit mapping.** `streams: {stream_name: per-stream-overrides}` lists each stream the pipeline runs, with optional per-stream overrides. Each value is one of:
+
+* `null` / empty mapping (`my_stream:`) — include with defaults.
+* a bare string (`my_stream: full_refresh`) — shorthand for `{mode: <string>}`.
+* a mapping with any subset of `mode`, `since`, `params`, `partition`.
+
+The two shapes are mutually exclusive. `streams: all` plus per-stream entries is rejected; an empty mapping (`streams: {}`) is rejected with `'streams' must not be empty`.
+
+Per-stream knobs:
+
+| knob | type | meaning |
+|---|---|---|
+| `mode` | `incremental` \| `full_refresh` | This run's mode for this stream. Default = the stream's natural mode (incremental if the source declares an `incremental:` block, full_refresh otherwise). `mode: incremental` on a stream that has no cursor is a hard error. |
+| `since` | timestamp / int / string matching `cursor_type` | One-shot cursor floor for this run. Ignored when the effective mode is full_refresh. **Replaces** the seed verbatim (not `max(since, prior_state)`). Does NOT mutate `_dtex_state`. |
+| `params` | mapping | Per-stream source-param overlay — precedence layer 4 (between config-level `params:` and env vars). |
+| `partition` | string \| mapping | Destination partition spec. Short string form defaults to `TIME+DAY` on the named column. Long form gives full control. Replaces the source's `register.yaml` `partition_by` for this stream. |
+
+**The full-refresh state rule.** `mode: full_refresh` (and the run-wide `--full-refresh` flag) DOES NOT read, advance, or reset `_dtex_state`. The prior cursor row stays intact, so a sibling incremental config sharing this source keeps its cursor. Full-refresh is a per-run *behavior*, not a state mutation. To actually clear state, use `dtex state reset` — that's the explicit operation.
+
+### 3.2 Worked example — per-stream partition + mode + params
+
+A pipeline that lands Stripe into BigQuery wants `charges` partitioned by an integer-epoch range (Stripe's `created` is an INT cursor) and `invoices` partitioned by the date the engine writes. The dev variant runs `subscriptions` as full_refresh while prod keeps it incremental:
 
 ```yaml
 # configs/stripe_bq.yml
@@ -101,20 +131,26 @@ destination: bigquery
 target: dev
 destination_params:
   dataset: stripe_data
-partition_overrides:
+streams:
   charges:
-    field: created
-    type: range
-    range:
+    partition:
+      field: created
+      type: range
+      range:
       start: 1577836800        # 2020-01-01T00:00:00Z
       end:   1893456000        # 2030-01-01T00:00:00Z
       interval: 86400          # one day per bucket
-  invoices: created            # short form — TIME+DAY on `created`
+  invoices:
+    partition: created         # short form — TIME+DAY on `created`
+  subscriptions:
+    mode: full_refresh         # dev re-pulls; prod's incremental cursor stays intact
+    params:
+      page_size: 100            # this stream only — smaller page size for testing
 ```
 
-`partition_overrides:` is a mapping `{stream_name: partition_spec}`. Each entry accepts both the short string form and the long-form mapping. A stream not named here keeps whatever the source's `register.yaml` declared (or the cursor-based auto-default if nothing was declared — docs/05 §3.3).
+Per-stream `partition` accepts both the short string form (`partition: created`) and the long-form mapping. A stream not named here keeps whatever the source's `register.yaml` declared (or the cursor-based auto-default if nothing was declared — docs/05 §3.3). A stream listed without overrides (e.g. `customers:` with no value) is included with defaults.
 
-### 3.2 Tag-based multi-run — `tags:` + `dtex run --tag`
+### 3.3 Tag-based multi-run — `tags:` + `dtex run --tag`
 
 A config carries an optional `tags:` field — a bare list of strings, shape-equivalent to dbt's model `tags:`. `dtex run --tag <tag>` then runs every config whose `tags:` list contains that tag.
 
@@ -125,16 +161,19 @@ configs:
     source: shiphero
     destination: bigquery
     target: prod
+    streams: all
     tags: [hourly, ops]
   - name: stripe_hourly
     source: stripe
     destination: bigquery
     target: prod
+    streams: all
     tags: [hourly, finance]
   - name: zendesk_hourly
     source: zendesk
     destination: bigquery
     target: prod
+    streams: all
     tags: [hourly, support]
 ```
 
@@ -155,7 +194,7 @@ Semantics:
 * **Continue-on-failure** — a per-config failure does NOT stop the rest. The CLI exits `1` if any run failed, `0` if all succeeded.
 * **Zero matches** — exit `2` with a `no configs match tag '<tag>'` message (usage error).
 * **Mutual exclusion** — `-p/--conf` and `--tag` cannot be combined; exactly one selector per invocation.
-* **Uniform args** — `--target`, `--destination-param`, `--full-refresh`, `--select` all apply to every matched config. `--param` is NOT supported with `--tag` (a source param override would silently apply to every config whether or not its source declares it; use `dtex run -p <config> --param k=v` for per-config knobs).
+* **Uniform args** — `--target`, `--destination-param`, `--full-refresh`, `--select` all apply to every matched config. `--param` is NOT supported with `--tag` (a source param override would silently apply to every config whether or not its source declares it; use `dtex run -p <config> --param k=v` for per-config knobs). `--full-refresh` follows the §3.1 don't-touch-state rule — it ignores the cursor for this invocation without resetting `_dtex_state`.
 
 Tags are normalized to lowercase at parse time and deduplicated, so `tags: [Hourly, hourly]` parses to `("hourly",)` and `--tag Hourly` matches `tags: [hourly]`. Selection is by exact match (no glob/regex).
 
@@ -180,8 +219,9 @@ For a **source param** (lowest → highest):
 1. The source's `register.yaml` `params[].default`.
 2. The project's `dtex_project.yml` `vars:` block.
 3. The active config's `params:` block.
-4. The environment variable `SIMPLE_E_PARAM_<NAME>`.
-5. The CLI `--param k=v` flag / library `params_override=` kwarg.
+4. The active config's `streams[<stream_name>].params:` block — per-stream overlay (docs/12 §3.1).
+5. The environment variable `SIMPLE_E_PARAM_<NAME>`.
+6. The CLI `--param k=v` flag / library `params_override=` kwarg.
 
 For a **destination param** (lowest → highest):
 
@@ -192,13 +232,17 @@ For a **destination param** (lowest → highest):
 5. The environment variable `SIMPLE_E_PARAM_<NAME>`.
 6. The CLI `--destination-param k=v` flag / library `destination_params_override=` kwarg.
 
-The CLI `--select` flag **replaces** (not unions) the config's `select:` — it is a per-invocation narrowing, not an additive set.
+The CLI `--select` flag **narrows** the config's `streams:` block — it is a per-invocation intersection, not an additive set. A `--select` name that isn't in `streams:` is a hard error listing the in-scope stream names.
 
 ## 6. State + configs
 
 `_dtex_state` rows are keyed by the **source** name, not the config name. A different config that points at the same source will resume off the same cursor rows — state is a property of where the data was extracted from, not which pipeline ran the extract.
 
 This is intentional: a `shiphero_dev` and a `shiphero_prod` config pointing at the same ShipHero account will both see the same incremental cursor advance. Two pipelines that need independent state should bind to different source folders (a project-local fork is the usual way).
+
+**Full-refresh interaction.** Because state is shared across configs, the §3.1 `mode: full_refresh` rule is load-bearing: a full-refresh run does NOT read, advance, or reset the shared cursor row. A `shiphero_dev` config running a single stream as full_refresh leaves `shiphero_prod`'s cursor intact. To actually clear state, use `dtex state reset <stream>` — that's the explicit operation.
+
+The same rule applies to the run-wide CLI `--full-refresh` flag: it ignores the cursor for this invocation without touching `_dtex_state`. Operators who actually want to start over should reach for `dtex state reset`, not `--full-refresh`.
 
 ## 7. Discovery and lookup
 

@@ -12,6 +12,27 @@ For what is *planned* — versus what has shipped — see
 
 ### Added
 
+- **Baked `stripe_sigma` source connector (SQL-as-stream).** The
+  query-as-stream counterpart to the existing resource-as-stream `stripe`
+  connector: each stream is one Stripe Sigma SQL query, submitted via the
+  async Query Run API (`POST /v2/data/reporting/query_runs`), polled to
+  completion, then downloaded as CSV and yielded as batches of dicts. Ships
+  three example streams (`charges_daily`, `subscriptions_active`,
+  `invoices_paid`) under `dtex/sources/stripe_sigma/`. Auth via the
+  `STRIPE_SIGMA_API_KEY` env var by default (any resolver-backed `secret://`
+  ref works in a profile).
+
+  The CSV result is downloaded to a temp file in one continuous pass rather
+  than parsed straight off the socket: the engine pulls batches lazily and
+  loads each into the destination before requesting the next, so socket-side
+  parsing would leave the download connection idle for the duration of every
+  load job and Stripe's CDN would close it mid-body on large results
+  (`ChunkedEncodingError: IncompleteRead`). Draining the socket up front
+  decouples download speed from load pace; a dropped download retries from
+  scratch up to `max_retries` with the same exponential backoff as the
+  submit/poll calls, and is duplicate-free for `replace`/`merge` streams since
+  no rows are yielded until the full CSV is in hand.
+
 - **`dtex init --with <destination>`** scaffolds a starter `profiles.yml`
   block for a baked destination alongside the always-scaffolded `duckdb`
   block. Repeatable: `dtex init --with bigquery --with duckdb`. Unknown
@@ -25,6 +46,45 @@ For what is *planned* — versus what has shipped — see
   includes an empty `credentials_path:` field, which was confusing — the
   oauth path has no path to set.
 
+- **Mandatory per-pipeline `streams:` block, with per-stream overrides.**
+  Every config now declares which streams the pipeline runs and how.
+  Two shapes: `streams: all` (the explicit catch-all opt-in — runs every
+  stream the source declares) and `streams: {<stream_name>: {...}}` (an
+  explicit mapping with optional per-stream `mode`, `since`, `params`,
+  and `partition` overrides). A typo in a stream name is a hard error
+  listing the valid streams; setting `mode: incremental` on a stream
+  whose source declares no cursor is a hard error. The block subsumes
+  the prior `select:` and `partition_overrides:` keys — both of which
+  are now removed (see *Removed* below).
+
+  The new design recognizes that a config is the pipeline blueprint, not
+  the schema. Stream identity (cursor, primary key, schema, extraction
+  logic) stays in `register.yaml`; the per-pipeline shape (which streams,
+  what mode, what params, what partition) lives in the config. This lets
+  a `dev` config run one stream as `full_refresh` while a sibling `prod`
+  config keeps it incremental, without forking the source. See
+  [docs/12 §3.1](docs/12-configs.md) for the full surface and the
+  per-stream knob reference.
+
+- **Per-stream source-param overlay (precedence layer 4).** A config's
+  `streams[<name>].params:` block sits between the config's top-level
+  `params:` (layer 3) and the env-var layer (layer 5). Lets one stream
+  use a different `page_size` than the others without bumping the
+  default for the whole pipeline.
+
+- **Bundled Claude skills + `dtex skills install` + first-run hint.**
+  Three skill files ship inside the wheel at `dtex/skills/*.md` —
+  `dtex-write-config.md`, `dtex-write-connector.md`, and
+  `dtex-debug.md`. `dtex skills install [DIRECTORY]` copies them into
+  `<DIRECTORY>/.claude/skills/dtex/` (default DIRECTORY is `.`), with
+  `--force` for re-installs. Any `dtex` command run inside a project
+  that lacks installed skills AND hasn't yet been prompted emits a
+  single-line stderr hint pointing at the install command — fires once,
+  suppressed by a `.dtex/skills-prompted` marker, and silenced
+  entirely for `dtex skills *` invocations. Skills are discovered at
+  runtime via `importlib.resources`, so the mechanism works for
+  wheels, sdists, editable installs, and zipped envs.
+
 ### Changed
 
 - **BigQuery destination: `auth_type` is authoritative.** With
@@ -32,6 +92,48 @@ For what is *planned* — versus what has shipped — see
   always wins). With `auth_type=service_account` a missing
   `credentials_path` fails with a clear message at `open()` time. An
   unknown `auth_type` fails listing the valid options.
+
+- **`--full-refresh` no longer resets `_dtex_state`.** The new rule
+  (docs/12 §3.1): a full-refresh run does NOT read, advance, or
+  reset the cursor row. The prior cursor stays intact, so a sibling
+  incremental config sharing this source keeps its cursor. To actually
+  clear state, use `dtex state reset <stream>` — that operation is
+  unchanged. This is technically a behavior change to an existing
+  flag; it matches the new per-stream `mode: full_refresh` semantics
+  and was the only safe default given that state is source-keyed
+  (multiple configs share the same `_dtex_state` row).
+
+- **`--select` narrows the config's `streams:` block.** Previously it
+  *replaced* the config's `select:` list. Now `--select` is an
+  intersection: a `--select` name that isn't in the config's
+  `streams:` block is a hard error listing the in-scope names. You
+  can't materialize a stream the pipeline blueprint doesn't list.
+
+- **`dtex list` shows a `STREAMS` column** (was `SELECT`).
+  `(all)` for `streams: all`, comma-separated names for an explicit
+  mapping.
+
+- **Scaffolded config templates teach the new schema.** Both
+  `_CONFIG_YML` (`dtex new config`) and `_EXAMPLE_CONFIG_YML` (the
+  example seeded by `dtex init`) now declare `streams:` explicitly,
+  with commented examples of the per-stream override forms.
+  `dtex new source` adds a comment to the source template noting
+  that the example config references streams via `streams: all`,
+  so renaming streams is safe.
+
+- **New acceptance test `test_scaffold_chain_validates_clean`** runs
+  `init` → `new source` → `new config` → `validate` end-to-end and
+  asserts exit-zero. Catches the class of bugs where a template
+  drifts from the parser's schema.
+
+### Removed
+
+- **`select:` config key.** Subsumed by `streams:` (a listed stream
+  is automatically selected). Parsing a config with `select:` fails
+  with a friendly error pointing at the new location.
+
+- **`partition_overrides:` config key.** Subsumed by
+  `streams[<name>].partition`. Same friendly redirect on parse.
 
 ## [0.1.5] — 2026-06-01
 
