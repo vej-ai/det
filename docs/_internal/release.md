@@ -120,7 +120,19 @@ If anything above fails, **fix it first**. Don't continue to Phase 2.
    - Add a `[X.Y.Z]: https://github.com/vej-ai/dtex/releases/tag/vX.Y.Z`
      link reference near the bottom.
    - Update the `[Unreleased]` link reference to point at `vX.Y.Z...HEAD`.
-3. Re-run **Phase 1** (the pre-flight) — the wheel was built with the old
+3. **Skills maintenance contract (streams-redesign-plan §11.5):** if
+   this release changes the config schema, the connector contract, or
+   the destination contract, the matching bundled skill file
+   (`dtex/skills/dtex-write-config.md`,
+   `dtex/skills/dtex-write-connector.md`,
+   or `dtex/skills/dtex-debug.md`) **must be updated in the same
+   release**. The skills ship inside the wheel and teach the schema —
+   a release that changes the schema without updating the skills will
+   teach Claude the old shape until the next release. Verify by
+   diffing `dtex/types.py`, `dtex/registry.py`, and
+   `dtex/destinations/*/destination.py` against the prior tag; any
+   schema-relevant diff implies a skill-file diff.
+4. Re-run **Phase 1** (the pre-flight) — the wheel was built with the old
    version; rebuild and re-check.
 
 ### Phase 3 — Commit + push the release prep

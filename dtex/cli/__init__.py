@@ -66,6 +66,7 @@ from dtex.cli._scaffold import (
     scaffold_source,
 )
 from dtex.cli._secrets import check_project as _check_secrets_project
+from dtex.cli import _skills
 from dtex.cli._state import StateError, list_state, reset_state
 from dtex.engine import ConfigError, DiscoveryError, EngineError
 from dtex.engine import config as cfg
@@ -131,6 +132,13 @@ def cli() -> None:
     Move data from a source into a destination, and nothing more. Run
     ``dtex <command> --help`` for command-specific options.
     """
+    # First-run hint: if we're invoked inside a dtex project that hasn't
+    # had the bundled Claude skills installed AND hasn't yet been prompted,
+    # drop a single-line hint on stderr. The hint is non-interactive and
+    # fires at most once per project (a `.dtex/skills-prompted` marker
+    # suppresses repeats). Suppressed entirely for `dtex skills *` so
+    # running `install` doesn't print "go run install" right before it.
+    _maybe_emit_skills_hint()
 
 
 # ---------------------------------------------------------------------------
@@ -1149,6 +1157,147 @@ def runs_show_cmd(
             if event_color:
                 rendered = click.style(rendered, fg=event_color)
         click.echo(rendered)
+
+
+# ---------------------------------------------------------------------------
+# skills — bundled Claude skills + first-run hint
+# ---------------------------------------------------------------------------
+
+
+def _maybe_emit_skills_hint() -> None:
+    """Print a one-line hint about ``dtex skills install`` — at most once per project.
+
+    Fires when ALL of the following are true:
+      * the current working directory is inside a dtex project
+        (a ``dtex_project.yml`` exists in cwd or any parent),
+      * the project has no bundled skills installed yet
+        (``.claude/skills/dtex/*.md`` is absent / empty),
+      * the project has not yet been prompted
+        (no ``.dtex/skills-prompted`` marker),
+      * the current invocation is NOT a ``dtex skills *`` command
+        (telling someone to run ``skills install`` while they're already
+        running it would be obnoxious).
+
+    Side effect: writes the marker file so subsequent invocations are
+    silent. Per plan §11.3 (settled 2026-06-03) the hint is
+    non-interactive — it tells you the command, then gets out of the way.
+    """
+    # Suppress for `dtex skills *` itself. ``sys.argv`` is reliable here
+    # because Click hasn't dispatched yet (this runs in the group callback);
+    # any flag parsing in front of the subcommand would change argv[0]
+    # but never reorder a positional ``skills`` past it.
+    import sys as _sys
+
+    argv = _sys.argv[1:]
+    # Strip leading global flags like --version / --help; the first
+    # non-flag arg is the subcommand name.
+    for token in argv:
+        if token.startswith("-"):
+            continue
+        if token == "skills":
+            return
+        break
+
+    try:
+        project_root = _skills.find_dtex_project_root(Path.cwd())
+    except Exception:  # noqa: BLE001 — never fail the user's command for the hint
+        return
+    if project_root is None:
+        return
+    try:
+        if _skills.has_installed_skills(project_root):
+            return
+        if _skills.has_been_prompted(project_root):
+            return
+        click.echo(
+            click.style(
+                "dtex: install Claude skills for this project? "
+                "run `dtex skills install`",
+                fg="cyan",
+            ),
+            err=True,
+        )
+        _skills.mark_prompted(project_root)
+    except Exception:  # noqa: BLE001 — best-effort, never block the command
+        return
+
+
+@cli.group()
+def skills() -> None:
+    """Manage bundled Claude skills for a dtex project."""
+
+
+@skills.command(name="install")
+@click.argument(
+    "directory",
+    required=False,
+    default=".",
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite existing skill files instead of refusing.",
+)
+def skills_install(directory: Path, force: bool) -> None:
+    """Copy bundled Claude skills into DIRECTORY/.claude/skills/dtex/.
+
+    DIRECTORY defaults to the current directory. The skill files ship
+    inside the dtex package itself (no network call, no separate
+    download); ``dtex skills install`` copies them out of the package
+    into the user's project so Claude Code (or any other agent runtime
+    reading ``.claude/skills/``) picks them up automatically.
+
+    Refuses to overwrite an existing skill file unless ``--force`` is
+    passed.
+    """
+    try:
+        written = _skills.install_skills_into(directory, force=force)
+    except FileExistsError as exc:
+        _fail(str(exc), code=2)
+        return
+    # Also mark the project as prompted so the first-run hint stays
+    # quiet from now on (it would be redundant after a successful install).
+    project_root = _skills.find_dtex_project_root(directory.resolve())
+    if project_root is not None:
+        _skills.mark_prompted(project_root)
+    click.echo(
+        click.style(
+            f"installed {len(written)} skill(s) into "
+            f"{directory / _skills.DEFAULT_SKILLS_TARGET}",
+            fg="green",
+        )
+    )
+    for path in written:
+        click.echo(f"  {path.name}")
+
+
+@skills.command(name="list")
+@click.option(
+    "--project-dir",
+    "project_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Project root. Defaults to the current directory.",
+)
+def skills_list(project_dir: Path | None) -> None:
+    """Show which bundled skills ship with dtex and which are installed here."""
+    bundled = [name for name, _ in _skills.bundled_skill_files()]
+    target = (project_dir or Path(".")).resolve()
+    installed = {p.name for p in _skills.list_skills(target)}
+
+    click.echo(click.style("Bundled skills:", fg="cyan", bold=True))
+    if not bundled:
+        click.echo("  (none — this is a bug)")
+        return
+    for name in bundled:
+        mark = "✓" if name in installed else " "
+        click.echo(f"  [{mark}] {name}")
+    if not installed:
+        click.echo()
+        click.echo(
+            f"none installed in {target / _skills.DEFAULT_SKILLS_TARGET}; "
+            f"run `dtex skills install` to add them."
+        )
 
 
 # ---------------------------------------------------------------------------
