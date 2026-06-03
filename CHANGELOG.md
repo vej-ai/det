@@ -33,6 +33,16 @@ For what is *planned* — versus what has shipped — see
   submit/poll calls, and is duplicate-free for `replace`/`merge` streams since
   no rows are yielded until the full CSV is in hand.
 
+## [0.2.0] — 2026-06-03
+
+A breaking release. The config schema gained a mandatory `streams:` block
+that subsumes the prior `select:` and `partition_overrides:` keys (both
+hard-removed). `--full-refresh` no longer resets state. Every existing
+config needs a `streams:` line — `streams: all` matches the prior
+default behavior.
+
+### Added
+
 - **`dtex init --with <destination>`** scaffolds a starter `profiles.yml`
   block for a baked destination alongside the always-scaffolded `duckdb`
   block. Repeatable: `dtex init --with bigquery --with duckdb`. Unknown
@@ -63,8 +73,8 @@ For what is *planned* — versus what has shipped — see
   what mode, what params, what partition) lives in the config. This lets
   a `dev` config run one stream as `full_refresh` while a sibling `prod`
   config keeps it incremental, without forking the source. See
-  [docs/12 §3.1](docs/12-configs.md) for the full surface and the
-  per-stream knob reference.
+  [docs/12 §3.1](https://github.com/vej-ai/dtex/blob/main/docs/12-configs.md)
+  for the full surface and the per-stream knob reference.
 
 - **Per-stream source-param overlay (precedence layer 4).** A config's
   `streams[<name>].params:` block sits between the config's top-level
@@ -277,7 +287,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/vej-ai/dtex/releases/tag/v0.2.0
 [0.1.5]: https://github.com/vej-ai/dtex/releases/tag/v0.1.5
 [0.1.4]: https://github.com/vej-ai/dtex/releases/tag/v0.1.4
 [0.1.3]: https://github.com/vej-ai/dtex/releases/tag/v0.1.3
