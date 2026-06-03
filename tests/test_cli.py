@@ -627,6 +627,29 @@ def test_init_scaffolds_runnable_project(runner: CliRunner, tmp_path: Path) -> N
     assert result.exit_code == 0, _show(result)
 
 
+def test_scaffold_chain_validates_clean(runner: CliRunner, tmp_path: Path) -> None:
+    """init → new source → new config → validate exits 0 without any edits.
+
+    This is the streams-redesign-plan §4.3.4 acceptance test. If a template
+    drifts from the schema (e.g. a config scaffold that forgets to declare
+    `streams:`, or a source scaffold whose stream name conflicts with the
+    seeded example config), this chain breaks and the test catches it.
+    """
+    project = tmp_path / "p"
+    init_result = runner.invoke(cli, ["init", str(project)])
+    assert init_result.exit_code == 0, _show(init_result)
+    new_src = runner.invoke(
+        cli, ["new", "source", "my_source", "--project-dir", str(project)]
+    )
+    assert new_src.exit_code == 0, _show(new_src)
+    new_cfg = runner.invoke(
+        cli, ["new", "config", "my_pipeline", "--project-dir", str(project)]
+    )
+    assert new_cfg.exit_code == 0, _show(new_cfg)
+    validate = runner.invoke(cli, ["validate", "--project-dir", str(project)])
+    assert validate.exit_code == 0, _show(validate)
+
+
 def test_init_default_profiles_has_only_duckdb(
     runner: CliRunner, tmp_path: Path
 ) -> None:

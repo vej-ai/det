@@ -167,13 +167,15 @@ def cli() -> None:
     "select",
     multiple=True,
     metavar="STREAM",
-    help="Replace the config's `select:` with these streams (repeatable / "
-    "comma-separated).",
+    help="Narrow this run to a subset of the config's `streams:` block "
+    "(repeatable / comma-separated). A name not in `streams:` errors.",
 )
 @click.option(
     "--full-refresh",
     is_flag=True,
-    help="Ignore prior incremental state; re-extract every stream from the start.",
+    help="Run every stream as full_refresh this invocation. Does not "
+    "touch _dtex_state — the prior cursor row stays intact for sibling "
+    "configs sharing this source. Use `dtex state reset` to actually clear state.",
 )
 @click.option(
     "--project-dir",

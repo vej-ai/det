@@ -227,6 +227,9 @@ tags: []
 
 streams:
   # One output table. The matching @stream function lives in source.py.
+  # Rename or replace streams freely - the example config references this
+  # source via `streams: all`, so a fresh project validates regardless of
+  # what you call your streams.
   - name: example
     table: {name}_example
     write_disposition: append
@@ -359,8 +362,8 @@ def close(conn: object) -> None:
 _CONFIG_YML = """\
 # {name} - a dtex pipeline config (docs/12).
 #
-# One config = one source + one destination + one target + the params that
-# customize both ends. Run with `dtex run -p {name}`.
+# One config = one source + one destination + one target + the streams to
+# run + the params that customize both ends. Run with `dtex run -p {name}`.
 name: {name}
 source: my_source            # rename me to a source under sources/
 destination: duckdb
@@ -373,8 +376,24 @@ params: {{}}
 # destination's profiles.yml row.
 destination_params: {{}}
 
-# Optional: limit to a subset of the source's streams. Empty = all.
-# select: [items, events]
+# Streams are explicit and required (docs/12 §2). Two shapes:
+#
+# 1) `streams: all` - the catch-all opt-in. Runs every stream the source
+#    declares. Use this when you want everything and want changes to the
+#    source's stream list to flow through automatically.
+#
+# 2) A mapping `{{stream_name: per-stream-overrides}}`. Per-stream knobs:
+#      mode: incremental | full_refresh   # this run's mode for this stream
+#      since: <cursor floor>              # one-shot incremental floor
+#      params: {{...}}                      # per-stream source-param overrides
+#      partition: <short string or long form>  # destination partition spec
+streams: all
+# streams:
+#   my_stream: {{}}                # include with defaults
+#   other_stream:
+#     mode: full_refresh           # don't touch shared _dtex_state cursor
+#     params:
+#       page_size: 100             # only this stream uses page_size=100
 
 # Optional: cron expression surfaced to an external scheduler. The engine
 # itself never acts on this (docs/03 §2.6).
