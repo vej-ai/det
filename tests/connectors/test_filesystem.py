@@ -508,6 +508,7 @@ def test_end_to_end_run_lands_inferred_rows_in_duckdb(tmp_path: Path) -> None:
             source: filesystem
             destination: duckdb
             target: dev
+            streams: all
             """
         )
     )

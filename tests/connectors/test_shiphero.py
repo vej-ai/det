@@ -714,6 +714,7 @@ def shiphero_project(tmp_path: Path) -> Path:
             source: shiphero
             destination: duckdb
             target: dev
+            streams: all
             """
         )
     )

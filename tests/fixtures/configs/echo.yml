@@ -13,10 +13,12 @@ configs:
     source: echo
     destination: duckdb
     target: dev
+    streams: all
     tags: [test, hourly]
 
   - name: echo_prod
     source: echo
     destination: duckdb
     target: prod
+    streams: all
     tags: [test, daily]

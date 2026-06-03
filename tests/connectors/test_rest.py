@@ -689,7 +689,7 @@ def test_end_to_end_run_lands_rows(
     )
     (project_dir / "configs").mkdir()
     (project_dir / "configs" / "rest_dev.yml").write_text(
-        "name: rest_dev\nsource: rest\ndestination: duckdb\ntarget: dev\n"
+        "name: rest_dev\nsource: rest\ndestination: duckdb\ntarget: dev\nstreams: all\n"
     )
 
     db_path = str(tmp_path / "warehouse.duckdb")
@@ -737,7 +737,7 @@ def test_secret_resolves_from_env(
     )
     (project_dir / "configs").mkdir()
     (project_dir / "configs" / "rest_dev.yml").write_text(
-        "name: rest_dev\nsource: rest\ndestination: duckdb\ntarget: dev\n"
+        "name: rest_dev\nsource: rest\ndestination: duckdb\ntarget: dev\nstreams: all\n"
     )
 
     # Path 1 — env set: the token reaches the wire as the bearer credential.

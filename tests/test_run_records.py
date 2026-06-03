@@ -232,6 +232,7 @@ def _write_breaking_stream_source(project: Path) -> None:
                 source: broken
                 destination: duckdb
                 target: dev
+                streams: all
             """
         ).strip()
         + "\n"
@@ -359,6 +360,7 @@ def test_destination_without_run_records_capability_still_writes_jsonl(
               - name: echo_tiny
                 source: echo
                 destination: tiny
+                streams: all
             """
         ).strip()
         + "\n"
@@ -462,6 +464,7 @@ def test_declaring_run_records_without_hook_fails_engine_error(project: Path) ->
               - name: echo_claims
                 source: echo
                 destination: claims_rr
+                streams: all
             """
         ).strip()
         + "\n"
@@ -540,6 +543,7 @@ def _install_secret_source(project: Path, secret_value: str) -> None:
                 source: echo_secret
                 destination: duckdb
                 target: dev
+                streams: all
             """
         ).strip()
         + "\n"
@@ -770,6 +774,7 @@ def test_write_run_record_failure_is_logged_not_raised(project: Path) -> None:
               - name: echo_breaks
                 source: echo
                 destination: breaks_rr
+                streams: all
             """
         ).strip()
         + "\n"

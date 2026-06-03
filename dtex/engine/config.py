@@ -606,20 +606,36 @@ def build_source_config(
     target_name: str,
     profiles: Profiles,
     overrides: Mapping[str, Any],
+    stream_name: str | None = None,
 ) -> Config:
     """Build the immutable :class:`Config` for a SOURCE connector — docs/03 §3, §6.
 
     Resolves the source's params through every precedence layer
     (:func:`resolve_params` — ``register.yaml`` defaults → project ``vars`` →
-    the pipeline's ``params:`` block → env → ``overrides``) and its secrets
-    through the two resolver forms (:func:`resolve_secrets`), producing the
-    single frozen :class:`Config` object the source body receives — params
-    readable as attributes, secrets by subscript (docs/03 §3).
+    the pipeline's ``params:`` block → **per-stream ``streams[name].params``**
+    → env → ``overrides``) and its secrets through the two resolver forms
+    (:func:`resolve_secrets`), producing the single frozen :class:`Config`
+    object the source body receives — params readable as attributes, secrets
+    by subscript (docs/03 §3).
+
+    When ``stream_name`` is supplied AND that stream has a non-empty
+    ``params:`` block under the config's ``streams:`` mapping, those values
+    overlay at precedence layer 4 (between the config's ``params`` and the
+    env layer). When ``stream_name`` is ``None`` (the pre-stream-loop call
+    in the runner) the per-stream layer is skipped — the resulting Config
+    is the "base" view shared by every stream.
     """
+    # Layer 3 base — the config's `params:` block.
+    config_layer: dict[str, Any] = dict(pipeline.params)
+    # Layer 4 — per-stream `streams[name].params` overlay (docs/12 §3.4).
+    if stream_name is not None:
+        stream_run = pipeline.streams.get(stream_name)
+        if stream_run is not None and stream_run.params:
+            config_layer.update(stream_run.params)
     params = resolve_params(
         manifest.params,
         project.vars,
-        pipeline.params,
+        config_layer,
         overrides,
         connector_name=manifest.name,
     )

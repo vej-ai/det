@@ -350,11 +350,13 @@ def test_run_tag_failure_exits_1_with_summary(
                 source: good
                 destination: duckdb
                 target: dev
+                streams: all
                 tags: [mixed]
               - name: bad_run
                 source: bad
                 destination: duckdb
                 target: dev
+                streams: all
                 tags: [mixed]
             """
         )
@@ -570,6 +572,7 @@ def test_validate_config_missing_source_fails(
             source: ghost_source
             destination: duckdb
             target: dev
+            streams: all
             """
         )
     )
@@ -1160,6 +1163,7 @@ def test_secrets_test_env_var_resolves(
             source: with_secret
             destination: duckdb
             target: dev
+            streams: all
             """
         ).strip()
     )
@@ -1220,6 +1224,7 @@ def test_secrets_test_missing_env_var_fails(
             source: with_missing
             destination: duckdb
             target: dev
+            streams: all
             """
         ).strip()
     )
@@ -1274,6 +1279,7 @@ def test_secrets_test_unknown_scheme_fails(
             source: with_url
             destination: duckdb
             target: dev
+            streams: all
             """
         ).strip()
     )
@@ -1345,6 +1351,7 @@ def test_secrets_test_secret_url_with_project_plugin(
             source: plugin_user
             destination: duckdb
             target: dev
+            streams: all
             """
         ).strip()
     )

@@ -118,17 +118,27 @@ def _write_config(
     """
     configs_dir = root / "configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
-    target_line = f"target: {target}\n" if target is not None else ""
-    (configs_dir / f"{name}.yml").write_text(
-        textwrap.dedent(
-            f"""\
-            name: {name}
-            source: {source}
-            destination: {destination}
-            {target_line}{extra_lines}
-            """
-        )
-    )
+    # Build the body line-by-line so dedent doesn't get confused by
+    # interpolated multi-line strings (which inject newlines mid-template
+    # and break the common-leading-whitespace detection).
+    lines = [
+        f"name: {name}",
+        f"source: {source}",
+        f"destination: {destination}",
+    ]
+    if target is not None:
+        lines.append(f"target: {target}")
+    # Default to `streams: all` so existing tests behave as they always did
+    # (run every stream the source declares). Tests that need explicit
+    # streams pass it via extra_lines.
+    if "streams:" not in extra_lines:
+        lines.append("streams: all")
+    body = "\n".join(lines) + "\n"
+    if extra_lines:
+        body += textwrap.dedent(extra_lines).lstrip("\n")
+        if not body.endswith("\n"):
+            body += "\n"
+    (configs_dir / f"{name}.yml").write_text(body)
 
 
 def _write_source_clone(
@@ -1180,30 +1190,37 @@ def test_streamdef_is_incremental_flag() -> None:
 
 
 def test_pipeline_config_from_dict_minimal() -> None:
-    """PipelineConfig.from_dict accepts the three required keys."""
+    """PipelineConfig.from_dict accepts the four required keys."""
     pc = PipelineConfig.from_dict(
-        {"name": "p", "source": "s", "destination": "d"}
+        {"name": "p", "source": "s", "destination": "d", "streams": "all"}
     )
     assert pc.name == "p"
     assert pc.source == "s"
     assert pc.destination == "d"
     assert pc.target is None
     assert pc.params == {}
-    assert pc.select == ()
+    assert pc.all_streams is True
+    assert pc.streams == {}
 
 
 def test_pipeline_config_from_dict_rejects_unknown_key() -> None:
     """An unknown top-level key in a config is a hard error (typo guard)."""
     with pytest.raises(ValueError, match="unknown config key"):
         PipelineConfig.from_dict(
-            {"name": "p", "source": "s", "destination": "d", "tgt": "dev"}
+            {
+                "name": "p",
+                "source": "s",
+                "destination": "d",
+                "streams": "all",
+                "tgt": "dev",
+            }
         )
 
 
 def test_pipeline_config_from_dict_requires_source() -> None:
     """A config missing `source:` is rejected."""
     with pytest.raises(ValueError, match="source"):
-        PipelineConfig.from_dict({"name": "p", "destination": "d"})
+        PipelineConfig.from_dict({"name": "p", "destination": "d", "streams": "all"})
 
 
 def test_configs_discover_fixtures() -> None:
@@ -1250,12 +1267,24 @@ def _stream_def_for_partition_test(
 def _empty_pipeline(
     partition_overrides: dict[str, PartitionConfig] | None = None,
 ) -> PipelineConfig:
-    """A throwaway PipelineConfig — only partition_overrides matters here."""
+    """A throwaway PipelineConfig — only partition info matters here.
+
+    Translates the old `partition_overrides={stream: PartitionConfig}`
+    test API into the new `streams={stream: StreamRunConfig(partition=...)}`
+    shape so the existing partition resolver tests keep working.
+    """
+    from dtex.types import StreamRunConfig
+
+    streams: dict[str, StreamRunConfig] = {}
+    if partition_overrides:
+        for name, partition in partition_overrides.items():
+            streams[name] = StreamRunConfig(partition=partition)
     return PipelineConfig(
         name="p",
         source="src",
         destination="dst",
-        partition_overrides=partition_overrides or {},
+        streams=streams,
+        all_streams=not streams,  # empty streams → use the catch-all
     )
 
 
@@ -1517,11 +1546,12 @@ def test_partition_overrides_unknown_stream_name_fails_run(
             source: tiny
             destination: duckdb
             target: dev
-            partition_overrides:
+            streams:
               chrages:   # typo — the stream is `rows`, not `chrages`
-                field: x
-                type: time
-                granularity: day
+                partition:
+                  field: x
+                  type: time
+                  granularity: day
             """
         )
     )
@@ -1532,9 +1562,9 @@ def test_partition_overrides_unknown_stream_name_fails_run(
     )
     assert result.status.value == "failed"
     err = str(result.error)
-    assert "partition_overrides names stream(s)" in err
+    assert "streams names stream(s)" in err
     assert "chrages" in err
-    assert "known streams" in err
+    assert "valid streams" in err
     assert "rows" in err  # the actual stream name is listed
 
 
@@ -1686,6 +1716,7 @@ def _write_tagged_config(
             source: {source}
             destination: duckdb
             target: {target}
+            streams: all
             tags: {tags_yaml}
             """
         )
@@ -1907,6 +1938,7 @@ def _write_lockedfake_config(
             name: {name}
             source: {source}
             destination: lockedfake
+            streams: all
             tags: {tags_yaml}
             """
         )
@@ -2060,6 +2092,7 @@ def test_run_tag_threads_parallel_runs_faster_than_sequential(
                 name: cfg{n}
                 source: src{n}
                 destination: lockedfake_{n}
+                streams: all
                 tags: [parallel_speed]
                 """
             )
@@ -2292,6 +2325,7 @@ def test_run_tag_per_destination_cap_independent_destinations(
                 name: b{n}_run
                 source: b{n}
                 destination: otherfake
+                streams: all
                 tags: [independent]
                 """
             )

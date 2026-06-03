@@ -365,6 +365,7 @@ def _make_stripe_project(tmp_path: Path, base_url: str) -> Path:
             source: stripe
             destination: duckdb
             target: dev
+            streams: all
             """
         )
     )

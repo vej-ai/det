@@ -192,6 +192,10 @@ destination: duckdb
 target: dev
 params: {}
 destination_params: {}
+# Streams are explicit. `all` includes every stream the source declares;
+# replace it with a per-stream mapping to add overrides like
+# `mode: full_refresh`, `since:`, `params:`, or `partition:` (docs/12 §2-§3).
+streams: all
 """
 
 # --- shared marker file for connector folders -----------------------------

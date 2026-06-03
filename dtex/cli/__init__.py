@@ -461,20 +461,24 @@ def list_components(
             configs = [c for c in configs if tag_filter in c.tags]
         cfg_rows: list[list[str]] = []
         for c in configs:
+            if c.all_streams:
+                streams_display = "(all)"
+            else:
+                streams_display = ", ".join(c.streams) or "(none)"
             cfg_rows.append(
                 [
                     c.name,
                     c.source,
                     c.destination,
                     c.target or "-",
-                    ", ".join(c.select) or "(all)",
+                    streams_display,
                     ", ".join(c.tags) or "-",
                 ]
             )
         if cfg_rows:
             sections.append(
                 ("CONFIGS", render_table(
-                    ["NAME", "SOURCE", "DESTINATION", "TARGET", "SELECT", "TAGS"],
+                    ["NAME", "SOURCE", "DESTINATION", "TARGET", "STREAMS", "TAGS"],
                     cfg_rows,
                 ))
             )

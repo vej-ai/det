@@ -82,7 +82,9 @@ from dtex.types import (
     StateRecord,
     StreamDef,
     StreamMeta,
+    StreamMode,
     StreamResult,
+    StreamRunConfig,
     StreamStatus,
     TimeGranularity,
 )
@@ -198,6 +200,33 @@ def _check_strict_schema(stream: StreamDef, declared: Schema, first_batch: Batch
 _TIME_PARTITION_CURSOR_TYPES = frozenset({CursorType.TIMESTAMP, CursorType.DATE})
 
 
+def _resolve_stream_mode(
+    stream_def: StreamDef,
+    pipeline: PipelineConfig,
+    run_full_refresh: bool,
+) -> StreamMode:
+    """Resolve a stream's effective mode for this run — docs/12 §3.
+
+    Precedence chain (highest → lowest):
+
+    1. ``run_full_refresh`` (the CLI ``--full-refresh`` flag) — when set,
+       every stream this run is treated as full_refresh.
+    2. ``pipeline.streams[stream.name].mode`` — per-stream config override.
+    3. The stream's natural mode — incremental if the source declares an
+       ``incremental:`` block in register.yaml, full_refresh otherwise.
+
+    The §3.1 state rule applies whenever the resolved mode is
+    ``FULL_REFRESH``: don't read the cursor, don't advance it, don't
+    reset it. Implemented in :func:`_run_one_stream`.
+    """
+    if run_full_refresh:
+        return StreamMode.FULL_REFRESH
+    stream_run = pipeline.streams.get(stream_def.name)
+    if stream_run is not None and stream_run.mode is not None:
+        return stream_run.mode
+    return StreamMode.INCREMENTAL if stream_def.is_incremental else StreamMode.FULL_REFRESH
+
+
 def _resolve_partition(
     stream_def: StreamDef,
     pipeline: PipelineConfig,
@@ -208,9 +237,10 @@ def _resolve_partition(
 
     Precedence chain (highest → lowest):
 
-    1. ``pipeline.partition_overrides[stream_name]`` — per-config explicit
-       override. Always wins; always honored verbatim. A user adding this
-       block has made an explicit decision.
+    1. ``pipeline.streams[name].partition`` — per-stream config override
+       (the redesigned home of what used to be ``partition_overrides``).
+       Always wins; always honored verbatim. A user adding this block
+       has made an explicit decision.
     2. ``stream_def.partition_by`` — the source's ``register.yaml``
        declaration. Either a long-form :class:`PartitionConfig` (honored
        verbatim) or a short-form string column name (promoted to TIME+DAY,
@@ -242,13 +272,15 @@ def _resolve_partition(
     # to switch to the long form. Long-form declarations and per-config
     # overrides are *never* degraded; those are explicit decisions.
     """
-    # 1. Per-config override wins (always honored verbatim — long form only).
-    if stream_def.name in pipeline.partition_overrides:
-        chosen = pipeline.partition_overrides[stream_def.name]
+    # 1. Per-stream config override wins (always honored verbatim — long form only).
+    stream_run = pipeline.streams.get(stream_def.name)
+    if stream_run is not None and stream_run.partition is not None:
+        chosen = stream_run.partition
         log.info(
-            "stream %r: partition = %s (from pipeline.partition_overrides)",
+            "stream %r: partition = %s (from pipeline.streams[%r].partition)",
             stream_def.name,
             chosen.describe(),
+            stream_def.name,
         )
         return chosen
 
@@ -316,38 +348,59 @@ def _resolve_partition(
     return None
 
 
-def _validate_partition_overrides_stream_names(
+def _validate_streams_block(
     pipeline: PipelineConfig, source: disc.LoadedConnector
 ) -> None:
-    """Reject a ``partition_overrides:`` block keyed on a non-existent stream.
+    """Reject a ``streams:`` block that names a stream the source does not declare.
 
     Raised here (not in the parser) because the parser does not know which
     source a config will bind to. Same shape as the codebase's other
     "unknown name → list known names" errors so the typo is debuggable from
     the message alone.
 
+    Additionally checks the §3.2 rule: ``mode: incremental`` on a stream
+    that has no ``incremental:`` block in its register.yaml is a hard error
+    — the stream has no cursor field to advance.
+
     # NOTE: design decision — the strongest long-run answer to "what happens
-    # when partition_overrides names a stream that doesn't exist?" is a hard
-    # error. Silently ignoring would let a typo (``chrages:`` for
-    # ``charges:``) ship to production with the original partition spec
-    # quietly winning, which is exactly the failure mode partition_overrides
-    # exists to prevent. Hard error here matches:
+    # when streams names a stream that doesn't exist?" is a hard error.
+    # Silently ignoring would let a typo (``chrages:`` for ``charges:``)
+    # ship to production with the original partition spec / mode quietly
+    # winning, which is exactly the failure mode this block exists to
+    # prevent. Hard error here matches:
     #   * StreamDef.__post_init__ rejecting unknown stream keys;
     #   * PipelineConfig.from_dict rejecting unknown top-level keys;
     #   * configs.load_config listing known configs on a typo.
     """
-    if not pipeline.partition_overrides:
+    if pipeline.all_streams:
+        # `streams: all` is the catch-all opt-in — no per-name validation
+        # needed (the runner expands against source.manifest.streams).
         return
-    known_streams = {s.name for s in source.manifest.streams}
-    unknown = sorted(set(pipeline.partition_overrides) - known_streams)
-    if not unknown:
+    if not pipeline.streams:
+        # Cannot happen — the parser enforces non-empty. Defensive guard.
         return
-    raise EngineError(
-        f"config {pipeline.name!r}: partition_overrides names stream(s) that "
-        f"do not exist on source {pipeline.source!r}: "
-        f"{', '.join(repr(s) for s in unknown)}; known streams: "
-        f"{', '.join(repr(s) for s in sorted(known_streams)) or '(none)'}"
-    )
+    streams_by_name = {s.name: s for s in source.manifest.streams}
+    unknown = sorted(set(pipeline.streams) - set(streams_by_name))
+    if unknown:
+        raise EngineError(
+            f"config {pipeline.name!r}: streams names stream(s) that do not "
+            f"exist on source {pipeline.source!r}: "
+            f"{', '.join(repr(s) for s in unknown)}; valid streams: "
+            f"{', '.join(repr(s) for s in sorted(streams_by_name)) or '(none)'}"
+        )
+    # Per-stream mode coherence — mode=incremental requires the source to
+    # declare a cursor (an `incremental:` block in register.yaml). The
+    # opposite (mode=full_refresh on an incremental-capable stream) is
+    # always allowed — that's the §3.1 escape hatch.
+    for stream_name, stream_run in pipeline.streams.items():
+        if stream_run.mode is StreamMode.INCREMENTAL:
+            stream_def = streams_by_name[stream_name]
+            if not stream_def.is_incremental:
+                raise EngineError(
+                    f"config {pipeline.name!r}: stream {stream_name!r} has no "
+                    f"incremental cursor in source {pipeline.source!r}'s "
+                    f"register.yaml; cannot set mode=incremental"
+                )
 
 
 def _short_form_compatible(
@@ -467,6 +520,7 @@ def _run_one_stream(
     prior: StateRecord | None,
     log: Any,
     run_log: RunLog | None = None,
+    stream_config_override: Any = None,
 ) -> StreamResult:
     """Run one stream end to end — docs/02 §Run lifecycle step 5 (a–d).
 
@@ -480,24 +534,55 @@ def _run_one_stream(
         raise EngineError(f"stream {stream_def.name!r} has no registered @stream function")
 
     # -- 5a: cursor (incremental streams only) ------------------------------
+    # The effective mode is resolved per stream — CLI --full-refresh forces
+    # FULL_REFRESH; otherwise pipeline.streams[name].mode wins; else the
+    # stream's natural mode (incremental if the source declares a cursor).
+    effective_mode = _resolve_stream_mode(
+        stream_def, pipeline, run_full_refresh=run_config.full_refresh
+    )
+    is_full_refresh_stream = effective_mode is StreamMode.FULL_REFRESH
+
     cursor: Cursor | None = None
     cursor_before: Any = None
     if stream_def.is_incremental:
         inc = stream_def.incremental
         assert inc is not None
-        seed = _seed_value(prior, inc.cursor_type, inc.initial_value)
-        cursor_before = None if run_config.full_refresh else seed
+        # §3.1: when this stream runs as FULL_REFRESH, the engine does NOT
+        # read the prior cursor row. The seed comes from the source's
+        # `initial_value` (or a config-supplied `since:` override).
+        # When INCREMENTAL, seed from prior state as usual.
+        stream_run = pipeline.streams.get(stream_def.name) or StreamRunConfig()
+        if is_full_refresh_stream:
+            seed = (
+                stream_run.since
+                if stream_run.since is not None
+                else inc.initial_value
+            )
+        elif stream_run.since is not None:
+            # §3.3: explicit `since:` replaces the seed for this run only
+            # (no max with prior). Lets an operator say "re-pull from here
+            # just this once" without mutating _dtex_state.
+            seed = stream_run.since
+        else:
+            seed = _seed_value(prior, inc.cursor_type, inc.initial_value)
+        cursor_before = None if is_full_refresh_stream else seed
         cursor = Cursor(
             cursor_field=inc.cursor_field,
             cursor_type=inc.cursor_type,
             start_value=seed,
-            is_full_refresh=run_config.full_refresh,
+            is_full_refresh=is_full_refresh_stream,
         )
 
     state = State(prior.state_blob if prior is not None else None)
 
+    # Per-stream `streams[name].params` overlay (docs/12 §3.4): when the
+    # caller pre-built a stream-specific Config (the runner does this for
+    # any stream with a non-empty per-stream params block), use it instead
+    # of the run-wide source_config. The base Config still wins for every
+    # other stream — no overhead for the common case.
+    stream_config = stream_config_override or run_config.config
     available: dict[str, Any] = {
-        "config": run_config.config,
+        "config": stream_config,
         "state": state,
         "log": log,
     }
@@ -577,20 +662,29 @@ def _run_one_stream(
         if cursor is not None and cursor.observed_max is not None:
             cursor_after = cursor.observed_max
 
-        record = StateRecord(
-            connector=run_config.connector,
-            stream=stream_def.name,
-            cursor_value=cursor_after,
-            cursor_type=(
-                stream_def.incremental.cursor_type
-                if stream_def.incremental is not None
-                else None
-            ),
-            state_blob=state.to_dict(),
-            last_run_id=run_config.run_id,
-            rows_total=(prior.rows_total if prior is not None else 0) + rows_loaded,
-        )
-        hooks["commit_state"](conn, run_config.run_id, [record])
+        # §3.1 state rule: when an INCREMENTAL-capable stream runs as
+        # FULL_REFRESH this invocation, the engine does NOT write
+        # _dtex_state. The prior cursor row (if any) stays intact, so a
+        # sibling incremental config sharing this source keeps its cursor.
+        # Streams that are naturally non-incremental (no cursor at all)
+        # still write state — _dtex_state also tracks rows_total /
+        # last_run_id for those, which is operator-visible audit info.
+        skip_state = is_full_refresh_stream and stream_def.is_incremental
+        if not skip_state:
+            record = StateRecord(
+                connector=run_config.connector,
+                stream=stream_def.name,
+                cursor_value=cursor_after,
+                cursor_type=(
+                    stream_def.incremental.cursor_type
+                    if stream_def.incremental is not None
+                    else None
+                ),
+                state_blob=state.to_dict(),
+                last_run_id=run_config.run_id,
+                rows_total=(prior.rows_total if prior is not None else 0) + rows_loaded,
+            )
+            hooks["commit_state"](conn, run_config.run_id, [record])
 
     if run_log is not None:
         run_log.emit(
@@ -1265,15 +1359,17 @@ def run(
             pipeline.destination, project_root, list(project.destination_paths)
         )
 
-        # Validate that every partition_overrides key names an actual stream
-        # on the resolved source. The parser layer (PipelineConfig.from_dict)
-        # cannot do this — it doesn't know which source the config will bind
-        # to — so the engine does it here, as soon as both sides are known.
-        # A typo'd stream name in partition_overrides is silently ignored
-        # otherwise (the per-stream lookup just never hits), and that is the
-        # "silent drop" pattern the rest of the codebase rejects (unknown
-        # YAML keys are hard errors, unknown configs list known names).
-        _validate_partition_overrides_stream_names(pipeline, source)
+        # Validate that every `streams:` key names an actual stream on the
+        # resolved source, and that mode=incremental only appears on streams
+        # whose register.yaml declares a cursor. The parser layer
+        # (PipelineConfig.from_dict) cannot do either — it doesn't know
+        # which source the config will bind to — so the engine does it
+        # here, as soon as both sides are known. A typo'd stream name is
+        # silently ignored otherwise (the per-stream lookup just never
+        # hits), and that is the "silent
+        # drop" pattern the rest of the codebase rejects (unknown YAML keys
+        # are hard errors, unknown configs list known names).
+        _validate_streams_block(pipeline, source)
 
         # -- Stage 2: RESOLVE -----------------------------------------------
         source_config = cfg.build_source_config(
@@ -1302,8 +1398,31 @@ def run(
         redactor.add(source_config.secrets.values())
         redactor.add(dest_config.secrets.values())
 
-        # CLI --select REPLACES the config's select (not unions). docs/07.
-        effective_select = tuple(select) if select else pipeline.select
+        # The config's `streams:` block defines the in-scope stream set
+        # for this pipeline. CLI --select NARROWS further (intersection):
+        # only streams that are both in `streams:` AND in --select run.
+        # A --select name that isn't in `streams:` is a hard error — you
+        # can't materialize a stream the pipeline blueprint doesn't list.
+        # `streams: all` (pipeline.all_streams=True) expands to every
+        # stream the source declares.
+        if pipeline.all_streams:
+            in_scope = tuple(s.name for s in source.manifest.streams)
+        else:
+            in_scope = tuple(pipeline.streams)
+        if select:
+            requested = set(select)
+            in_scope_set = set(in_scope)
+            unknown = sorted(requested - in_scope_set)
+            if unknown:
+                raise EngineError(
+                    f"config {config_name!r}: --select names stream(s) not in "
+                    f"the config's 'streams:' block: "
+                    f"{', '.join(repr(s) for s in unknown)}; in-scope: "
+                    f"{', '.join(repr(s) for s in in_scope) or '(none)'}"
+                )
+            effective_select = tuple(s for s in in_scope if s in requested)
+        else:
+            effective_select = in_scope
 
         run_config = RunConfig(
             run_id=run_id,
@@ -1340,6 +1459,25 @@ def run(
             r.stream: r for r in prior_records
         }
 
+        # Pre-build a per-stream Config for any stream with a non-empty
+        # `streams[name].params` overlay (docs/12 §3.4 — precedence layer 4).
+        # Streams without an overlay share the base `source_config`; this
+        # keeps the overhead surgical (one extra Config build per stream
+        # that actually overrides something).
+        per_stream_config: dict[str, Any] = {}
+        for stream_name in (pipeline.streams or {}):
+            sr = pipeline.streams[stream_name]
+            if sr.params:
+                per_stream_config[stream_name] = cfg.build_source_config(
+                    source.manifest,
+                    project,
+                    pipeline,
+                    target_name=target_name,
+                    profiles=profiles,
+                    overrides=src_overrides,
+                    stream_name=stream_name,
+                )
+
         # -- Stage 5: RUN STREAMS (sequential, declared order) --------------
         stream_error: Exception | None = None
         for stream_def in source.manifest.streams:
@@ -1361,6 +1499,7 @@ def run(
                     state_by_stream.get(stream_def.name),
                     log,
                     run_log=run_log,
+                    stream_config_override=per_stream_config.get(stream_def.name),
                 )
             except Exception as exc:  # noqa: BLE001 — recorded, then re-raised.
                 streams.append(
