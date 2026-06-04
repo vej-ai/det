@@ -54,7 +54,7 @@ params. Run it with `dtex run -p <config>`. The library equivalent is
 **Sources:** `filesystem` (CSV/JSONL/Parquet from local, GCS, or S3),
 `rest` (paginated REST APIs — 4 pagination strategies, 4 auth modes),
 `postgres` (keyset pagination, no `OFFSET`), `shiphero` (GraphQL),
-`stripe` (resource-as-stream over the REST API).
+`stripe` (REST resource-as-stream + opt-in Sigma SQL-as-stream).
 
 **Destinations:** `duckdb` (zero-config dev default, all 5 capabilities) and
 `bigquery` (production warehouse — Parquet-staged via GCS + LOAD jobs,
@@ -68,6 +68,25 @@ per-destination caps.
 
 **Secret managers:** GCP Secret Manager, AWS Secrets Manager, HashiCorp
 Vault — each as an opt-in extra.
+
+## Bundled Claude skills
+
+dtex ships three [Claude](https://claude.com) skills inside the wheel:
+`dtex-write-config`, `dtex-write-connector`, `dtex-debug`. They teach
+Claude (or any other agent runtime that reads `.claude/skills/`) the
+post-streams-redesign config schema, the `@stream` decorator pattern, and
+the debugging playbook. Install them into a dtex project with:
+
+```sh
+dtex skills install         # copies into ./.claude/skills/dtex/
+```
+
+The first `dtex` command run inside a project that lacks installed skills
+prints a one-line hint (suppressed thereafter). Run `dtex skills list` to
+see which ship with this dtex version and which are installed locally.
+
+If you're not using Claude, just ignore the hint — the skills are inert
+markdown until installed.
 
 ## Documentation
 
