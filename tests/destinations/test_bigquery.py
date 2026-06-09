@@ -1437,6 +1437,79 @@ def test_load_failure_leaves_staging_blob_for_forensics(
     assert bucket._deletes == []
 
 
+def test_load_job_retries_on_requests_connection_error(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """A statusless network failure (ConnectionError) retries.
+
+    Regression for the long-running-backfill bug: a stale TCP socket in the
+    google-cloud-bigquery client raised a `requests.exceptions.ConnectionError`
+    after hundreds of sequential LOAD jobs. The exception has no `.code`
+    attribute, so the prior retry path treated it as non-retryable and
+    aborted the entire stream after 17+ minutes of internal google-api-core
+    retries. The fix: recognise concrete network-class exceptions as
+    retryable in addition to status-coded errors.
+    """
+    import requests as _requests
+
+    conn = _open_with_fakes(
+        bigquery_destination, retry_max_attempts=3, retry_backoff_seconds=0.0
+    )
+    hooks = _hooks(bigquery_destination)
+    hooks["ensure_schema"](conn, _events_meta())
+
+    attempts = {"n": 0}
+
+    def factory() -> _FakeJob:
+        attempts["n"] += 1
+        job = _FakeJob()
+        if attempts["n"] == 1:
+            job.raise_on_result = _requests.exceptions.ConnectionError(
+                "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+            )
+        return job
+
+    conn.client.bq.load_job_factory = factory
+
+    n = hooks["write_batch"](conn, [{"id": 1, "name": "a"}], _events_meta())
+    assert n == 1
+    assert attempts["n"] == 2  # one failed network attempt, one success
+
+
+def test_load_job_does_not_retry_on_keyerror(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """A statusless programming error (KeyError) still surfaces immediately.
+
+    The broadened retry must NOT swallow real bugs under a few backoff
+    cycles. Only concrete network-class exceptions are retryable; everything
+    else without an HTTP status code re-raises on the first attempt.
+    """
+    conn = _open_with_fakes(
+        bigquery_destination, retry_max_attempts=5, retry_backoff_seconds=0.0
+    )
+    hooks = _hooks(bigquery_destination)
+    hooks["ensure_schema"](conn, _events_meta())
+
+    attempts = {"n": 0}
+
+    def factory() -> _FakeJob:
+        attempts["n"] += 1
+        job = _FakeJob()
+        job.raise_on_result = KeyError("missing_field")
+        return job
+
+    conn.client.bq.load_job_factory = factory
+
+    with pytest.raises(KeyError):
+        hooks["write_batch"](conn, [{"id": 1, "name": "a"}], _events_meta())
+    assert attempts["n"] == 1  # zero retries on a non-network statusless error
+
+
 # --------------------------------------------------------------------------
 # State table — read/commit round trip + string cursor + upsert
 # --------------------------------------------------------------------------

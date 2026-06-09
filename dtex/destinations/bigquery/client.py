@@ -139,6 +139,56 @@ def _status_code(exc: BaseException) -> int | None:
     return None
 
 
+def _is_retryable_network_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is a transient network-layer failure worth retrying.
+
+    Long-running runs (a backfill against a high-row-count source like
+    RevenueCat that involves hundreds of sequential LOAD jobs) routinely
+    hit stale-TCP-socket failures: a keep-alive connection held open by
+    the google-cloud-bigquery client gets killed by an intermediary,
+    and the next reuse raises a ``requests.exceptions.ConnectionError``
+    (typically wrapping ``http.client.RemoteDisconnected``). These have
+    NO HTTP status code (the connection died before any response
+    arrived), so the status-code path in :func:`run_with_retries` would
+    re-raise them immediately. This helper recognises them so the
+    retry loop covers them.
+
+    Genuine programming errors (``KeyError``, ``TypeError``, etc.) are
+    NOT matched — they should surface immediately, not get masked under
+    a few backoff cycles. The match is by concrete network-exception
+    type, not "any statusless exception."
+    """
+    # requests-level connection/timeout failures (ConnectionError /
+    # Timeout / ConnectTimeout / ReadTimeout / ChunkedEncodingError /
+    # ProxyError / SSLError — all RequestException subclasses).
+    import requests  # noqa: PLC0415 — narrow runtime import
+
+    if isinstance(
+        exc,
+        (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ),
+    ):
+        return True
+
+    # google-api-core wraps some of the above under its own
+    # ServiceUnavailable / RetryError. These usually DO carry a 503
+    # status code so the existing path catches them, but RetryError
+    # (raised when google's own internal retry exhausts) sometimes
+    # surfaces without one.
+    try:
+        from google.api_core import exceptions as gapic_exc  # noqa: PLC0415
+
+        if isinstance(exc, gapic_exc.RetryError):
+            return True
+    except ImportError:  # pragma: no cover — google-api-core is installed
+        pass
+
+    return False
+
+
 def run_with_retries(
     operation: Any,
     *,
@@ -146,14 +196,16 @@ def run_with_retries(
     backoff_seconds: float,
     sleep: Any = time.sleep,
 ) -> Any:
-    """Run ``operation()`` with exponential backoff on transient BigQuery errors.
+    """Run ``operation()`` with exponential backoff on transient failures.
 
     ``operation`` is a zero-arg callable — typically a ``lambda: job.result(
     timeout=...)`` or a ``lambda: client.load_table_from_uri(...).result(
-    timeout=...)``. A retryable failure (status in :data:`_RETRYABLE_STATUS`)
-    sleeps ``backoff_seconds * 2**attempt`` and retries; a non-retryable
-    failure re-raises immediately. The ``sleep`` parameter is injectable so
-    unit tests can avoid real wall-clock delays.
+    timeout=...)``. A retryable failure (status in :data:`_RETRYABLE_STATUS`
+    OR a connection-class network error matched by
+    :func:`_is_retryable_network_error`) sleeps ``backoff_seconds * 2**attempt``
+    and retries; a non-retryable failure re-raises immediately. The
+    ``sleep`` parameter is injectable so unit tests can avoid real
+    wall-clock delays.
     """
     if max_attempts < 1:
         max_attempts = 1
@@ -163,16 +215,23 @@ def run_with_retries(
             return operation()
         except Exception as exc:  # noqa: BLE001 — re-raises non-retryable below
             status = _status_code(exc)
-            if status is None or status not in _RETRYABLE_STATUS:
+            retryable_by_status = status is not None and status in _RETRYABLE_STATUS
+            retryable_by_network = _is_retryable_network_error(exc)
+            if not (retryable_by_status or retryable_by_network):
                 raise
             last_exc = exc
             if attempt == max_attempts - 1:
                 raise
             delay = backoff_seconds * (2 ** attempt)
+            reason = (
+                f"status={status}"
+                if retryable_by_status
+                else f"network={type(exc).__name__}"
+            )
             logger.warning(
-                "BigQuery transient error (status=%s, attempt=%d/%d): %s — "
+                "BigQuery transient error (%s, attempt=%d/%d): %s — "
                 "retrying in %.1fs",
-                status,
+                reason,
                 attempt + 1,
                 max_attempts,
                 exc,
