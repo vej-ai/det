@@ -10,6 +10,43 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-06-09
+
+A patch release. BigQuery destination is now robust against the
+stale-TCP-socket failures that long-running runs (hundreds of
+sequential LOAD jobs over an hour-plus) routinely hit. Plus the
+README finally mentions the bundled Claude skills feature that has
+shipped since 0.2.0.
+
+### Fixed
+
+- **BigQuery destination: retry on statusless network failures.**
+  `run_with_retries` only retried when the exception carried an
+  HTTP status code in `_RETRYABLE_STATUS` (429/5xx). A connection-
+  level failure — `requests.exceptions.ConnectionError` wrapping
+  `http.client.RemoteDisconnected` from a stale keep-alive socket —
+  has no `.code` attribute, so the retry path re-raised on the
+  first attempt and the whole stream aborted. This was latent in
+  every prior release; it surfaced reliably during a 73-minute
+  RevenueCat customers backfill (300+ sequential MERGE-via-staging
+  LOAD jobs against a single connector instance). The fix adds
+  `_is_retryable_network_error` recognising concrete network-class
+  exception types (`ConnectionError`, `Timeout`,
+  `ChunkedEncodingError`, `google.api_core.exceptions.RetryError`);
+  programming errors without a status code (`KeyError`, `TypeError`)
+  still surface on the first attempt — the broadened catch is
+  precisely typed, not "any statusless exception."
+
+### Changed
+
+- **README mentions the bundled Claude skills feature.** Skills
+  shipped in 0.2.0 but were undiscoverable from the PyPI project
+  page or the GitHub repo README. Adds a "Bundled Claude skills"
+  section between the connector inventory and the docs link, plus
+  updates the stripe one-liner to mention the Sigma surface added
+  in 0.2.1. Documentation-only — no behavior change. Skills users
+  who installed 0.2.0/0.2.1 already have the feature working.
+
 ## [0.2.1] — 2026-06-04
 
 A patch release that lands Stripe Sigma SQL-as-stream extraction inside
@@ -317,7 +354,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/vej-ai/dtex/releases/tag/v0.2.2
 [0.2.1]: https://github.com/vej-ai/dtex/releases/tag/v0.2.1
 [0.2.0]: https://github.com/vej-ai/dtex/releases/tag/v0.2.0
 [0.1.5]: https://github.com/vej-ai/dtex/releases/tag/v0.1.5
