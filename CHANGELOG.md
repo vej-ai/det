@@ -10,6 +10,30 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-06-10
+
+Documentation-only patch release. The "Pre-baked connectors" section
+in the main README was getting unwieldy as more connectors shipped
+(6 sources, 2 destinations) — restructured to a compact table of
+per-connector READMEs so adding a new connector is one row, not a
+prose update. Also adds the missing DuckDB destination README.
+
+### Changed
+
+- **Main README "Pre-baked connectors" section restructured.** Replaced
+  the inline-prose list with two compact tables (sources + destinations)
+  linking to each connector's own README. Operator-friendly format for
+  "show me what's available + tell me more." Same authoring story for
+  every future connector — add one row, no prose churn.
+
+### Added
+
+- **DuckDB destination README.** Every other baked connector ships
+  with its own README; DuckDB was the only gap. Covers install +
+  config + the five capabilities + state/run-records semantics + the
+  concurrent-write caveat. No behavior change — DuckDB just gets the
+  same doc surface every other connector has.
+
 ## [0.2.3] — 2026-06-10
 
 A patch release adding `revenuecat` as a baked source connector — the v2
@@ -396,7 +420,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/vej-ai/dtex/releases/tag/v0.2.4
 [0.2.3]: https://github.com/vej-ai/dtex/releases/tag/v0.2.3
 [0.2.2]: https://github.com/vej-ai/dtex/releases/tag/v0.2.2
 [0.2.1]: https://github.com/vej-ai/dtex/releases/tag/v0.2.1

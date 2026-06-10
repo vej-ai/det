@@ -51,15 +51,26 @@ params. Run it with `dtex run -p <config>`. The library equivalent is
 
 ## Pre-baked connectors
 
-**Sources:** `filesystem` (CSV/JSONL/Parquet from local, GCS, or S3),
-`rest` (paginated REST APIs — 4 pagination strategies, 4 auth modes),
-`postgres` (keyset pagination, no `OFFSET`), `shiphero` (GraphQL),
-`stripe` (REST resource-as-stream + opt-in Sigma SQL-as-stream),
-`revenuecat` (v2 API — customers + subscriptions + daily chart metrics).
+Each connector ships with its own README — click through for the
+auth checklist, scope requirements, schema, and known limitations.
 
-**Destinations:** `duckdb` (zero-config dev default, all 5 capabilities) and
-`bigquery` (production warehouse — Parquet-staged via GCS + LOAD jobs,
-MERGE upserts, cursor-based partitioning).
+**Sources:**
+
+| Connector | What it does |
+|---|---|
+| [`filesystem`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/filesystem/README.md) | CSV / JSONL / Parquet from local, GCS, or S3 |
+| [`rest`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/rest/README.md) | Paginated REST APIs — 4 pagination strategies, 4 auth modes |
+| [`postgres`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/postgres/README.md) | Keyset pagination, no `OFFSET` |
+| [`shiphero`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/shiphero/README.md) | GraphQL |
+| [`stripe`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/stripe/README.md) | REST resource-as-stream + opt-in Sigma SQL-as-stream |
+| [`revenuecat`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/revenuecat/README.md) | v2 API — customers + subscriptions + daily chart metrics |
+
+**Destinations:**
+
+| Connector | What it does |
+|---|---|
+| [`duckdb`](https://github.com/vej-ai/dtex/blob/main/dtex/destinations/duckdb/README.md) | Zero-config dev default, all 5 capabilities |
+| [`bigquery`](https://github.com/vej-ai/dtex/blob/main/dtex/destinations/bigquery/README.md) | Production warehouse — Parquet-staged via GCS + LOAD jobs, MERGE upserts, cursor-based partitioning |
 
 **Engine:** per-stream commit + atomic transactions (rollback on failure),
 state in the destination's `_dtex_state` table, run records in `_dtex_runs`,
