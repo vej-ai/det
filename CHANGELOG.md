@@ -10,6 +10,48 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-06-10
+
+A patch release adding `revenuecat` as a baked source connector — the v2
+API across customers, subscriptions, and daily chart metrics. The
+metrics_daily stream uses RC's own `incomplete=true` flag to handle the
+partial-today caveat without bespoke lookback heuristics.
+
+### Added
+
+- **Baked `revenuecat` source connector for the v2 API.** Three streams:
+  - **`customers`** — every customer in the project. NON-incremental:
+    RC v2 has no server-side date filter on /customers (verified against
+    the docs + airbyte issue 70315 + RC community forum). Every run
+    paginates the full customer list. `write_disposition: merge` on `id`
+    makes re-pulls upsert idempotently. For a ~200k-customer account
+    expect ~70 minutes wall at the default page_size against RC's
+    480-req/min Customer Information rate limit.
+  - **`subscriptions`** — per-customer fan-out: RC has no project-level
+    /subscriptions endpoint, only /customers/{id}/subscriptions. O(N+1)
+    HTTP calls per run for N customers.
+  - **`metrics_daily`** — RC v2's Charts API takes server-side
+    `start_date`/`end_date` filters and tags per-day values with
+    `incomplete=true` when finalizing. Long-format output
+    (`cohort_date × chart_name × measure_name`) — adding a new chart
+    needs zero schema migration. The cursor advances only past days
+    RC marked complete, so partial-today re-pulls cleanly on the
+    next run with the corrected (final) value.
+
+  Default charts are `revenue,mrr,actives,trials` — the four that
+  return the standard `{cohort, incomplete, measure, value}` shape.
+  `cohort_explorer` and `prediction_explorer` return a different shape
+  and would break the flattener; they're excluded.
+
+  Auth via the `REVENUECAT_API_KEY` env var by default (any
+  resolver-backed `secret://` ref works in a profile). The client uses
+  a bounded `(10s connect, 60s read)` timeout, retries on
+  `requests.exceptions.RequestException` family + 5xx + 429 (all
+  capped by `max_retries` — the 429 path explicitly bounded to avoid
+  the infinite-loop hang the prior project-local version had).
+
+  Verified live: 195,200-customer backfill, ~71 min wall, clean run.
+
 ## [0.2.2] — 2026-06-09
 
 A patch release. BigQuery destination is now robust against the
@@ -354,7 +396,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/vej-ai/dtex/releases/tag/v0.2.3
 [0.2.2]: https://github.com/vej-ai/dtex/releases/tag/v0.2.2
 [0.2.1]: https://github.com/vej-ai/dtex/releases/tag/v0.2.1
 [0.2.0]: https://github.com/vej-ai/dtex/releases/tag/v0.2.0

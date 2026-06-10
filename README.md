@@ -54,7 +54,8 @@ params. Run it with `dtex run -p <config>`. The library equivalent is
 **Sources:** `filesystem` (CSV/JSONL/Parquet from local, GCS, or S3),
 `rest` (paginated REST APIs — 4 pagination strategies, 4 auth modes),
 `postgres` (keyset pagination, no `OFFSET`), `shiphero` (GraphQL),
-`stripe` (REST resource-as-stream + opt-in Sigma SQL-as-stream).
+`stripe` (REST resource-as-stream + opt-in Sigma SQL-as-stream),
+`revenuecat` (v2 API — customers + subscriptions + daily chart metrics).
 
 **Destinations:** `duckdb` (zero-config dev default, all 5 capabilities) and
 `bigquery` (production warehouse — Parquet-staged via GCS + LOAD jobs,

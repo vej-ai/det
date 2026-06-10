@@ -1,0 +1,148 @@
+# RevenueCat — baked source connector for the v2 API
+# (https://api.revenuecat.com/v2). Three streams covering RC's three
+# distinct extraction surfaces:
+#
+# * `customers` — every customer in a project. NON-incremental: RC v2 has
+#   no server-side date filter on /customers (verified June 2026 against
+#   the docs, the airbyte issue 70315, and the RC community forum), so
+#   every run paginates the full customer list. `write_disposition: merge`
+#   on `id` makes re-pulls upsert idempotently.
+#
+# * `subscriptions` — per-customer fan-out. RC has no project-level
+#   /subscriptions endpoint, only /customers/{id}/subscriptions, so this
+#   stream iterates the customer list and fetches per-customer
+#   subscriptions. NON-incremental; merge-on-id like customers.
+#   Operationally expensive: O(N+1) HTTP calls per run for N customers.
+#
+# * `metrics_daily` — the third surface. RC v2's Charts API
+#   (/charts/{chart_name}) DOES take server-side start_date/end_date
+#   filters AND tags per-day values with `incomplete=true` when the day
+#   is still finalizing. Long format (one row per cohort_date × chart ×
+#   measure) so adding a chart needs zero schema migration. Real
+#   incremental; the cursor advances only past days RC marked complete,
+#   so partial-today re-pulls cleanly on the next run.
+#
+# Auth: a v2 RC secret key (`sk_...`) with at minimum
+# `customer_information:customers:read`,
+# `customer_information:subscriptions:read`, and
+# `charts_metrics:overview:read`. v2 keys are SEPARATE from v1 keys
+# ("API v1 keys will not work with REST API v2" — RC docs). The default
+# reads it from `${env.REVENUECAT_API_KEY}`; profile-level secret://
+# refs (GCP Secret Manager / AWS / Vault) override per environment.
+
+name: revenuecat
+kind: source
+version: "1.0.0"
+summary: RevenueCat v2 API — customers, subscriptions, and daily chart metrics.
+tags: [revenuecat, saas, subscriptions, analytics, mobile]
+
+requires:
+  - "requests>=2.31"
+
+params:
+  project_id:
+    type: string
+    required: true
+    description: RevenueCat project ID (e.g. proj1ab2c3d4).
+  base_url:
+    type: string
+    default: "https://api.revenuecat.com/v2"
+    description: RevenueCat v2 API base URL — overridable for stubbed tests.
+  page_size:
+    type: int
+    default: 100
+    description: Records per page on list endpoints (RC default is 20).
+
+  # --- metrics_daily-only ---------------------------------------------------
+  # Curated charts the metrics_daily stream pulls. Comma-separated chart_name
+  # values from RC's docs. Each chart can return multiple measures
+  # (e.g. churn = Actives + Churned Actives + Churn Rate); the connector
+  # flattens them all into the long-format output.
+  #
+  # The four defaults are charts that return the standard
+  # {cohort, incomplete, measure, value} shape. cohort_explorer and
+  # prediction_explorer return different shapes and will break the flattener
+  # — exclude unless you custom-handle them.
+  metrics_charts:
+    type: string
+    default: "revenue,mrr,actives,trials"
+    description: Comma-separated chart_name values for the metrics_daily stream.
+
+  # Earliest cohort date for the FIRST metrics_daily run. Once state exists
+  # this is ignored. ISO date, no time component.
+  metrics_initial_since_date:
+    type: string
+    default: "2024-01-01"
+    description: Earliest start_date for metrics_daily's first run.
+
+  # Re-pull window for metrics_daily: every run pulls from
+  # max(cursor, today - lookback_days) up to today. Wider window = more
+  # rate-limit churn but better safety for RC's "most recent day may be
+  # partial" caveat. 7 is safely past RC's same-day finalization window
+  # without burning many calls.
+  metrics_lookback_days:
+    type: int
+    default: 7
+    description: Days of overlap on every metrics_daily run (handles partial-today + late corrections).
+
+secrets:
+  # The RC v2 secret key. The env-var default lets `pip install dtex`
+  # users get going without any extras; profile-level overrides
+  # (`ref: secret://gcp-secret-manager/...`) work for production.
+  - name: api_key
+    ref: ${env.REVENUECAT_API_KEY}
+
+streams:
+  - name: customers
+    table: customers
+    primary_key: [id]
+    write_disposition: merge
+    schema:
+      - {name: id,                    type: STRING,    mode: REQUIRED}
+      - {name: first_seen_at,         type: TIMESTAMP}
+      - {name: last_seen_at,          type: TIMESTAMP}
+      - {name: last_seen_app_version, type: STRING}
+      - {name: last_seen_country,     type: STRING}
+      - {name: last_seen_platform,    type: STRING}
+
+  - name: subscriptions
+    table: subscriptions
+    primary_key: [id]
+    write_disposition: merge
+    schema:
+      - {name: id,                             type: STRING,    mode: REQUIRED}
+      - {name: customer_id,                    type: STRING}
+      - {name: customer_last_seen_at,          type: TIMESTAMP}
+      - {name: product_id,                     type: STRING}
+      - {name: status,                         type: STRING}
+      - {name: gives_access,                   type: BOOLEAN}
+      - {name: auto_renewal_status,            type: STRING}
+      - {name: store,                          type: STRING}
+      - {name: store_subscription_identifier,  type: STRING}
+      - {name: current_period_starts_at,       type: TIMESTAMP}
+      - {name: current_period_ends_at,         type: TIMESTAMP}
+      - {name: total_revenue_gross_usd,        type: FLOAT}
+      - {name: total_revenue_proceeds_usd,     type: FLOAT}
+
+  # metrics_daily — long format (one row per cohort_date × chart × measure).
+  # Adding a new chart to `metrics_charts` requires no schema change.
+  # Cursor on `cohort_date`; the connector observes only complete days
+  # (incomplete=false in the API response) so the next run re-pulls
+  # today AND any day that was still partial last run.
+  - name: metrics_daily
+    table: metrics_daily
+    primary_key: [cohort_date, chart_name, measure_name]
+    write_disposition: merge
+    incremental:
+      cursor_field: cohort_date
+      cursor_type: date
+      initial_value: "2024-01-01"
+    schema:
+      - {name: cohort_date,   type: DATE,      mode: REQUIRED}
+      - {name: chart_name,    type: STRING,    mode: REQUIRED}
+      - {name: measure_name,  type: STRING,    mode: REQUIRED}
+      - {name: value,         type: FLOAT}
+      - {name: incomplete,    type: BOOLEAN}
+      - {name: pulled_at,     type: TIMESTAMP, mode: REQUIRED}
+
+schedule: "0 */6 * * *"
