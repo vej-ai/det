@@ -1,6 +1,6 @@
 ---
 name: release-dtex
-description: Cut a dtex release to PyPI and GitHub — runs the full 8-check pre-flight, bumps version + CHANGELOG, tags, publishes via Trusted Publishing, cuts the GitHub Release. Use when the user says "cut a release", "ship X.Y.Z", or any clear release-prep request.
+description: Cut a dtex release to PyPI and GitHub — runs the full 10-check pre-flight, bumps version + CHANGELOG, tags, publishes via Trusted Publishing, cuts the GitHub Release. Use when the user says "cut a release", "ship X.Y.Z", or any clear release-prep request.
 ---
 
 # Cut a dtex release
@@ -42,32 +42,37 @@ Reading the CHANGELOG and `pyproject.toml`:
 Pre-1.0 latitude: dtex is in alpha; minor bumps are also a reasonable
 choice for additive features. Use judgment.
 
-### Phase 1 — Pre-flight (the 8 checks)
+### Phase 1 — Pre-flight (the 10 checks)
 
 Run from `~/dev/simple_e`. Every check must pass.
 
 ```bash
 cd ~/dev/simple_e
 
-# Build the wheel + sdist that will go to PyPI.
+# Abort the block on the FIRST failing check. Without this, a
+# mid-block failure (e.g. ruff) is swallowed and the block exits 0
+# via the final cleanup — exactly how 0.2.0–0.2.4 shipped red lint.
+set -euo pipefail
+
+# 1. Build the wheel + sdist that will go to PyPI.
 rm -rf dist && .venv/bin/python -m build
 
-# Twine's structural check — catches malformed README, bad classifier.
+# 2. Twine's structural check — catches malformed README, bad classifier.
 .venv/bin/twine check dist/*
 
-# Install in a throwaway venv.
+# 3. Install in a throwaway venv.
 python3 -m venv /tmp/dtex_preflight
 /tmp/dtex_preflight/bin/pip install dist/dtex-X.Y.Z-py3-none-any.whl
 
-# --version matches the tag (drift-detection).
+# 4. --version matches the tag (drift-detection).
 output=$(/tmp/dtex_preflight/bin/dtex --version)
 [ "$output" = "dtex, version X.Y.Z" ] || { echo "FAIL"; exit 1; }
 
-# Import-side __version__ matches.
+# 5. Import-side __version__ matches.
 /tmp/dtex_preflight/bin/python -c \
   "import dtex; assert dtex.__version__ == 'X.Y.Z'"
 
-# README has no relative links (PyPI doesn't resolve them).
+# 6. README has no relative links (PyPI doesn't resolve them).
 .venv/bin/python -c "
 from readme_renderer.markdown import render
 import re
@@ -77,19 +82,29 @@ hrefs = re.findall(r'href=\"([^\"]+)\"', html)
 rel = [h for h in hrefs if not h.startswith('http')]
 assert not rel, f'relative links: {rel}'"
 
-# Entry-points wired (the three secret resolvers).
+# 7. Entry-points wired (the three secret resolvers).
 /tmp/dtex_preflight/bin/python -c "
 from importlib.metadata import entry_points
 schemes = sorted(ep.name for ep in entry_points(group='dtex.secret_resolvers'))
 assert schemes == ['aws-secrets-manager', 'gcp-secret-manager', 'vault']"
 
-# Tests + lint + types green.
+# 8. Full test suite.
 .venv/bin/pytest -q --tb=no
+
+# 9. Lint — CI's ruff + mypy job runs these EXACT commands; red here
+#    means red CI on main.
 .venv/bin/ruff check .
+
+# 10. Types.
 .venv/bin/mypy dtex
 
 rm -rf /tmp/dtex_preflight
+echo "PRE-FLIGHT PASSED (all 10 checks)"
 ```
+
+Checks 8–10 are individually load-bearing: 0.2.0 through 0.2.4 each
+shipped with a red `ruff + mypy` CI job because these ran in a block
+without `set -e` and their failures were silently swallowed.
 
 **If anything fails: STOP. Fix the defect. Re-run the full pre-flight.**
 Do NOT proceed to tagging with a known failure.
@@ -136,12 +151,23 @@ git -c user.name="Albinas Plesnys" -c user.email="albus@vej.ai" \
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 git push origin main
 
+# Wait for CI on main to go GREEN before tagging — tagging a red
+# commit publishes a broken release. (0.2.0–0.2.4 all tagged on red
+# CI because this gate was missing.) ~3-4 min.
+sleep 15  # let the push-triggered run register
+gh run watch --repo vej-ai/dtex --exit-status \
+  "$(gh run list --repo vej-ai/dtex --workflow ci.yml --branch main \
+       --limit 1 --json databaseId --jq '.[0].databaseId')"
+
 git -c user.name="Albinas Plesnys" -c user.email="albus@vej.ai" \
   tag -a vX.Y.Z -m "Release X.Y.Z — <one-line summary>
 
 See CHANGELOG.md [X.Y.Z]."
 git push origin vX.Y.Z
 ```
+
+If `gh run watch` exits non-zero, CI is red: STOP, fix on `main`,
+and restart from the Phase 1 pre-flight. Do NOT push the tag.
 
 ### Phase 5 — Verify the publish workflow + PyPI
 
@@ -209,14 +235,18 @@ If a release ships with a defect:
 
 1. **Tag pushes are irreversible.** Get explicit user confirmation in
    Phase 3 before `git push origin vX.Y.Z`.
-2. **Pre-flight before every release.** No exceptions. Eight checks,
-   30-second total runtime; cheaper than yanking.
-3. **Version bumps go in pyproject.toml only.** `dtex/__init__.py` reads
+2. **Pre-flight before every release.** No exceptions. Ten checks,
+   ~60-second total runtime; cheaper than yanking. The block must run
+   with `set -euo pipefail` — a swallowed mid-block failure is how
+   0.2.0–0.2.4 shipped with red lint.
+3. **Never tag while CI on `main` is red.** The release-prep push must
+   produce a green CI run before `git push origin vX.Y.Z`.
+4. **Version bumps go in pyproject.toml only.** `dtex/__init__.py` reads
    `__version__` from `importlib.metadata` (fixed in 0.1.2). Do not
    hardcode the version in any other file.
-4. **CHANGELOG entries describe what shipped, not how we built it.** No
+5. **CHANGELOG entries describe what shipped, not how we built it.** No
    stage citations, no agent commentary, no "we" voice.
-5. **Co-Authored-By line on every commit** — `Co-Authored-By: Claude
+6. **Co-Authored-By line on every commit** — `Co-Authored-By: Claude
    Opus 4.7 (1M context) <noreply@anthropic.com>` — for honest
    attribution.
 

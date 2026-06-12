@@ -49,10 +49,15 @@ must pass. The 0.1.0 → 0.1.1 → 0.1.2 release sequence taught us this the
 hard way: each was a real defect that the relevant pre-flight would have
 caught locally.
 
-Run these as one block (~30 seconds; the throwaway venv is the slow step):
+Run these as one block (~60 seconds; the throwaway venv is the slow step):
 
 ```bash
 cd ~/dev/simple_e
+
+# Abort on the FIRST failing check. Without this, a mid-block failure
+# (e.g. ruff) is swallowed and the block still exits 0 via the final
+# cleanup — exactly how 0.2.0–0.2.4 shipped with a red lint job.
+set -euo pipefail
 
 # 1. Build the wheel + sdist that will actually go to PyPI.
 rm -rf dist && .venv/bin/python -m build
@@ -96,14 +101,19 @@ schemes = sorted(ep.name for ep in entry_points(group='dtex.secret_resolvers'))
 assert schemes == ['aws-secrets-manager', 'gcp-secret-manager', 'vault'], schemes
 print('entry-points ok')"
 
-# 8. Final sanity: tests + lint + types green.
+# 8. Full test suite.
 .venv/bin/pytest -q --tb=no
+
+# 9. Lint — CI's ruff + mypy job runs these exact commands; red here
+#    means red CI on main.
 .venv/bin/ruff check .
+
+# 10. Types.
 .venv/bin/mypy dtex
 
 # Clean up.
 rm -rf /tmp/dtex_preflight
-echo "PRE-FLIGHT PASSED"
+echo "PRE-FLIGHT PASSED (all 10 checks)"
 ```
 
 If anything above fails, **fix it first**. Don't continue to Phase 2.
@@ -144,8 +154,18 @@ git push origin main
 ```
 
 This commit by itself does NOT publish. It just triggers CI on `main`.
-Wait for CI to go green (~3-4 min). If it's red, fix on `main` before
-tagging — tagging a red commit publishes a broken release.
+Wait for CI to go green (~3-4 min) — this gate is **mandatory**:
+
+```bash
+sleep 15  # let the push-triggered run register
+gh run watch --repo vej-ai/dtex --exit-status \
+  "$(gh run list --repo vej-ai/dtex --workflow ci.yml --branch main \
+       --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+If it exits non-zero, CI is red: fix on `main` and re-run the Phase 1
+pre-flight before tagging — tagging a red commit publishes a broken
+release.
 
 ### Phase 4 — Tag + push (the irreversible step)
 
@@ -244,10 +264,16 @@ been caught locally:
   because `dtex/__init__.py` hardcoded the version and drifted from
   `pyproject.toml`. The structural fix in 0.1.2 was to read from
   `importlib.metadata`. Pre-flight check 4 catches the drift case.
-- **0.1.2** was clean — verified by running all 8 pre-flight checks
+- **0.1.2** was clean — verified by running all pre-flight checks
   before tagging.
 - **0.1.3** added multi-file project-local connectors; the pre-flight ran
   cleanly first try.
+- **0.2.0 through 0.2.4** all shipped while the `ruff + mypy` CI job was
+  red. The lint/type checks were *in* the pre-flight, but the block ran
+  without `set -e`, so their failures were swallowed and the block
+  exited 0. Two fixes: the pre-flight block now starts with
+  `set -euo pipefail`, and tagging now requires a green CI run on
+  `main` first (the Phase 3 wait is mandatory, not advisory).
 
 The pre-flight battery in Phase 1 is the single most important part of
 this runbook. Do not skip it.
@@ -256,7 +282,7 @@ this runbook. Do not skip it.
 
 | Step | Command | Reversible? |
 |---|---|---|
-| Pre-flight | the 8 checks above | yes |
+| Pre-flight | the 10 checks above | yes |
 | Commit release prep | `git commit && git push origin main` | yes (rebase + force-push, ugly but works) |
 | Tag + publish | `git tag vX.Y.Z && git push origin vX.Y.Z` | **NO — burns the version number on PyPI** |
 | GitHub Release | `gh release create vX.Y.Z ...` | yes (`gh release delete vX.Y.Z`) |
