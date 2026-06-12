@@ -33,8 +33,9 @@ in log output or error messages.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 import requests
 
@@ -77,8 +78,7 @@ class RevenueCatClient:
         while next_url:
             data = self._get(next_url, params=params if first else None)
             first = False
-            for item in data.get("items", []):
-                yield item
+            yield from data.get("items", [])
             next_url = data.get("next_page")
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> dict:

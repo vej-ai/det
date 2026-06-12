@@ -34,7 +34,6 @@ import requests
 import dtex
 from dtex.sources.revenuecat.client import RevenueCatClient
 
-
 # --------------------------------------------------------------------------
 # Stub RC v2 server — stdlib HTTPServer on a random port
 # --------------------------------------------------------------------------
@@ -312,7 +311,8 @@ def _write_project(tmp_path: Path) -> None:
         "destination_paths: []\nconfig_paths:\n  - configs\n"
     )
     (tmp_path / "profiles.yml").write_text(
-        "duckdb:\n  default_target: dev\n  targets:\n    dev:\n      path: '.dtex/warehouse.duckdb'\n"
+        "duckdb:\n  default_target: dev\n  targets:\n    dev:\n"
+        "      path: '.dtex/warehouse.duckdb'\n"
     )
 
 
@@ -391,7 +391,8 @@ def test_end_to_end_metrics_daily(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """metrics_daily flattens the values array into long format + advances cursor only past complete days."""
+    """metrics_daily flattens the values array into long format + advances the
+    cursor only past complete days."""
     scenario, base_url = rc_stub
     monkeypatch.setenv("REVENUECAT_API_KEY", "sk_test_unit")
 
@@ -436,7 +437,11 @@ def test_end_to_end_metrics_daily(
     _write_config(
         tmp_path,
         base_url=base_url,
-        streams="  metrics_daily:\n    params:\n      metrics_initial_since_date: '2023-11-14'\n      metrics_lookback_days: 0",
+        streams=(
+            "  metrics_daily:\n    params:\n"
+            "      metrics_initial_since_date: '2023-11-14'\n"
+            "      metrics_lookback_days: 0"
+        ),
     )
 
     db_path = str(tmp_path / "warehouse.duckdb")

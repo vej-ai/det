@@ -1782,7 +1782,7 @@ class RunRecord:
 # ---------------------------------------------------------------------------
 
 
-class StreamMode(str, Enum):
+class StreamMode(StrEnum):
     """How a stream is run THIS invocation — docs/12 §3.
 
     Set per-stream in a config's ``streams:`` block. Independent of the
@@ -1858,7 +1858,9 @@ class StreamRunConfig:
         if value is None:
             return cls()
         if isinstance(value, str):
-            return cls(mode=_parse_stream_mode(value, stream_name=stream_name, config_name=config_name))
+            return cls(
+                mode=_parse_stream_mode(value, stream_name=stream_name, config_name=config_name)
+            )
         if not isinstance(value, Mapping):
             raise ValueError(
                 f"config {config_name!r}: streams[{stream_name!r}] must be a "

@@ -39,10 +39,12 @@ from urllib.parse import parse_qsl, urlparse
 
 import duckdb
 import pytest
+import requests
 
 import dtex
 from dtex.sources.stripe.client import StripeAPIError, StripeClient
 from dtex.sources.stripe.pagination import paginate
+from dtex.sources.stripe.sigma_client import SigmaClient
 
 # --------------------------------------------------------------------------
 # Stub Stripe server — stdlib HTTPServer on a random port
@@ -631,14 +633,6 @@ def test_api_key_never_appears_in_logs(
 # drive SigmaClient directly (no engine in the loop) against a tiny stub
 # that fakes Stripe's submit → poll → download-CSV protocol.
 
-import threading as _threading
-from collections.abc import Iterator as _Iterator
-from http.server import BaseHTTPRequestHandler as _BaseHandler, HTTPServer as _HTTPServer
-
-import requests as _requests
-
-from dtex.sources.stripe.sigma_client import SigmaClient as _SigmaClient
-
 _SIGMA_CSV_BODY = b"id,amount\r\nch_1,100\r\nch_2,250\r\nch_3,999\r\n"
 _SIGMA_EXPECTED_ROWS = [
     {"id": "ch_1", "amount": "100"},
@@ -663,8 +657,8 @@ class _SigmaStubState:
         self.auth_header: str | None = None
 
 
-def _make_sigma_handler(state: _SigmaStubState, base: str) -> type[_BaseHandler]:
-    class Handler(_BaseHandler):
+def _make_sigma_handler(state: _SigmaStubState, base: str) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: Any) -> None:  # silence test noise
             pass
 
@@ -741,12 +735,12 @@ def _make_sigma_handler(state: _SigmaStubState, base: str) -> type[_BaseHandler]
 
 
 @pytest.fixture
-def sigma_stub() -> _Iterator[tuple[_SigmaStubState, str]]:
+def sigma_stub() -> Iterator[tuple[_SigmaStubState, str]]:
     state = _SigmaStubState()
-    server = _HTTPServer(("127.0.0.1", 0), object)  # placeholder handler
+    server = HTTPServer(("127.0.0.1", 0), object)  # placeholder handler
     base = f"http://127.0.0.1:{server.server_port}"
     server.RequestHandlerClass = _make_sigma_handler(state, base)
-    thread = _threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         yield state, base
@@ -756,8 +750,8 @@ def sigma_stub() -> _Iterator[tuple[_SigmaStubState, str]]:
         thread.join(timeout=2)
 
 
-def _sigma_client(base: str) -> _SigmaClient:
-    return _SigmaClient(
+def _sigma_client(base: str) -> SigmaClient:
+    return SigmaClient(
         base_url=base,
         api_key="rk_test_abc",
         api_version="2026-04-22.preview",
@@ -796,7 +790,7 @@ def test_sigma_download_gives_up_after_max_retries(
 ) -> None:
     state, base = sigma_stub
     state.truncate_first_n_downloads = 99  # every attempt truncates
-    with pytest.raises(_requests.exceptions.ChunkedEncodingError):
+    with pytest.raises(requests.exceptions.ChunkedEncodingError):
         list(_sigma_client(base).run_query("SELECT id, amount FROM charges"))
     # max_retries=3 → 1 initial + 3 retries = 4 download attempts.
     assert state.download_calls == 4
@@ -810,7 +804,7 @@ def test_sigma_download_retries_on_connect_failure(
     dead_url = "http://127.0.0.1:1/download.csv"  # nothing listening on port 1
     live_url = f"{base}/download.csv"
     calls = {"n": 0}
-    real_get = _requests.get
+    real_get = requests.get
 
     def flaky_get(url: str, **kwargs: Any) -> Any:
         if url == dead_url:
@@ -823,11 +817,11 @@ def test_sigma_download_retries_on_connect_failure(
     client = _sigma_client(base)
     import os
 
-    _requests.get = flaky_get  # type: ignore[assignment]
+    requests.get = flaky_get  # type: ignore[assignment]
     try:
         path = client._download_to_tempfile(dead_url)
     finally:
-        _requests.get = real_get  # type: ignore[assignment]
+        requests.get = real_get  # type: ignore[assignment]
     try:
         assert calls["n"] == 2  # one refused connect + one success
         with open(path, "rb") as fh:

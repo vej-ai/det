@@ -42,7 +42,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from dtex import Batch, Config, Cursor, State, StreamDef, stream
+from dtex import Batch, Config, Cursor, StreamDef, stream
 from dtex.sources.stripe.client import StripeClient
 from dtex.sources.stripe.pagination import paginate
 from dtex.sources.stripe.sigma_client import SigmaClient

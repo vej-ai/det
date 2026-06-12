@@ -10,8 +10,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from dtex.cli import _skills
-from dtex.cli import cli
+from dtex.cli import _skills, cli
 
 
 @pytest.fixture()

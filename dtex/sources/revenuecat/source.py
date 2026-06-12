@@ -23,10 +23,11 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
-from dtex import Batch, stream
+from dtex import Batch, Config, Cursor, stream
 
 from .client import RevenueCatClient
 
@@ -37,13 +38,13 @@ def _ms_to_ts(ms: int | None) -> str | None:
     """Convert RC's millisecond-epoch timestamps to ISO-8601 UTC."""
     if ms is None:
         return None
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat()
 
 
 def _cohort_to_date(cohort_unix_seconds: int) -> str:
     """Convert chart-cohort Unix seconds to an ISO date (UTC)."""
     return (
-        datetime.fromtimestamp(cohort_unix_seconds, tz=timezone.utc).date().isoformat()
+        datetime.fromtimestamp(cohort_unix_seconds, tz=UTC).date().isoformat()
     )
 
 
@@ -53,7 +54,7 @@ def _cohort_to_date(cohort_unix_seconds: int) -> str:
 
 
 @stream(name="customers")
-def customers(config, log) -> Iterator[Batch]:
+def customers(config: Config, log: logging.Logger) -> Iterator[Batch]:
     client = RevenueCatClient(
         api_key=config.secrets["api_key"],
         project_id=config.project_id,
@@ -105,7 +106,7 @@ def customers(config, log) -> Iterator[Batch]:
 
 
 @stream(name="subscriptions")
-def subscriptions(config, log) -> Iterator[Batch]:
+def subscriptions(config: Config, log: logging.Logger) -> Iterator[Batch]:
     client = RevenueCatClient(
         api_key=config.secrets["api_key"],
         project_id=config.project_id,
@@ -194,7 +195,7 @@ def subscriptions(config, log) -> Iterator[Batch]:
 
 
 @stream(name="metrics_daily")
-def metrics_daily(config, cursor, log) -> Iterator[Batch]:
+def metrics_daily(config: Config, cursor: Cursor, log: logging.Logger) -> Iterator[Batch]:
     client = RevenueCatClient(
         api_key=config.secrets["api_key"],
         project_id=config.project_id,
@@ -206,7 +207,7 @@ def metrics_daily(config, cursor, log) -> Iterator[Batch]:
         log.warning("revenuecat.metrics_daily: no charts configured — skipping")
         return
 
-    today = datetime.now(tz=timezone.utc).date()
+    today = datetime.now(tz=UTC).date()
     lookback_days = int(config.metrics_lookback_days)
     lookback_floor = today - timedelta(days=lookback_days)
 
@@ -236,7 +237,7 @@ def metrics_daily(config, cursor, log) -> Iterator[Batch]:
         lookback_days,
     )
 
-    pulled_at = datetime.now(tz=timezone.utc).isoformat()
+    pulled_at = datetime.now(tz=UTC).isoformat()
     batch: list[dict] = []
     max_complete_cohort: date | None = None
 

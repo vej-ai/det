@@ -1467,7 +1467,8 @@ def test_load_job_retries_on_requests_connection_error(
         job = _FakeJob()
         if attempts["n"] == 1:
             job.raise_on_result = _requests.exceptions.ConnectionError(
-                "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+                "('Connection aborted.', RemoteDisconnected("
+                "'Remote end closed connection without response'))"
             )
         return job
 

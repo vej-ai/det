@@ -24,10 +24,8 @@ wheels, sdists, editable installs, and zip imports.
 
 from __future__ import annotations
 
-import shutil
 from importlib import resources
 from pathlib import Path
-
 
 SKILLS_PACKAGE = "dtex.skills"
 """The Python package the bundled skill files live in (``dtex/skills/``)."""

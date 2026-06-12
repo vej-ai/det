@@ -44,6 +44,7 @@ from typing import Any
 import click
 
 import dtex
+from dtex.cli import _skills
 from dtex.cli._discovery import (
     discover_all_configs,
     discover_all_destinations,
@@ -66,7 +67,6 @@ from dtex.cli._scaffold import (
     scaffold_source,
 )
 from dtex.cli._secrets import check_project as _check_secrets_project
-from dtex.cli import _skills
 from dtex.cli._state import StateError, list_state, reset_state
 from dtex.engine import ConfigError, DiscoveryError, EngineError
 from dtex.engine import config as cfg
