@@ -1,0 +1,21 @@
+-- ad_daily_stats — per-ad, per-day performance metrics.
+--
+-- Incremental on segments.date. The ad resource is `ad_group_ad`; its
+-- identity is ad_group_ad.ad.id. Carries campaign + ad_group context so the
+-- table stands alone.
+
+SELECT
+    segments.date,
+    campaign.id,
+    campaign.name,
+    ad_group.id,
+    ad_group.name,
+    ad_group_ad.ad.id,
+    ad_group_ad.status,
+    metrics.impressions,
+    metrics.clicks,
+    metrics.cost_micros,
+    metrics.conversions,
+    metrics.conversions_value
+FROM ad_group_ad
+WHERE segments.date BETWEEN '{since}' AND '{until}'

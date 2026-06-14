@@ -64,6 +64,7 @@ auth checklist, scope requirements, schema, and known limitations.
 | [`shiphero`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/shiphero/README.md) | GraphQL |
 | [`stripe`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/stripe/README.md) | REST resource-as-stream + opt-in Sigma SQL-as-stream |
 | [`revenuecat`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/revenuecat/README.md) | v2 API — customers + subscriptions + daily chart metrics |
+| [`gads`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/gads/README.md) | Google Ads — GAQL query-as-stream + MCC account auto-discovery |
 
 **Destinations:**
 

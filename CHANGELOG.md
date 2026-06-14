@@ -10,6 +10,46 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-15
+
+Adds `gads` — a baked Google Ads source connector built on GAQL (the
+Google Ads Query Language). Each stream is a GAQL query submitted to the
+`searchStream` endpoint, the same query-as-stream shape the `stripe`
+connector uses for Sigma SQL. Ships five streams (campaigns + per-campaign,
+per-ad-group, per-ad, and per-keyword daily stats), runtime OAuth2 token
+minting with a one-time refresh-token helper, and MCC account
+auto-discovery. Verified end-to-end against the live Google Ads API.
+
+### Added
+
+- **`gads` baked source connector.** Google Ads API v24 over REST, GAQL
+  as the single extraction surface. Streams: `campaigns` (entity list,
+  full replace) and `campaign_daily_stats` / `ad_group_daily_stats` /
+  `ad_daily_stats` / `keyword_daily_stats` (incremental on `segments.date`
+  with a lookback window that re-pulls recent days to absorb late
+  conversions and attribution restatements). Nested `GoogleAdsRow`
+  responses are flattened to snake_case columns; money stays in micros.
+  See the [connector README](https://github.com/vej-ai/dtex/blob/main/dtex/sources/gads/README.md).
+
+- **Google Ads OAuth refresh-token helper.** `python -m
+  dtex.sources.gads.scripts.get_refresh_token` runs the one-time loopback
+  OAuth consent flow and writes the refresh token to a git-ignored file
+  (mode 0600), so the secret never lands in terminal scrollback. The
+  connector mints short-lived access tokens from it at run time.
+
+- **MCC account auto-discovery.** Leave `customer_ids` empty and set
+  `auto_discover_from_manager` to a manager (MCC) id; the connector
+  expands the manager's tree via the `customer_client` resource and pulls
+  every ENABLED, non-manager (leaf) account under it, up to
+  `max_discovery_depth` (default 1). An explicit `customer_ids` always
+  wins; the manager id doubles as `login_customer_id` automatically.
+
+- **`GaqlConfig` SDK type.** A new public contract type
+  (`dtex.GaqlConfig`) and a `StreamDef.gaql` field, mirroring the existing
+  `SigmaConfig`/`StreamDef.sigma`. Marks a stream as GAQL-driven and names
+  its `.gaql` query file. Purely additive — existing connectors and
+  manifests are unaffected.
+
 ## [0.2.4] — 2026-06-10
 
 Documentation-only patch release. The "Pre-baked connectors" section
@@ -420,7 +460,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/vej-ai/dtex/releases/tag/v0.3.0
 [0.2.4]: https://github.com/vej-ai/dtex/releases/tag/v0.2.4
 [0.2.3]: https://github.com/vej-ai/dtex/releases/tag/v0.2.3
 [0.2.2]: https://github.com/vej-ai/dtex/releases/tag/v0.2.2

@@ -1,0 +1,22 @@
+-- keyword_daily_stats — per-keyword, per-day performance metrics.
+--
+-- Incremental on segments.date. The keyword resource is
+-- `keyword_view`; the criterion lives on ad_group_criterion. Carries
+-- campaign + ad_group context plus the keyword text and match type.
+
+SELECT
+    segments.date,
+    campaign.id,
+    campaign.name,
+    ad_group.id,
+    ad_group.name,
+    ad_group_criterion.criterion_id,
+    ad_group_criterion.keyword.text,
+    ad_group_criterion.keyword.match_type,
+    metrics.impressions,
+    metrics.clicks,
+    metrics.cost_micros,
+    metrics.conversions,
+    metrics.conversions_value
+FROM keyword_view
+WHERE segments.date BETWEEN '{since}' AND '{until}'

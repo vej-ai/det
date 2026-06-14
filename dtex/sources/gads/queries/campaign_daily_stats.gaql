@@ -1,0 +1,23 @@
+-- campaign_daily_stats — per-campaign, per-day performance metrics.
+--
+-- Incremental on segments.date. source.py binds {since}/{until} to the
+-- run's date window (max(cursor, today - lookback) .. today); the lookback
+-- re-pulls recent days to absorb late conversions and attribution
+-- restatements. The schema's `date` column is fed from segments.date.
+--
+-- Metrics arrive as STRINGS over REST (Google Ads quirk); the engine's
+-- NORMALIZE step coerces them to the declared FieldType. Money is in micros
+-- (1/1,000,000 of the account currency) — left as micros here; convert in
+-- dbt downstream, not in the connector.
+
+SELECT
+    segments.date,
+    campaign.id,
+    campaign.name,
+    metrics.impressions,
+    metrics.clicks,
+    metrics.cost_micros,
+    metrics.conversions,
+    metrics.conversions_value
+FROM campaign
+WHERE segments.date BETWEEN '{since}' AND '{until}'

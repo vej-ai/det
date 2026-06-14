@@ -1,0 +1,20 @@
+-- ad_group_daily_stats — per-ad-group, per-day performance metrics.
+--
+-- Incremental on segments.date — same {since}/{until} window + lookback as
+-- campaign_daily_stats. Carries the parent campaign id/name so the table is
+-- self-describing without a join to campaigns.
+
+SELECT
+    segments.date,
+    campaign.id,
+    campaign.name,
+    ad_group.id,
+    ad_group.name,
+    ad_group.status,
+    metrics.impressions,
+    metrics.clicks,
+    metrics.cost_micros,
+    metrics.conversions,
+    metrics.conversions_value
+FROM ad_group
+WHERE segments.date BETWEEN '{since}' AND '{until}'

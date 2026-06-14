@@ -1,0 +1,23 @@
+-- campaigns — the current campaign entity list for the customer.
+--
+-- Entity stream: NO segments.date, so no {since}/{until} binding and no
+-- incremental cursor. Every run pulls the full current set; register.yaml
+-- declares write_disposition: replace so the prior load is cleaned. Campaign
+-- attributes (name, status, budget) are mutable, so a full replace each run
+-- keeps the table current without merge bookkeeping.
+--
+-- Column ↔ schema mapping (register.yaml mirrors these; flattened in
+-- source.py's _flatten_row from the nested GoogleAdsRow):
+--   campaign.id                       -> campaign_id
+--   campaign.name                     -> campaign_name
+--   campaign.status                   -> status
+--   campaign.advertising_channel_type -> advertising_channel_type
+--   campaign_budget.amount_micros     -> budget_amount_micros
+
+SELECT
+    campaign.id,
+    campaign.name,
+    campaign.status,
+    campaign.advertising_channel_type,
+    campaign_budget.amount_micros
+FROM campaign

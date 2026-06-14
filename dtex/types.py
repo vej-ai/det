@@ -919,6 +919,45 @@ class SigmaConfig:
 
 
 @dataclass(frozen=True)
+class GaqlConfig:
+    """Stream-level GAQL config — present iff this stream runs a GAQL query.
+
+    The Google Ads analogue of :class:`SigmaConfig`. A small marker block on
+    a :class:`StreamDef` that opts an individual stream into the Google Ads
+    Query Language (GAQL) query-as-stream model: the baked ``gads`` connector
+    submits the named ``.gaql`` file's body to the GoogleAdsService
+    ``searchStream`` endpoint and yields each ``GoogleAdsRow`` as a record.
+
+    A connector that supports GAQL checks ``stream_def.gaql is not None``
+    inside its ``@stream`` function and dispatches to its GAQL helper if set.
+    Connectors with no GAQL support simply never see this block on their
+    streams.
+
+    Fields:
+
+    * ``query`` — path to the .gaql file (relative to the connector folder)
+      whose body is submitted as the GAQL query. The incremental date floor
+      is bound into the query body by the connector (canonical placeholders:
+      ``{since}`` / ``{until}``).
+    """
+
+    query: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> GaqlConfig:
+        """Build a :class:`GaqlConfig` from a parsed YAML mapping."""
+        known = {"query"}
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(
+                f"gaql: unknown key(s) {sorted(unknown)}; valid: {sorted(known)}"
+            )
+        if "query" not in data:
+            raise ValueError("gaql: 'query' is required (path to the .gaql file)")
+        return cls(query=str(data["query"]))
+
+
+@dataclass(frozen=True)
 class StreamDef:
     """One declared output table — mirrors a ``register.yaml`` ``streams[]`` entry.
 
@@ -938,6 +977,10 @@ class StreamDef:
     instead of the connector's default extraction surface (see
     :class:`SigmaConfig` for the rationale). Absent on every existing
     stream; this is purely an opt-in extension."""
+    gaql: GaqlConfig | None = None
+    """Stream-level GAQL config — present iff this stream runs a Google Ads
+    Query Language query (see :class:`GaqlConfig`). Absent on every stream
+    that doesn't use the ``gads`` connector's GAQL surface; opt-in only."""
     """The declared partition spec, either:
 
     * a bare string column name (short form — defaults to TIME+DAY at
@@ -997,6 +1040,7 @@ class StreamDef:
             "schema",
             "partition_by",
             "sigma",
+            "gaql",
             "params",
             "schema_contract",
         }
@@ -1039,6 +1083,20 @@ class StreamDef:
                 f"got {type(sigma_raw).__name__}"
             )
 
+        gaql_raw = data.get("gaql")
+        if gaql_raw is None:
+            gaql_block: GaqlConfig | None = None
+        elif isinstance(gaql_raw, Mapping):
+            try:
+                gaql_block = GaqlConfig.from_dict(gaql_raw)
+            except ValueError as exc:
+                raise ValueError(f"stream {name!r}: {exc}") from exc
+        else:
+            raise ValueError(
+                f"stream {name!r}: 'gaql' must be a mapping; "
+                f"got {type(gaql_raw).__name__}"
+            )
+
         return cls(
             name=name,
             table=str(data.get("table", name)),
@@ -1050,6 +1108,7 @@ class StreamDef:
             schema=Schema.from_list(data.get("schema")),
             partition_by=_parse_partition_by(data.get("partition_by")),
             sigma=sigma_block,
+            gaql=gaql_block,
             params=params,
             schema_contract=SchemaContract.parse(
                 data.get("schema_contract", SchemaContract.EVOLVE)

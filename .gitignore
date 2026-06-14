@@ -5,6 +5,9 @@ __pycache__/
 # Virtual environments
 .venv/
 
+# IDE
+.idea/
+
 # Build artifacts
 dist/
 build/
@@ -18,3 +21,7 @@ build/
 # dtex local state
 .duckdb
 .dtex/
+
+# Local secrets (e.g. the gads OAuth refresh token written by the
+# get_refresh_token helper) — never commit these.
+.secrets/

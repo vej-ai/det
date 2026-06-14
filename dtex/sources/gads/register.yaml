@@ -1,0 +1,256 @@
+# Google Ads — baked source connector for the Google Ads API v24 REST
+# interface (https://googleads.googleapis.com). The single extraction surface
+# is GAQL (the Google Ads Query Language): each stream declares a `.gaql`
+# query file via its `gaql:` block, the connector binds the run's date window
+# into the query, submits it to GoogleAdsService.searchStream, and yields each
+# GoogleAdsRow as a record. This mirrors the baked `stripe` connector's
+# Sigma-SQL-as-stream pattern; the `gaql:` block is the GAQL analogue of
+# `sigma:`.
+#
+# Streams:
+# * `campaigns` — the current campaign entity list. NON-incremental
+#   (no segments.date); write_disposition: replace keeps mutable campaign
+#   attributes current with a full pull each run.
+# * `campaign_daily_stats` / `ad_group_daily_stats` / `ad_daily_stats` /
+#   `keyword_daily_stats` — per-day performance metrics, incremental on
+#   `date` (fed from segments.date). Each run pulls
+#   max(cursor, today - segments_lookback_days) .. today; the lookback
+#   re-pulls recent days to absorb late conversions / attribution
+#   restatements. merge on the natural per-day grain so re-pulls upsert.
+#
+# Auth: Google Ads REST needs FOUR credentials (verified June 2026 against
+# the official REST auth docs). The connector mints a short-lived Bearer
+# access token at runtime from the refresh token; the developer token rides
+# in the `developer-token` header; an optional manager account id rides in
+# the `login-customer-id` header (hyphens stripped). Each secret defaults to
+# an env var so `pip install dtex` users can run without extras; profile-level
+# `secret://` refs override per environment.
+#
+# Money fields are in MICROS (1/1,000,000 of the account currency) — left as
+# micros here; convert in dbt downstream. Metrics come back as strings over
+# REST; the engine's NORMALIZE step coerces them to the declared FieldType.
+
+name: gads
+kind: source
+version: "1.0.0"
+summary: Google Ads API v24 — GAQL reports as streams (campaigns + daily stats).
+tags: [google-ads, ads, marketing, analytics, gaql]
+
+requires:
+  - "requests>=2.31"
+
+params:
+  # Comma-separated Google Ads customer IDs to pull. Each stream fans out
+  # over every id. Hyphens are stripped (123-456-7890 == 1234567890).
+  #
+  # OPTIONAL: leave empty to auto-discover accounts from a manager instead
+  # (see auto_discover_from_manager). One of customer_ids /
+  # auto_discover_from_manager must be set; an explicit customer_ids wins.
+  customer_ids:
+    type: string
+    default: ""
+    description: Comma-separated Google Ads customer IDs to extract (hyphens optional). Empty = auto-discover.
+
+  # Auto-discovery: when customer_ids is empty and this names an MCC, the
+  # connector expands the manager's tree (via the customer_client resource)
+  # and pulls every ENABLED, non-manager (leaf) account under it, up to
+  # max_discovery_depth. The MCC itself is excluded. The discovery query is
+  # issued with login-customer-id set to this manager automatically.
+  auto_discover_from_manager:
+    type: string
+    default: ""
+    description: MCC id to auto-expand into child accounts when customer_ids is empty (hyphens optional).
+
+  # How deep to walk the manager tree during auto-discovery. 1 = direct
+  # children only; higher values include accounts under sub-managers. Only
+  # ENABLED, non-manager (leaf) accounts within this depth are pulled.
+  max_discovery_depth:
+    type: int
+    default: 1
+    description: Max manager-tree depth for auto-discovery (1 = direct children).
+
+  # The manager (MCC) account id for the login-customer-id header. Required
+  # only when a manager account calls on behalf of the client accounts in
+  # customer_ids; omit for direct (non-manager) access. (Auto-discovery sets
+  # this automatically for its own tree query.)
+  login_customer_id:
+    type: string
+    default: ""
+    description: Manager (MCC) account id for the login-customer-id header (hyphens optional).
+
+  api_version:
+    type: string
+    default: "v24"
+    description: Google Ads API version segment in the REST path.
+  base_url:
+    type: string
+    default: "https://googleads.googleapis.com"
+    description: Google Ads API base URL — overridable for stubbed tests.
+  token_url:
+    type: string
+    default: "https://www.googleapis.com/oauth2/v3/token"
+    description: OAuth2 token endpoint — overridable for stubbed tests.
+
+  max_retries:
+    type: int
+    default: 5
+    description: Bounded retry count for 429 / 5xx / network failures.
+  retry_backoff_seconds:
+    type: float
+    default: 1.0
+    description: Base for capped exponential backoff (ceiling 60s).
+
+  # Earliest segments.date for the FIRST run of the incremental stats
+  # streams. Once state exists this is ignored. ISO date, no time component.
+  segments_initial_since_date:
+    type: string
+    default: "2024-01-01"
+    description: Earliest segments.date for the first incremental run.
+
+  # Re-pull window: every incremental run pulls from
+  # max(cursor, today - segments_lookback_days) up to today. Wider = more
+  # API churn but better safety for late conversions / attribution
+  # restatements. 7 days is past Google Ads' typical conversion settling
+  # window without burning many calls.
+  segments_lookback_days:
+    type: int
+    default: 7
+    description: Days of overlap on every incremental run (late conversions + restatements).
+
+secrets:
+  - name: developer_token
+    ref: ${env.GADS_DEVELOPER_TOKEN}
+  - name: client_id
+    ref: ${env.GADS_CLIENT_ID}
+  - name: client_secret
+    ref: ${env.GADS_CLIENT_SECRET}
+  - name: refresh_token
+    ref: ${env.GADS_REFRESH_TOKEN}
+
+streams:
+  # ----------------------------------------------------------------------
+  # campaigns — entity list, full replace (non-incremental)
+  # ----------------------------------------------------------------------
+  - name: campaigns
+    table: campaigns
+    primary_key: [customer_id, campaign_id]
+    write_disposition: replace
+    gaql:
+      query: queries/campaigns.gaql
+    schema:
+      - {name: customer_id,               type: STRING, mode: REQUIRED}
+      - {name: campaign_id,               type: STRING, mode: REQUIRED}
+      - {name: campaign_name,             type: STRING}
+      - {name: status,                    type: STRING}
+      - {name: advertising_channel_type,  type: STRING}
+      - {name: budget_amount_micros,      type: INTEGER}
+
+  # ----------------------------------------------------------------------
+  # campaign_daily_stats — incremental on date (segments.date)
+  # ----------------------------------------------------------------------
+  - name: campaign_daily_stats
+    table: campaign_daily_stats
+    primary_key: [customer_id, campaign_id, date]
+    write_disposition: merge
+    gaql:
+      query: queries/campaign_daily_stats.gaql
+    incremental:
+      cursor_field: date
+      cursor_type: date
+      initial_value: "2024-01-01"
+    schema:
+      - {name: date,               type: DATE,    mode: REQUIRED}
+      - {name: customer_id,        type: STRING,  mode: REQUIRED}
+      - {name: campaign_id,        type: STRING,  mode: REQUIRED}
+      - {name: campaign_name,      type: STRING}
+      - {name: impressions,        type: INTEGER}
+      - {name: clicks,             type: INTEGER}
+      - {name: cost_micros,        type: INTEGER}
+      - {name: conversions,        type: FLOAT}
+      - {name: conversions_value,  type: FLOAT}
+
+  # ----------------------------------------------------------------------
+  # ad_group_daily_stats — incremental on date
+  # ----------------------------------------------------------------------
+  - name: ad_group_daily_stats
+    table: ad_group_daily_stats
+    primary_key: [customer_id, ad_group_id, date]
+    write_disposition: merge
+    gaql:
+      query: queries/ad_group_daily_stats.gaql
+    incremental:
+      cursor_field: date
+      cursor_type: date
+      initial_value: "2024-01-01"
+    schema:
+      - {name: date,               type: DATE,    mode: REQUIRED}
+      - {name: customer_id,        type: STRING,  mode: REQUIRED}
+      - {name: campaign_id,        type: STRING}
+      - {name: campaign_name,      type: STRING}
+      - {name: ad_group_id,        type: STRING,  mode: REQUIRED}
+      - {name: ad_group_name,      type: STRING}
+      - {name: status,             type: STRING}
+      - {name: impressions,        type: INTEGER}
+      - {name: clicks,             type: INTEGER}
+      - {name: cost_micros,        type: INTEGER}
+      - {name: conversions,        type: FLOAT}
+      - {name: conversions_value,  type: FLOAT}
+
+  # ----------------------------------------------------------------------
+  # ad_daily_stats — incremental on date
+  # ----------------------------------------------------------------------
+  - name: ad_daily_stats
+    table: ad_daily_stats
+    primary_key: [customer_id, ad_id, date]
+    write_disposition: merge
+    gaql:
+      query: queries/ad_daily_stats.gaql
+    incremental:
+      cursor_field: date
+      cursor_type: date
+      initial_value: "2024-01-01"
+    schema:
+      - {name: date,               type: DATE,    mode: REQUIRED}
+      - {name: customer_id,        type: STRING,  mode: REQUIRED}
+      - {name: campaign_id,        type: STRING}
+      - {name: campaign_name,      type: STRING}
+      - {name: ad_group_id,        type: STRING}
+      - {name: ad_group_name,      type: STRING}
+      - {name: ad_id,              type: STRING,  mode: REQUIRED}
+      - {name: status,             type: STRING}
+      - {name: impressions,        type: INTEGER}
+      - {name: clicks,             type: INTEGER}
+      - {name: cost_micros,        type: INTEGER}
+      - {name: conversions,        type: FLOAT}
+      - {name: conversions_value,  type: FLOAT}
+
+  # ----------------------------------------------------------------------
+  # keyword_daily_stats — incremental on date
+  # ----------------------------------------------------------------------
+  - name: keyword_daily_stats
+    table: keyword_daily_stats
+    primary_key: [customer_id, criterion_id, date]
+    write_disposition: merge
+    gaql:
+      query: queries/keyword_daily_stats.gaql
+    incremental:
+      cursor_field: date
+      cursor_type: date
+      initial_value: "2024-01-01"
+    schema:
+      - {name: date,               type: DATE,    mode: REQUIRED}
+      - {name: customer_id,        type: STRING,  mode: REQUIRED}
+      - {name: campaign_id,        type: STRING}
+      - {name: campaign_name,      type: STRING}
+      - {name: ad_group_id,        type: STRING}
+      - {name: ad_group_name,      type: STRING}
+      - {name: criterion_id,       type: STRING,  mode: REQUIRED}
+      - {name: keyword_text,       type: STRING}
+      - {name: keyword_match_type, type: STRING}
+      - {name: impressions,        type: INTEGER}
+      - {name: clicks,             type: INTEGER}
+      - {name: cost_micros,        type: INTEGER}
+      - {name: conversions,        type: FLOAT}
+      - {name: conversions_value,  type: FLOAT}
+
+schedule: "0 */6 * * *"
