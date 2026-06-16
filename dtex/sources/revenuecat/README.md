@@ -71,7 +71,7 @@ req/min; the practical floor is ~3 min/100k rows).
 RC has no project-level `/subscriptions` endpoint, only
 `/customers/{id}/subscriptions`. This stream iterates the customer list
 and fetches per-customer subscriptions. Operationally expensive:
-O(N+1) HTTP calls per run for N customers. For large accounts
+O(N+1) HTTP calls per run for N customers. On large accounts
 this is the heaviest stream by far.
 
 ### `metrics_daily` — real incremental

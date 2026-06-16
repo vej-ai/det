@@ -10,6 +10,17 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-16
+
+Hygiene patch — removes example text that named a specific account from
+the packaged docs and tests. No behavior, API, or connector change.
+
+### Changed
+
+- **Generic example wording in `revenuecat`'s README and a config test.**
+  Replaced a customer-specific example reference with neutral phrasing.
+  Packaging-only; nothing about the connectors or the engine changes.
+
 ## [0.3.0] — 2026-06-15
 
 Adds `gads` — a baked Google Ads source connector built on GAQL (the
@@ -460,7 +471,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/vej-ai/dtex/releases/tag/v0.3.1
 [0.3.0]: https://github.com/vej-ai/dtex/releases/tag/v0.3.0
 [0.2.4]: https://github.com/vej-ai/dtex/releases/tag/v0.2.4
 [0.2.3]: https://github.com/vej-ai/dtex/releases/tag/v0.2.3

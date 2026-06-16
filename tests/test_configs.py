@@ -699,12 +699,12 @@ def test_tags_parses_list_of_strings(tmp_path: Path) -> None:
             source: s
             destination: d
             streams: all
-            tags: [hourly, acme, production]
+            tags: [hourly, analytics, production]
             """
         )
     )
     pc = cfgs.load_config("p", tmp_path)
-    assert pc.tags == ("hourly", "acme", "production")
+    assert pc.tags == ("hourly", "analytics", "production")
 
 
 def test_tags_normalized_lowercase(tmp_path: Path) -> None:
