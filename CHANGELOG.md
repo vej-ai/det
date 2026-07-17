@@ -10,6 +10,64 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-17
+
+Adds `cockroachdb` — a baked CockroachDB source connector built for the
+realities of Cockroach Cloud: primary-key-keyset bootstrap that stays inside
+fixed SQL memory budgets at any table size, resumable page-capped first
+syncs, `AS OF SYSTEM TIME` follower reads, and hidden-column (`crdb_region`)
+handling for REGIONAL BY ROW tables. Verified end-to-end against a live
+Cockroach Cloud Standard cluster (23 production tables, 118M-row largest).
+Also fixes two BigQuery load-path defects the live verification surfaced.
+
+### Fixed
+
+- **BigQuery loads work for streams with `JSON` fields.** The LOAD job
+  carried an inline schema, and BigQuery rejects `JSON` fields there
+  (`400 Unsupported field type: JSON`); schema-less Parquet loads then
+  type-mismatch against native JSON columns too. Stream tables now declare
+  `JSON` fields as `STRING` columns carrying JSON text (the same shape
+  Airbyte/Fivetran land `jsonb` as; the internal `_dtex_state` /
+  `_dtex_runs` tables keep native JSON — they are written via
+  parameterized DML, where it works). The load path was reworked
+  alongside: the destination creates/patches the load target (including
+  per-batch merge staging tables) through the tables API first and runs
+  the LOAD without an inline schema, mapping Parquet columns to the table
+  by name; the Parquet file carries per-field nullability so `REQUIRED`
+  columns survive the round-trip; `WRITE_TRUNCATE` dispositions became an
+  explicit `TRUNCATE TABLE` + append-load (a schema-less truncate-load
+  would have replaced the table schema with the Parquet-inferred one);
+  and merge staging loads became plain appends into their freshly-created
+  per-batch tables.
+- **`FLOAT` normalization accepts `decimal.Decimal`.** Postgres-protocol
+  drivers (psycopg — the `postgres` and `cockroachdb` sources) yield
+  `Decimal` for `NUMERIC`/`DECIMAL` columns; normalize previously raised
+  `CoercionError` on the first such value. A `Decimal` now coerces through
+  `float()` like `int` does.
+
+### Added
+
+- **`cockroachdb` baked source connector.** CockroachDB over the Postgres
+  wire protocol (`psycopg`), shaped like the `postgres` source but built for
+  CockroachDB's extraction realities. The first sync of an incremental
+  stream sweeps the table by **primary-key keyset** (`WHERE (pk...) > (...)
+  ORDER BY pk LIMIT n`) instead of cursor order — every page a constrained
+  index scan, safe on Cockroach Cloud's fixed per-tenant SQL memory budget
+  where an unbounded `ORDER BY cursor_field` dies with "memory budget
+  exceeded". Bootstrap progress (last PK, running cursor max) persists in
+  stream state, so an interrupted or page-capped sweep (`bootstrap_max_pages`)
+  resumes instead of restarting, and the cursor handed to the engine on
+  completion is the true global max. Steady-state incremental runs use the
+  same cursor keyset as `postgres`. Reads can be pinned with
+  `AS OF SYSTEM TIME` (`as_of_system_time` param; e.g.
+  `follower_read_timestamp()`) for contention-free follower reads. Cockroach
+  Cloud plumbing: `sslmode` defaults to `verify-full` with
+  `sslrootcert=system` (public-CA certs), `options` passes `--cluster=`
+  routing for non-SNI clients. Type mapping extends the Postgres set with
+  the shapes CockroachDB's `information_schema` emits: `ARRAY` → `JSON`,
+  `USER-DEFINED` (enums, incl. `crdb_region`) → `STRING`, `inet` /
+  `interval` / the `time` family → `STRING`, `oid` → `INTEGER`.
+
 ## [0.3.1] — 2026-06-16
 
 Hygiene patch — removes example text that named a specific account from
@@ -471,7 +529,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/vej-ai/dtex/releases/tag/v0.4.0
 [0.3.1]: https://github.com/vej-ai/dtex/releases/tag/v0.3.1
 [0.3.0]: https://github.com/vej-ai/dtex/releases/tag/v0.3.0
 [0.2.4]: https://github.com/vej-ai/dtex/releases/tag/v0.2.4
