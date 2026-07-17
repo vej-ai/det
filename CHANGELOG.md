@@ -17,8 +17,9 @@ realities of Cockroach Cloud: primary-key-keyset bootstrap that stays inside
 fixed SQL memory budgets at any table size, resumable page-capped first
 syncs, `AS OF SYSTEM TIME` follower reads, and hidden-column (`crdb_region`)
 handling for REGIONAL BY ROW tables. Verified end-to-end against a live
-Cockroach Cloud Standard cluster (23 production tables, 118M-row largest).
-Also fixes two BigQuery load-path defects the live verification surfaced.
+Cockroach Cloud Standard cluster, including tables in the hundred-million-row
+range. Also fixes two BigQuery load-path defects the live verification
+surfaced.
 
 ### Fixed
 

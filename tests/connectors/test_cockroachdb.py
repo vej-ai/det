@@ -116,25 +116,25 @@ def test_introspect_schema_maps_crdb_shapes() -> None:
     fake_cursor.fetchall.return_value = [
         ("crdb_region", "USER-DEFINED", "NO"),
         ("id", "character varying", "NO"),
-        ("media_urls", "ARRAY", "NO"),
+        ("attachments", "ARRAY", "NO"),
         ("config", "jsonb", "YES"),
-        ("time_updated", "timestamp with time zone", "YES"),
+        ("updated_at", "timestamp with time zone", "YES"),
     ]
     fake_conn = MagicMock()
     fake_conn.cursor.return_value = fake_cursor
 
-    schema = type_mapping.introspect_schema(fake_conn, "public", "social_media_post")
+    schema = type_mapping.introspect_schema(fake_conn, "public", "posts")
 
     assert schema.fields == (
         Field(name="crdb_region", type=FieldType.STRING, mode=FieldMode.REQUIRED),
         Field(name="id", type=FieldType.STRING, mode=FieldMode.REQUIRED),
-        Field(name="media_urls", type=FieldType.JSON, mode=FieldMode.REQUIRED),
+        Field(name="attachments", type=FieldType.JSON, mode=FieldMode.REQUIRED),
         Field(name="config", type=FieldType.JSON, mode=FieldMode.NULLABLE),
-        Field(name="time_updated", type=FieldType.TIMESTAMP, mode=FieldMode.NULLABLE),
+        Field(name="updated_at", type=FieldType.TIMESTAMP, mode=FieldMode.NULLABLE),
     )
     sql_executed, params = fake_cursor.execute.call_args.args
     assert "WHERE table_schema = %s AND table_name = %s" in sql_executed
-    assert params == ("public", "social_media_post")
+    assert params == ("public", "posts")
 
 
 def test_introspect_schema_empty_table_raises() -> None:
@@ -253,21 +253,21 @@ def test_set_transaction_aost_forms() -> None:
 
 def test_pk_keyset_select_sql_first_page_has_no_where() -> None:
     composed = client.pk_keyset_select_sql(
-        "public", "social_media_post", ("id",), first_page=True
+        "public", "posts", ("id",), first_page=True
     )
     sql_text = _normalise_sql(composed.as_string(None))
     assert sql_text == (
-        'SELECT "id", * FROM "public"."social_media_post" ORDER BY "id" LIMIT %s'
+        'SELECT "id", * FROM "public"."posts" ORDER BY "id" LIMIT %s'
     )
 
 
 def test_pk_keyset_select_sql_resume_page_uses_row_value_comparison() -> None:
     composed = client.pk_keyset_select_sql(
-        "public", "message", ("crdb_region", "id"), first_page=False
+        "public", "orders", ("crdb_region", "id"), first_page=False
     )
     sql_text = _normalise_sql(composed.as_string(None))
     assert sql_text == (
-        'SELECT "crdb_region", "id", * FROM "public"."message" '
+        'SELECT "crdb_region", "id", * FROM "public"."orders" '
         'WHERE ("crdb_region", "id") > (%s, %s) '
         'ORDER BY "crdb_region", "id" LIMIT %s'
     )
@@ -295,14 +295,14 @@ def test_keyset_select_sql_shape_includes_cursor_pk_limit() -> None:
     composed = client.keyset_select_sql(
         schema_name="public",
         table_name="users",
-        cursor_field="time_updated",
+        cursor_field="updated_at",
         primary_key=("id",),
     )
     sql_text = _normalise_sql(composed.as_string(None))
     assert sql_text == (
         'SELECT "id", * FROM "public"."users" '
-        'WHERE "time_updated" > %s '
-        'ORDER BY "time_updated", "id" '
+        'WHERE "updated_at" > %s '
+        'ORDER BY "updated_at", "id" '
         'LIMIT %s'
     )
 
@@ -311,15 +311,15 @@ def test_keyset_select_sql_with_aost_places_clause_before_where() -> None:
     composed = client.keyset_select_sql(
         schema_name="public",
         table_name="users",
-        cursor_field="time_updated",
+        cursor_field="updated_at",
         primary_key=("id",),
         as_of_system_time="-10s",
     )
     sql_text = _normalise_sql(composed.as_string(None))
     assert sql_text == (
         'SELECT "id", * FROM "public"."users" AS OF SYSTEM TIME \'-10s\' '
-        'WHERE "time_updated" > %s '
-        'ORDER BY "time_updated", "id" '
+        'WHERE "updated_at" > %s '
+        'ORDER BY "updated_at", "id" '
         'LIMIT %s'
     )
 
@@ -441,7 +441,7 @@ def test_bootstrap_sweeps_by_pk_and_hands_over_global_cursor_max(
 ) -> None:
     """First sync sweeps in PK order; the cursor hand-off is the max seen anywhere.
 
-    The staged pages put the *highest* time_updated in the FIRST page — pk
+    The staged pages put the *highest* updated_at in the FIRST page — pk
     order is uncorrelated with cursor order, so the hand-off must not be
     "last page's max".
     """
