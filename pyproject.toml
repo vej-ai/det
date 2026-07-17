@@ -121,6 +121,14 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
 
+# pyarrow ships no py.typed marker and no bundled stubs; mypy >= 2.3 reports
+# untyped imports as errors by default, which turned CI red without a code
+# change. The imports are lazy (inside functions) and treated as Any — the
+# pre-2.3 behavior, restored explicitly.
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
