@@ -167,6 +167,15 @@ def test_float_accepts_integer_string() -> None:
     assert coerce_value("42", FieldType.FLOAT, column="x") == 42.0
 
 
+def test_float_accepts_decimal() -> None:
+    """psycopg yields ``decimal.Decimal`` for NUMERIC columns — see _to_float."""
+    from decimal import Decimal
+
+    got = coerce_value(Decimal("1.25"), FieldType.FLOAT, column="x")
+    assert got == 1.25
+    assert isinstance(got, float)
+
+
 def test_float_rejects_bool() -> None:
     with pytest.raises(CoercionError, match="FLOAT"):
         coerce_value(False, FieldType.FLOAT, column="x")

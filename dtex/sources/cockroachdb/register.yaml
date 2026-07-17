@@ -1,0 +1,142 @@
+# CockroachDB source — extract rows from a CockroachDB cluster into dtex.
+#
+# CockroachDB speaks the Postgres wire protocol, so this connector shares its
+# driver (psycopg) and general shape with the pre-baked `postgres` source. It
+# exists separately because CockroachDB changes the extraction calculus:
+#
+#   * The first sync of an incremental stream sweeps the table in PRIMARY KEY
+#     order (`WHERE (pk...) > (...) ORDER BY pk LIMIT n`) instead of cursor
+#     order — on Cockroach Cloud Standard/Basic the per-tenant SQL memory
+#     budget is fixed, and an unbounded `ORDER BY cursor_field` over a large
+#     table dies with "memory budget exceeded". PK pages are always
+#     constrained index scans. Bootstrap progress persists in stream state,
+#     so an interrupted or page-capped sweep resumes, not restarts.
+#   * Reads can be pinned to `AS OF SYSTEM TIME` (e.g. follower reads) so
+#     extraction never contends with the production workload.
+#   * Cockroach Cloud connection plumbing: `sslrootcert=system` (public-CA
+#     certs), `options` for `--cluster=` routing on non-SNI client stacks.
+#
+# # NOTE: per-stream details (schema_name, table_name, query, cursor_field,
+# primary_key) live in source.py as hardcoded arguments to the shared
+# `extract_stream` helper, NOT under a YAML stream `params:` block — the
+# engine builds one Config per connector and never merges `stream_def.params`
+# into it (same contract as the `postgres` source; see its register.yaml).
+name: cockroachdb
+kind: source
+version: "1.0.0"
+summary: Extract rows from a CockroachDB cluster via PK-bootstrap + keyset pagination, with AS OF SYSTEM TIME follower reads.
+tags: [database, cockroachdb, postgres, sql]
+
+# Connector-level connection params (docs/03 §2.4). One `Config` per run.
+params:
+  host:
+    type: string
+    required: true
+    description: CockroachDB host (e.g. "my-cluster-1234.x9z.cockroachlabs.cloud").
+  port:
+    type: int
+    default: 26257
+    description: CockroachDB TCP port.
+  database:
+    type: string
+    required: true
+    description: Database name to connect to.
+  user:
+    type: string
+    required: true
+    description: Username to authenticate as.
+  sslmode:
+    type: string
+    default: verify-full
+    description: libpq sslmode. Cockroach Cloud expects verify-full.
+  sslrootcert:
+    type: string
+    default: system
+    description: >
+      Root-CA source for certificate verification. "system" uses the OS trust
+      store (needs a real libpq >= 16 — the libpq bundled in psycopg[binary]
+      wheels cannot use it); "certifi" resolves to the bundled certifi CA
+      file at runtime and works everywhere — both are fine for Cockroach
+      Cloud's public-CA certs. Set a file path for a self-hosted cluster with
+      a private CA, or "" to fall back to libpq's default
+      (~/.postgresql/root.crt).
+  options:
+    type: string
+    default: ""
+    description: >
+      Extra libpq options string. Multi-tenant Cockroach Cloud routing for
+      non-SNI clients goes here, e.g. "--cluster=my-cluster-1234". Empty when
+      the client stack does SNI (modern libpq does).
+  as_of_system_time:
+    type: string
+    default: ""
+    description: >
+      AS OF SYSTEM TIME expression applied to table reads —
+      "follower_read_timestamp()" for follower reads, or an interval such as
+      "-10s". Empty disables it. Pair with an `incremental.lookback` at least
+      as long as the staleness so rows updated behind the read timestamp are
+      re-read.
+  application_name:
+    type: string
+    default: dtex
+    description: Reported as application_name — useful in the DB Console's SQL activity.
+  connect_timeout_seconds:
+    type: int
+    default: 30
+    description: Seconds to wait for a TCP connection before giving up.
+  batch_size:
+    type: int
+    default: 5000
+    description: Rows fetched per server round-trip; also the connector's yield batch size.
+  bootstrap_max_pages:
+    type: int
+    default: 0
+    description: >
+      Page cap per run for the first-sync PK sweep of an incremental stream;
+      0 means unlimited. With a cap, each run advances the sweep by
+      (bootstrap_max_pages x batch_size) rows, commits its progress, and the
+      next run resumes — turning a multi-hour backfill of a very large table
+      into a series of short, individually-committed runs.
+
+# Secrets are *referenced*, never inlined (docs/03 §2.5).
+secrets:
+  - name: password
+    ref: ${env.COCKROACHDB_PASSWORD}
+
+# Two example incremental streams, mirroring the `postgres` source's examples.
+# Incremental table streams here are uniformly `(config, state, cursor, log)`
+# — `state` carries bootstrap progress, `cursor` the incremental floor. A
+# non-incremental variant drops `state`/`cursor` from the signature and the
+# `incremental:` block from this YAML; it then takes the server-side-cursor
+# full-scan path.
+streams:
+  - name: users
+    table: crdb_users
+    primary_key: id
+    write_disposition: merge
+    incremental:
+      cursor_field: updated_at
+      cursor_type: timestamp
+      lookback: 1h
+      initial_value: "1970-01-01T00:00:00"
+    schema:
+      - {name: id,         type: STRING, mode: REQUIRED}
+      - {name: email,      type: STRING}
+      - {name: full_name,  type: STRING}
+      - {name: created_at, type: TIMESTAMP}
+      - {name: updated_at, type: TIMESTAMP, mode: REQUIRED}
+
+  - name: events
+    table: crdb_events
+    primary_key: id
+    write_disposition: merge
+    incremental:
+      cursor_field: occurred_at
+      cursor_type: timestamp
+      initial_value: "1970-01-01T00:00:00"
+    schema:
+      - {name: id,          type: STRING, mode: REQUIRED}
+      - {name: user_id,     type: STRING}
+      - {name: kind,        type: STRING}
+      - {name: payload,     type: JSON}
+      - {name: occurred_at, type: TIMESTAMP, mode: REQUIRED}

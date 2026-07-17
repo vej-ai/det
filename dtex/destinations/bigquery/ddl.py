@@ -203,9 +203,21 @@ def bq_schema_field(field: Field) -> Any:
 
     bq = _client_mod._bigquery_module()
     validate_identifier(field.name, kind="column")
+    # NOTE: JSON fields land as STRING columns carrying JSON text. BigQuery's
+    # Parquet load path cannot target native JSON columns — an inline load
+    # schema with a JSON field is rejected outright ("Unsupported field
+    # type" naming JSON), and a schema-less load type-mismatches the Parquet
+    # STRING (or arrow-extension BYTES) column against a JSON table column.
+    # STRING-with-JSON-text is also the shape Airbyte/Fivetran land jsonb
+    # as, so downstream SQL expects it. The internal ``_dtex_state`` /
+    # ``_dtex_runs`` tables are unaffected: they build their own schemas and
+    # are written via parameterized DML, where native JSON works.
+    column_type = (
+        "STRING" if field.type is FieldType.JSON else bigquery_type(field.type)
+    )
     return bq.SchemaField(
         name=field.name,
-        field_type=bigquery_type(field.type),
+        field_type=column_type,
         mode=bigquery_mode(field.mode),
         description=field.description or None,
     )

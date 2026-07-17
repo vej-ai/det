@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import decimal
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -208,11 +209,15 @@ def _to_integer(value: Any, *, column: str) -> int:
 
 
 def _to_float(value: Any, *, column: str) -> float:
-    """FLOAT: int / float / parseable-string → ``float``.
+    """FLOAT: int / float / Decimal / parseable-string → ``float``.
 
     bool is rejected for the same isinstance-trap reason as INTEGER.
     Scientific notation strings (``"1.5e3"``) parse via plain ``float()``
     which accepts them natively, so no special branch is needed.
+    ``decimal.Decimal`` is accepted because it is what Postgres-protocol
+    drivers (psycopg — the ``postgres`` and ``cockroachdb`` sources) yield
+    for ``NUMERIC``/``DECIMAL`` columns; the lossy-precision trade is exactly
+    what declaring the column ``FLOAT`` asked for.
     """
     if isinstance(value, bool):
         raise CoercionError(
@@ -221,7 +226,7 @@ def _to_float(value: Any, *, column: str) -> float:
             source_type=bool,
             target_type=FieldType.FLOAT,
         )
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float, decimal.Decimal)):
         return float(value)
     if isinstance(value, str):
         try:

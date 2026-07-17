@@ -87,7 +87,7 @@ from dtex.destinations.bigquery.ddl import (
     merge_sql,
     validate_identifier,
 )
-from dtex.types import Field, FieldType
+from dtex.types import Field, FieldMode, FieldType
 
 
 # # NOTE: ``PartitionDriftError`` is intentionally a destination-local
@@ -619,6 +619,7 @@ def _records_to_parquet_bytes(
     # column set (so a zero-row LOAD still hits the right table shape).
     columns = [f.name for f in schema.fields]
     type_by_name = {f.name: f.type for f in schema.fields}
+    mode_by_name = {f.name: f.mode for f in schema.fields}
 
     arrays: dict[str, Any] = {}
     for col in columns:
@@ -626,7 +627,22 @@ def _records_to_parquet_bytes(
         py_values: list[Any] = [_encode_cell(record.get(col), ft) for record in batch]
         arrays[col] = pa.array(py_values, type=_arrow_type_for(ft, pa))
 
-    table = pa.table(arrays)
+    # An explicit arrow schema carries per-field nullability: a REQUIRED
+    # dtex field becomes a non-nullable Parquet field. The LOAD runs with
+    # no inline schema (see _ensure_load_target), so BigQuery derives modes
+    # from the Parquet file — an all-nullable file appended to a table with
+    # REQUIRED columns is rejected as a field-mode relaxation.
+    arrow_schema = pa.schema(
+        [
+            pa.field(
+                col,
+                _arrow_type_for(type_by_name[col], pa),
+                nullable=mode_by_name[col] is not FieldMode.REQUIRED,
+            )
+            for col in columns
+        ]
+    )
+    table = pa.table(arrays, schema=arrow_schema)
     buf = BytesIO()
     pq.write_table(table, buf)
     return buf.getvalue()
@@ -650,8 +666,10 @@ def _arrow_type_for(field_type: FieldType, pa: Any) -> Any:
     if field_type is FieldType.DATE:
         return pa.date32()
     if field_type is FieldType.JSON:
-        # BigQuery's PARQUET-loaded JSON column wants a JSON-text string;
-        # encoded by ``_encode_cell``.
+        # JSON-text string (encoded by ``_encode_cell``) into a STRING
+        # Parquet column — stream tables declare JSON fields as STRING
+        # columns (see ddl.bq_schema_field), because BigQuery's Parquet
+        # load path cannot target native JSON columns.
         return pa.string()
     if field_type is FieldType.BYTES:
         return pa.binary()
@@ -694,6 +712,61 @@ def _upload_blob(conn: BQConn, table_name: str, parquet_bytes: bytes) -> tuple[s
     return uri, blob
 
 
+def _ensure_load_target(conn: BQConn, table_name: str, schema: Schema) -> None:
+    """Create ``table_name`` with ``schema`` if absent; add any missing columns.
+
+    # NOTE: this exists because the LOAD job carries *no inline schema*.
+    # BigQuery rejects ``JSON`` fields in a load-job schema (``400
+    # Unsupported field type: JSON``) even though a table with JSON columns
+    # loads fine from Parquet when the *table* provides the schema (the
+    # Parquet STRING value is parsed as JSON text — the documented
+    # conversion). So every load target — including per-batch merge staging
+    # tables — is created/patched through the tables API first, and the LOAD
+    # maps Parquet columns to the table by name.
+    """
+    bq = _bigquery_module()
+    client = conn.client
+    ref = bq.TableReference(
+        bq.DatasetReference(client.project, client.dataset), table_name
+    )
+    try:
+        table = client.bq.get_table(ref)
+    except Exception as exc:  # noqa: BLE001 — narrowed by status-code check below
+        if _status_code(exc) == 404 or _is_not_found(exc):
+            client.bq.create_table(bq.Table(ref, schema=bq_schema(schema)))
+            return
+        raise
+    have = {f.name for f in table.schema}
+    missing = [f for f in schema.fields if f.name not in have]
+    if missing:
+        table.schema = list(table.schema) + [bq_schema_field(f) for f in missing]
+        client.bq.update_table(table, ["schema"])
+
+
+def _truncate_table(conn: BQConn, table_name: str) -> None:
+    """Run ``TRUNCATE TABLE`` — the explicit replacement for ``WRITE_TRUNCATE``.
+
+    A ``WRITE_TRUNCATE`` load with no inline schema would *replace* the
+    table's schema with the Parquet-inferred one (JSON columns silently
+    become STRING); truncating first and appending keeps the table schema
+    authoritative.
+    """
+    client = conn.client
+    validate_identifier(table_name, kind="table")
+    sql = f"TRUNCATE TABLE `{client.project}.{client.dataset}.{table_name}`"
+
+    def _run() -> Any:
+        return client.bq.query(sql, location=client.location).result(
+            timeout=client.job_timeout_seconds
+        )
+
+    run_with_retries(
+        _run,
+        max_attempts=client.retry_max_attempts,
+        backoff_seconds=client.retry_backoff_seconds,
+    )
+
+
 def _load_to_table(
     conn: BQConn,
     table_name: str,
@@ -707,9 +780,22 @@ def _load_to_table(
     Used by APPEND, REPLACE and the staging side of MERGE. Cleans up the
     GCS object on success; leaves it on failure so an operator can inspect
     the source the failed LOAD pulled from (the task's quality bar).
+
+    The table is created/patched first (:func:`_ensure_load_target`) and the
+    LOAD then runs *without* an inline schema — see that helper's NOTE for
+    why (BigQuery rejects JSON fields in load-job schemas). A
+    ``WRITE_TRUNCATE`` disposition is implemented as an explicit ``TRUNCATE
+    TABLE`` followed by an append-load, so the table schema — not the
+    Parquet-inferred one — stays authoritative.
     """
     bq = _bigquery_module()
     client = conn.client
+
+    _ensure_load_target(conn, table_name, schema)
+    if disposition == "WRITE_TRUNCATE":
+        _truncate_table(conn, table_name)
+    if not batch:
+        return
 
     parquet_bytes = _records_to_parquet_bytes(batch, schema)
     uri, blob = _upload_blob(conn, table_name, parquet_bytes)
@@ -719,12 +805,10 @@ def _load_to_table(
     )
     job_config = bq.LoadJobConfig(
         source_format=bq.SourceFormat.PARQUET,
-        write_disposition=disposition,
-        # Don't auto-detect — the table schema is the ground truth, set by
-        # ``ensure_schema``. Auto-detect on a Parquet load would re-infer
-        # types and could conflict with the declared schema.
+        write_disposition="WRITE_APPEND",
+        # Don't auto-detect — the destination table's schema (set above) is
+        # the ground truth; the LOAD maps Parquet columns to it by name.
         autodetect=False,
-        schema=bq_schema(schema),
     )
 
     def _run() -> Any:
@@ -785,9 +869,10 @@ def _merge_via_staging(
     staging_name = f"{target_table}__staging_{client.run_suffix}_{uuid.uuid4().hex[:8]}"
     validate_identifier(staging_name, kind="table")
 
-    # Stage the batch — LOAD into the per-batch table with WRITE_TRUNCATE
-    # (the staging table is fresh; this is purely defensive).
-    _load_to_table(conn, staging_name, batch, schema, disposition="WRITE_TRUNCATE")
+    # Stage the batch — the staging table name embeds a fresh uuid, so the
+    # table cannot pre-exist; a plain append-load is sufficient (and skips
+    # the TRUNCATE round-trip a WRITE_TRUNCATE disposition now implies).
+    _load_to_table(conn, staging_name, batch, schema, disposition="WRITE_APPEND")
 
     try:
         columns = tuple(f.name for f in schema.fields)

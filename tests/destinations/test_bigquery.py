@@ -1239,7 +1239,13 @@ def test_write_batch_replace_truncates_first_appends_rest(
     fake_bq: _FakeBigQueryModule,
     fake_gcs: type[_FakeStorageClient],
 ) -> None:
-    """REPLACE: first batch uses WRITE_TRUNCATE; subsequent batches use WRITE_APPEND."""
+    """REPLACE: first batch TRUNCATEs then appends; subsequent batches only append.
+
+    ``WRITE_TRUNCATE`` is implemented as an explicit ``TRUNCATE TABLE`` query
+    followed by an append-load — a truncate-disposition load without an inline
+    schema would replace the table schema with the Parquet-inferred one
+    (JSON columns would silently become STRING).
+    """
     conn = _open_with_fakes(bigquery_destination)
     hooks = _hooks(bigquery_destination)
     hooks["ensure_schema"](conn, _events_meta())
@@ -1250,7 +1256,9 @@ def test_write_batch_replace_truncates_first_appends_rest(
     hooks["write_batch"](conn, [{"id": 3, "name": "c"}], meta)
 
     dispositions = [job["write_disposition"] for job in conn.client.bq.load_jobs]
-    assert dispositions == ["WRITE_TRUNCATE", "WRITE_APPEND", "WRITE_APPEND"]
+    assert dispositions == ["WRITE_APPEND", "WRITE_APPEND", "WRITE_APPEND"]
+    truncates = [q["sql"] for q in conn.client.bq.queries if "TRUNCATE" in q["sql"]]
+    assert truncates == ["TRUNCATE TABLE `fake-project-id.fake_ds.events`"]
 
 
 def test_write_batch_replace_empty_batch_still_truncates(
@@ -1265,9 +1273,10 @@ def test_write_batch_replace_empty_batch_still_truncates(
 
     hooks["write_batch"](conn, [], _events_meta(WriteDisposition.REPLACE))
 
-    jobs = conn.client.bq.load_jobs
-    assert len(jobs) == 1
-    assert jobs[0]["write_disposition"] == "WRITE_TRUNCATE"
+    # No LOAD job for zero rows — just the explicit TRUNCATE query.
+    assert conn.client.bq.load_jobs == []
+    truncates = [q["sql"] for q in conn.client.bq.queries if "TRUNCATE" in q["sql"]]
+    assert truncates == ["TRUNCATE TABLE `fake-project-id.fake_ds.events`"]
 
 
 # --------------------------------------------------------------------------
@@ -1293,7 +1302,9 @@ def test_write_batch_merge_loads_to_staging_runs_merge_drops_staging(
     assert len(bq.load_jobs) == 1
     staging_table = bq.load_jobs[0]["table"]
     assert staging_table.startswith("events__staging_")
-    assert bq.load_jobs[0]["write_disposition"] == "WRITE_TRUNCATE"
+    # The staging table is per-batch (uuid-named, cannot pre-exist), so a
+    # plain append-load suffices — no truncate round-trip.
+    assert bq.load_jobs[0]["write_disposition"] == "WRITE_APPEND"
     # One MERGE query.
     assert len(bq.queries) == 1
     merge_sql_text = bq.queries[0]["sql"]
