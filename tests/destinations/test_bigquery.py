@@ -140,8 +140,11 @@ class _FakeBlob:
         self.uploaded: bytes | None = None
         self.deleted = False
 
-    def upload_from_string(self, data: bytes, content_type: str = "") -> None:
+    def upload_from_string(
+        self, data: bytes, content_type: str = "", timeout: float | None = None
+    ) -> None:
         self.uploaded = data
+        self.upload_timeout = timeout
         self.bucket._uploads.append((self.name, len(data), content_type))
 
     def delete(self) -> None:

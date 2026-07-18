@@ -708,7 +708,18 @@ def _upload_blob(conn: BQConn, table_name: str, parquet_bytes: bytes) -> tuple[s
     blob_name = conn.client.staging_blob_name(table_name, batch_uuid)
     bucket = conn.client.gcs.bucket(conn.client.staging_bucket)
     blob = bucket.blob(blob_name)
-    blob.upload_from_string(parquet_bytes, content_type="application/octet-stream")
+    # Chunked resumable upload with a real deadline. The SDK's default is a
+    # single-shot PUT with a 60-second timeout — a wide-row batch can
+    # serialize to hundreds of MB, which reliably times out on slower
+    # uplinks (observed as RetryError("The write operation timed out") on
+    # every attempt). An 8 MiB chunk_size switches to the resumable
+    # protocol where the timeout applies per chunk, not per blob.
+    blob.chunk_size = 8 * 1024 * 1024
+    blob.upload_from_string(
+        parquet_bytes,
+        content_type="application/octet-stream",
+        timeout=conn.client.job_timeout_seconds,
+    )
     return uri, blob
 
 

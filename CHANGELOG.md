@@ -10,6 +10,15 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Fixed
+
+- **BigQuery GCS staging uploads use chunked resumable transfer.** The
+  staging Parquet blob was uploaded single-shot with the SDK's default
+  60-second timeout; a wide-row batch serializing to hundreds of MB timed
+  out on every attempt on slower uplinks. Uploads now set an 8 MiB
+  `chunk_size` (resumable protocol, per-chunk timeout) and inherit the
+  destination's `job_timeout_seconds`.
+
 ## [0.4.0] — 2026-07-17
 
 Adds `cockroachdb` — a baked CockroachDB source connector built for the
