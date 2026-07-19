@@ -1364,6 +1364,54 @@ def test_resolve_partition_config_wins_over_source() -> None:
     assert pc.granularity is TimeGranularity.HOUR  # config's HOUR, not source's DAY
 
 
+def test_resolve_partition_explicit_none_suppresses_auto_default() -> None:
+    """`partition_by: none` on a timestamp-cursor stream resolves to None.
+
+    Without the opt-out, an incremental timestamp cursor is auto-promoted to
+    TIME/DAY — which is exactly what a backfill-heavy stream must be able to
+    refuse (a bootstrap sweep touching hundreds of day-partitions per load
+    exhausts BigQuery's partition-modification quota).
+    """
+    from dtex.engine.runner import _resolve_partition
+    from dtex.types import _parse_partition_by
+
+    declared = _parse_partition_by("none")
+    assert isinstance(declared, PartitionConfig)
+    assert declared.type is PartitionType.NONE
+
+    sd, schema = _stream_def_for_partition_test(partition_by=declared)
+    pc = _resolve_partition(sd, _empty_pipeline(), schema, logging.getLogger("t"))
+    assert pc is None
+
+
+def test_resolve_partition_config_override_none_suppresses_source_and_default() -> None:
+    """A config-level `partition: none` beats both the source form and the default."""
+    from dtex.engine.runner import _resolve_partition
+
+    override = PartitionConfig(field=None, type=PartitionType.NONE)
+    sd, schema = _stream_def_for_partition_test(partition_by="created_date")
+    pc = _resolve_partition(
+        sd,
+        _empty_pipeline({sd.name: override}),
+        schema,
+        logging.getLogger("t"),
+    )
+    assert pc is None
+
+
+def test_partition_config_none_forms_and_validation() -> None:
+    """`none` parses from short string and long form; extra keys are rejected."""
+    for raw in ("none", "NONE", "  none  "):
+        pc = PartitionConfig.from_dict(raw)
+        assert pc.type is PartitionType.NONE
+        assert pc.field is None
+    pc = PartitionConfig.from_dict({"type": "none"})
+    assert pc.type is PartitionType.NONE
+    assert pc.describe() == "none (explicitly unpartitioned)"
+    with pytest.raises(ValueError, match="explicitly unpartitioned"):
+        PartitionConfig(field="created", type=PartitionType.NONE)
+
+
 def test_resolve_partition_auto_default_timestamp_cursor() -> None:
     """No declaration + incremental timestamp cursor → TIME+DAY on cursor field."""
     from dtex.engine.runner import _resolve_partition

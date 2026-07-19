@@ -82,6 +82,26 @@ for non-SNI routing), `as_of_system_time` (default empty; e.g.
 
 Secret: `password` (default ref `${env.COCKROACHDB_PASSWORD}`).
 
+## Partitioning on BigQuery — read this before a large bootstrap
+
+The engine auto-partitions a timestamp-cursor stream by TIME/DAY on the
+cursor column. That default is right for steady-state incrementals but
+**hazardous during a bootstrap**: the PK-order sweep writes rows from the
+whole table history into every batch, each load touches hundreds of
+day-partitions, and BigQuery's *partition modifications per
+column-partitioned table* quota (5,000/day) dies mid-backfill.
+
+For any stream whose first sync is large, declare one of:
+
+```yaml
+partition_by: {type: ingestion}   # _PARTITIONTIME; one partition per load
+partition_by: none                # explicitly unpartitioned
+```
+
+`ingestion` keeps load-date pruning; `none` matches what most EL tools
+(Airbyte, Fivetran) produce. Switching an existing table's partitioning
+requires dropping and re-bootstrapping it — decide before the first sync.
+
 ## REGIONAL BY ROW tables
 
 A multi-region table's hidden `crdb_region` column is part of its primary

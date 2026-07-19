@@ -282,7 +282,8 @@ def _resolve_partition(
             chosen.describe(),
             stream_def.name,
         )
-        return chosen
+        # An explicit NONE means "unpartitioned, and do NOT auto-default".
+        return None if chosen.type is PartitionType.NONE else chosen
 
     # 2. Source-declared partition_by from register.yaml.
     declared = stream_def.partition_by
@@ -292,7 +293,7 @@ def _resolve_partition(
             stream_def.name,
             declared.describe(),
         )
-        return declared
+        return None if declared.type is PartitionType.NONE else declared
     if isinstance(declared, str):
         # Short form. Check whether TIME+DAY can actually apply to this
         # column on this destination — see the backward-compat NOTE above.

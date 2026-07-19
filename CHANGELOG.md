@@ -10,6 +10,19 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Added
+
+- **`partition_by: none` — explicit partitioning opt-out.** A timestamp- or
+  date-cursor stream is auto-promoted to TIME/DAY partitioning on the cursor
+  column; there was no way to refuse. That default is hazardous for
+  backfill-heavy streams: a bootstrap sweep writes the whole table history
+  into every batch, each load touches hundreds of day-partitions, and
+  BigQuery's partition-modification quota (5,000/day/table) fails the run.
+  `partition_by: none` (register.yaml) and `partition: none` (per-stream
+  config override) now resolve to "explicitly unpartitioned" and suppress
+  the auto-default. The cockroachdb connector README documents when to
+  choose `none` vs `{type: ingestion}` for large first syncs.
+
 ### Fixed
 
 - **BigQuery GCS staging uploads use chunked resumable transfer.** The

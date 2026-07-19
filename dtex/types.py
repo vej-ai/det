@@ -280,11 +280,20 @@ class PartitionType(_StrEnum):
       ``_PARTITIONTIME``). ``field`` must be ``None`` — there is no source
       column to bind. Useful for append-only logs without a natural date
       column.
+    * ``NONE`` — explicitly unpartitioned. The declaration exists to
+      *suppress* the engine's cursor-based auto-default: without it, a
+      timestamp-cursor stream is silently promoted to TIME/DAY on the
+      cursor column, which is hazardous for backfill-heavy streams — a
+      bootstrap sweep writes rows from the whole table history into every
+      batch, and each load then touches hundreds of partitions, exhausting
+      BigQuery's partition-modification quota. ``field`` / ``granularity``
+      / ``range`` must all be absent. YAML short form: ``partition_by: none``.
     """
 
     TIME = "time"
     RANGE = "range"
     INGESTION = "ingestion"
+    NONE = "none"
 
 
 class TimeGranularity(_StrEnum):
@@ -481,7 +490,7 @@ class PartitionConfig:
                     "partition_by type='range' must not declare a 'granularity' "
                     "(granularity is for type='time' only)"
                 )
-        else:  # PartitionType.INGESTION
+        elif self.type is PartitionType.INGESTION:
             if self.field is not None:
                 raise ValueError(
                     "partition_by type='ingestion' must not declare a 'field' "
@@ -496,6 +505,12 @@ class PartitionConfig:
                 raise ValueError(
                     "partition_by type='ingestion' must not declare a 'range' "
                     "block"
+                )
+        else:  # PartitionType.NONE
+            if self.field is not None or self.granularity is not None or self.range is not None:
+                raise ValueError(
+                    "partition_by type='none' must not declare 'field', "
+                    "'granularity' or 'range' — it means explicitly unpartitioned"
                 )
 
     @classmethod
@@ -527,6 +542,12 @@ class PartitionConfig:
         drops a partition declaration.
         """
         if isinstance(data, str):
+            # NOTE: the literal string "none" is the opt-out, not a column
+            # name. YAML `partition_by: none` parses as the *string* "none"
+            # (YAML's null spellings are null/~/empty — `none` is not one),
+            # so this is the natural spelling for "explicitly unpartitioned".
+            if data.strip().lower() == "none":
+                return cls(field=None, type=PartitionType.NONE)
             return cls.from_short(data)
         if not isinstance(data, Mapping):
             raise ValueError(
@@ -587,8 +608,11 @@ class PartitionConfig:
                 f"{self.field} (RANGE {self.range.start}..{self.range.end}"
                 f"/{self.range.interval})"
             )
-        # INGESTION — field is None
-        return "_PARTITIONTIME (INGESTION/DAY)"
+        if self.type is PartitionType.INGESTION:
+            # field is None
+            return "_PARTITIONTIME (INGESTION/DAY)"
+        # NONE — explicitly unpartitioned
+        return "none (explicitly unpartitioned)"
 
 
 def _parse_partition_by(value: Any) -> str | PartitionConfig | None:
@@ -597,9 +621,13 @@ def _parse_partition_by(value: Any) -> str | PartitionConfig | None:
     Accepted shapes (docs/05 §3.x):
 
     * ``None`` — no declaration; the engine may compute an auto-default.
-    * a string — the short form (column name). Stored verbatim; the engine
-      promotes it to a :class:`PartitionConfig` at resolution time with the
-      cursor type in hand (see the resolver's NOTE in :mod:`dtex.engine.runner`).
+    * the string ``"none"`` — the explicit opt-out; promoted here to a
+      :class:`PartitionConfig` of type ``NONE`` so the resolver suppresses
+      its cursor-based auto-default.
+    * any other string — the short form (column name). Stored verbatim; the
+      engine promotes it to a :class:`PartitionConfig` at resolution time
+      with the cursor type in hand (see the resolver's NOTE in
+      :mod:`dtex.engine.runner`).
     * a mapping — the long form, parsed by :meth:`PartitionConfig.from_dict`.
 
     Kept as a module-level helper so :class:`PipelineConfig`'s
@@ -608,6 +636,11 @@ def _parse_partition_by(value: Any) -> str | PartitionConfig | None:
     if value is None:
         return None
     if isinstance(value, str):
+        # The opt-out spelling is promoted to a typed PartitionConfig here
+        # so the resolver's short-form-degradation path (which treats a bare
+        # string as a column name) never sees it.
+        if value.strip().lower() == "none":
+            return PartitionConfig(field=None, type=PartitionType.NONE)
         return value
     if isinstance(value, PartitionConfig):
         return value
