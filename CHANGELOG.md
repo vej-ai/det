@@ -10,6 +10,15 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-20
+
+Adds stream-level run leasing so a long-running stream (e.g. a multi-hour
+bootstrap of a huge table) no longer blocks the rest of a source's schedule,
+plus a `partition_by: none` opt-out for the cursor auto-default. Also fixes a
+BigQuery GCS-upload timeout on wide-row batches. All changes are
+backward-compatible: a project that sets nothing new behaves exactly as on
+0.4.0.
+
 ### Added
 
 - **Stream-level run leasing — non-blocking parallel syncs.** A long-running
@@ -569,7 +578,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/vej-ai/dtex/releases/tag/v0.5.0
 [0.4.0]: https://github.com/vej-ai/dtex/releases/tag/v0.4.0
 [0.3.1]: https://github.com/vej-ai/dtex/releases/tag/v0.3.1
 [0.3.0]: https://github.com/vej-ai/dtex/releases/tag/v0.3.0
