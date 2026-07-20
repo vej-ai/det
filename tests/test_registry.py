@@ -269,6 +269,18 @@ def test_destination_full_hook_set_registers() -> None:
         def max_concurrent_writes(config):  # type: ignore[no-untyped-def]
             return 10
 
+        @destination.read_leases
+        def read_leases(conn, connector):  # type: ignore[no-untyped-def]
+            return []
+
+        @destination.acquire_lease
+        def acquire_lease(conn, lease):  # type: ignore[no-untyped-def]
+            return True
+
+        @destination.release_lease
+        def release_lease(conn, lease):  # type: ignore[no-untyped-def]
+            pass
+
         @destination.close
         def close(conn):  # type: ignore[no-untyped-def]
             pass
@@ -608,11 +620,12 @@ def test_constants_are_consistent() -> None:
     assert STREAM_INJECTABLES == frozenset(
         {"config", "state", "cursor", "log", "stream_def"}
     )
-    # Eleven hooks as of stage 8e (max_concurrent_writes added).
-    assert len(DESTINATION_HOOKS) == 11
+    # Fourteen hooks: 11 as of stage 8e + the three lease hooks (docs/05 §5.5).
+    assert len(DESTINATION_HOOKS) == 14
     assert "transaction" in DESTINATION_HOOKS
     assert "write_run_record" in DESTINATION_HOOKS
     assert "max_concurrent_writes" in DESTINATION_HOOKS
+    assert {"read_leases", "acquire_lease", "release_lease"} <= DESTINATION_HOOKS
 
 
 def test_stream_registration_is_frozen() -> None:

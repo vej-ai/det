@@ -62,6 +62,7 @@ from dtex.engine.normalize import normalize_batch
 from dtex.registry import compute_injection
 from dtex.secrets import load_project_plugins
 from dtex.types import (
+    LEASE_HEARTBEAT_INTERVAL_SECONDS,
     Batch,
     Capability,
     Config,
@@ -69,6 +70,8 @@ from dtex.types import (
     CursorType,
     Field,
     FieldType,
+    LeaseRecord,
+    LeaseStatus,
     PartitionConfig,
     PartitionType,
     PipelineConfig,
@@ -95,6 +98,7 @@ from dtex.types import (
 # leaves the capability-dependent check to the engine).
 _CORE_HOOKS = ("capabilities", "open", "ensure_schema", "write_batch", "close")
 _STATE_HOOKS = ("read_state", "commit_state")
+_LEASE_HOOKS = ("read_leases", "acquire_lease", "release_lease")
 
 
 class EngineError(Exception):
@@ -491,7 +495,177 @@ def _resolve_destination_hooks(
                 f"(docs/09 §4)"
             )
         hooks["write_run_record"] = hook.func
+
+    if Capability.LEASE in capabilities:
+        for name in _LEASE_HOOKS:
+            hook = registry.hook(name)
+            if hook is None:
+                raise EngineError(
+                    f"destination {dest.manifest.name!r} declares "
+                    f"Capability.LEASE but is missing the @destination.{name} "
+                    f"hook required to host stream leases (docs/05 §5.5)"
+                )
+            hooks[name] = hook.func
     return hooks, capabilities
+
+
+# ---------------------------------------------------------------------------
+# Stream leasing — cross-build coordination (docs/05 §5.5)
+# ---------------------------------------------------------------------------
+
+
+class _LeaseCoordinator:
+    """Owns the stream-lease lifecycle for one run — docs/05 §5.5.
+
+    Constructed only when the destination declares :attr:`Capability.LEASE`;
+    otherwise the run never builds one and behaves exactly as before (the
+    ``None`` coordinator is the backward-compatible no-op path). It:
+
+    * reads every existing lease for the source once at run start,
+    * decides per stream whether to :meth:`acquire` (and skips it as
+      ``SKIPPED_LEASED`` when a *live* lease from another build holds it),
+    * enforces the per-source ``max_parallel`` cap on how many streams this
+      one build leases,
+    * hands each running stream a throttled :meth:`heartbeat` callback, and
+    * :meth:`release`s each lease with a terminal status.
+
+    A build only ever *releases* leases it acquired this run — it never
+    terminates another build's lease, so two builds cooperate rather than
+    fight. A crashed build's lease is reclaimed by staleness, not by force.
+    """
+
+    def __init__(
+        self,
+        hooks: Mapping[str, Callable[..., Any]],
+        conn: Any,
+        connector: str,
+        run_id: str,
+        max_parallel: int | None,
+        log: Any,
+    ) -> None:
+        self._hooks = hooks
+        self._conn = conn
+        self._connector = connector
+        self._run_id = run_id
+        self._max_parallel = max_parallel
+        self._log = log
+        # Live leases held by *other* runs, keyed by stream — the skip set.
+        now = datetime.now(UTC)
+        existing = hooks["read_leases"](conn, connector)
+        self._live_by_other: dict[str, LeaseRecord] = {
+            lease.stream: lease
+            for lease in existing
+            if lease.run_id != run_id and lease.is_live(now=now)
+        }
+        # Streams this run has acquired (so it only releases its own).
+        self._held: set[str] = set()
+        # Last heartbeat wall-clock per held stream, for throttling.
+        self._last_beat: dict[str, datetime] = {}
+
+    def try_acquire(self, stream: str) -> bool:
+        """Attempt to lease ``stream`` for this run. Returns ``False`` to skip.
+
+        Returns ``False`` when another live lease holds the stream, or when
+        this build has already hit its ``max_parallel`` cap. On ``True`` the
+        lease row is written (status ``running``, fresh heartbeat) and the
+        stream is recorded as held.
+        """
+        if stream in self._live_by_other:
+            self._log.info(
+                "stream %r is leased by run %r (live) — skipping",
+                stream,
+                self._live_by_other[stream].run_id,
+            )
+            return False
+        if self._max_parallel is not None and len(self._held) >= self._max_parallel:
+            self._log.info(
+                "stream %r not leased — max_parallel=%d reached this build",
+                stream,
+                self._max_parallel,
+            )
+            return False
+        now = datetime.now(UTC)
+        record = LeaseRecord(
+            connector=self._connector,
+            stream=stream,
+            run_id=self._run_id,
+            status=LeaseStatus.RUNNING,
+            acquired_at=now,
+            heartbeat_at=now,
+        )
+        # acquire_lease is the destination's compare-and-set: it must refuse
+        # (return False) if a *live* lease from another run appeared between
+        # our read and now (the race two concurrent builds hit). A refusal
+        # here means we lost the race — treat exactly like a pre-existing
+        # live lease and skip.
+        won = self._hooks["acquire_lease"](self._conn, record)
+        if not won:
+            self._log.info("stream %r lost lease race — skipping", stream)
+            return False
+        self._held.add(stream)
+        self._last_beat[stream] = now
+        return True
+
+    def heartbeat_for(self, stream: str) -> Callable[[], None]:
+        """Return the throttled per-batch heartbeat callback for ``stream``."""
+
+        def _beat() -> None:
+            now = datetime.now(UTC)
+            last = self._last_beat.get(stream)
+            if (
+                last is not None
+                and (now - last).total_seconds() < LEASE_HEARTBEAT_INTERVAL_SECONDS
+            ):
+                return
+            self._last_beat[stream] = now
+            self._hooks["release_lease"](
+                self._conn,
+                LeaseRecord(
+                    connector=self._connector,
+                    stream=stream,
+                    run_id=self._run_id,
+                    status=LeaseStatus.RUNNING,
+                    heartbeat_at=now,
+                ),
+            )
+
+        return _beat
+
+    def release(self, stream: str, *, status: LeaseStatus) -> None:
+        """Release a held lease with a terminal status (``done`` / ``failed``).
+
+        A no-op for a stream this run never acquired — so a skipped-leased
+        stream never has its (other run's) lease touched.
+        """
+        if stream not in self._held:
+            return
+        self._hooks["release_lease"](
+            self._conn,
+            LeaseRecord(
+                connector=self._connector,
+                stream=stream,
+                run_id=self._run_id,
+                status=status,
+                heartbeat_at=datetime.now(UTC),
+            ),
+        )
+        self._held.discard(stream)
+
+
+def _safe_release(
+    leases: _LeaseCoordinator, stream: str, status: LeaseStatus, log: Any
+) -> None:
+    """Release a lease, swallowing any release error so it can't mask the run.
+
+    A lease release is best-effort bookkeeping: if the destination write fails
+    (e.g. the connection is already broken because the stream just crashed),
+    the lease will simply be reclaimed by staleness later. Never let a release
+    failure replace the real stream error the caller is about to propagate.
+    """
+    try:
+        leases.release(stream, status=status)
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must not mask the run.
+        log.warning("failed to release lease for stream %r: %s", stream, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +696,7 @@ def _run_one_stream(
     log: Any,
     run_log: RunLog | None = None,
     stream_config_override: Any = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> StreamResult:
     """Run one stream end to end — docs/02 §Run lifecycle step 5 (a–d).
 
@@ -529,6 +704,15 @@ def _run_one_stream(
     ``run_log`` (docs/09 §2) when one is supplied. ``stream_failed`` is
     emitted by the caller when this raises — the exception carries the data
     needed (error_type / message / traceback) and is fully recorded there.
+
+    ``heartbeat``, when supplied (stream leasing is active — docs/05 §5.5), is
+    invoked once per written batch. It refreshes this stream's lease heartbeat,
+    self-throttling to at most one write per
+    :data:`~dtex.types.LEASE_HEARTBEAT_INTERVAL_SECONDS`, so a long
+    many-batch bootstrap keeps its lease alive without a background thread —
+    a running stream yields batches steadily, which is exactly the liveness
+    signal a heartbeat should track (between-batch beats also avoid any
+    thread-safety concern with the single-threaded destination client).
     """
     registration = source.registry.stream(stream_def.name)
     if registration is None:  # pragma: no cover — validate_connector caught it.
@@ -640,6 +824,8 @@ def _run_one_stream(
             normalized = normalize_batch(first_batch, resolved_schema)
             written = hooks["write_batch"](conn, normalized, stream_meta)
             rows_loaded += written
+            if heartbeat is not None:
+                heartbeat()
             if run_log is not None:
                 run_log.emit(
                     "batch_loaded",
@@ -652,6 +838,8 @@ def _run_one_stream(
                 normalized = normalize_batch(batch, resolved_schema)
                 written = hooks["write_batch"](conn, normalized, stream_meta)
                 rows_loaded += written
+                if heartbeat is not None:
+                    heartbeat()
                 if run_log is not None:
                     run_log.emit(
                         "batch_loaded",
@@ -1461,6 +1649,21 @@ def run(
             r.stream: r for r in prior_records
         }
 
+        # -- Stage 4b: LEASES (docs/05 §5.5) --------------------------------
+        # Only when the destination hosts leases. Otherwise ``leases`` stays
+        # None and the whole path below is inert — the pre-leasing behavior,
+        # so a destination without Capability.LEASE runs exactly as before.
+        leases: _LeaseCoordinator | None = None
+        if Capability.LEASE in capabilities:
+            leases = _LeaseCoordinator(
+                hooks,
+                conn,
+                connector=source.manifest.name,
+                run_id=run_id,
+                max_parallel=project.max_parallel_for(source.manifest.name),
+                log=log,
+            )
+
         # Pre-build a per-stream Config for any stream with a non-empty
         # `streams[name].params` overlay (docs/12 §3.4 — precedence layer 4).
         # Streams without an overlay share the base `source_config`; this
@@ -1488,6 +1691,18 @@ def run(
                     StreamResult(name=stream_def.name, status=StreamStatus.SKIPPED)
                 )
                 continue
+            # Stream leasing (docs/05 §5.5): try to acquire before running.
+            # A live lease held by another build ⇒ skip as SKIPPED_LEASED
+            # (cooperative, not a failure) and move to the next stream.
+            if leases is not None and not leases.try_acquire(stream_def.name):
+                streams.append(
+                    StreamResult(
+                        name=stream_def.name, status=StreamStatus.SKIPPED_LEASED
+                    )
+                )
+                run_log.emit("stream_skipped_leased", stream=stream_def.name)
+                continue
+
             log.info("running stream %r", stream_def.name)
             run_log.active_stream = stream_def.name
             try:
@@ -1502,6 +1717,11 @@ def run(
                     log,
                     run_log=run_log,
                     stream_config_override=per_stream_config.get(stream_def.name),
+                    heartbeat=(
+                        leases.heartbeat_for(stream_def.name)
+                        if leases is not None
+                        else None
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 — recorded, then re-raised.
                 streams.append(
@@ -1516,10 +1736,17 @@ def run(
                     error_message=str(exc),
                     traceback=_format_traceback(exc),
                 )
+                # Release this run's lease as FAILED before propagating, so a
+                # crash on one stream frees it for the next build immediately
+                # rather than waiting out the stale timeout.
+                if leases is not None:
+                    _safe_release(leases, stream_def.name, LeaseStatus.FAILED, log)
                 stream_error = exc
                 break
             else:
                 streams.append(result)
+                if leases is not None:
+                    _safe_release(leases, stream_def.name, LeaseStatus.DONE, log)
                 log.info(
                     "stream %r loaded %d row(s)", stream_def.name, result.rows_loaded
                 )

@@ -350,6 +350,9 @@ DESTINATION_HOOKS: frozenset[str] = frozenset(
         "commit_state",
         "read_state",
         "state_backend",
+        "read_leases",
+        "acquire_lease",
+        "release_lease",
         "transaction",
         "write_run_record",
         "max_concurrent_writes",
@@ -358,8 +361,13 @@ DESTINATION_HOOKS: frozenset[str] = frozenset(
 )
 """Every valid ``@destination.*`` hook name — docs/03 §3.4, docs/05 §1.
 
-Eleven hooks. ``@destination.<anything-else>`` (e.g. a ``write_batchs`` typo)
+Fourteen hooks. ``@destination.<anything-else>`` (e.g. a ``write_batchs`` typo)
 raises :class:`AttributeError` at import time.
+
+``read_leases`` / ``acquire_lease`` / ``release_lease`` are *conditionally*
+mandatory: a destination that declares ``Capability.LEASE`` must define all
+three (the stream run-leasing surface — docs/05 §5.5). Without the capability
+the engine never calls them and the destination behaves exactly as before.
 
 ``transaction`` is a *conditionally* mandatory hook: a destination that
 declares ``Capability.TRANSACTIONAL_LOAD`` must define it (a context-manager

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum, StrEnum
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
@@ -125,6 +125,18 @@ class Capability(Enum):
     streams finish and before ``close``, with a fully-built :class:`RunRecord`.
     Without this capability the engine still writes the per-run JSONL log file
     but skips the destination-side audit row.
+    """
+    LEASE = "lease"
+    """Destination can host the ``_dtex_leases`` table for stream run-leasing.
+
+    A destination that declares this capability MUST implement the three
+    lease hooks — ``@destination.read_leases`` / ``acquire_lease`` /
+    ``release_lease``. With it, the engine leases each stream before running
+    it: a stream already held by a *live* (fresh-heartbeat) lease from another
+    build is skipped as :attr:`StreamStatus.SKIPPED_LEASED` instead of
+    double-run. Without it, the engine skips the whole lease path and behaves
+    exactly as before (sequential, no cross-build coordination) — leasing is
+    strictly additive and backward-compatible. See docs/05 §5.5.
     """
 
 
@@ -351,6 +363,15 @@ class StreamStatus(_StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"
+    SKIPPED_LEASED = "skipped_leased"
+    """Skipped because another live run holds this stream's lease — docs/05 §5.5.
+
+    Distinct from :attr:`SKIPPED` (which means "not selected this run"):
+    ``SKIPPED_LEASED`` means the stream *was* selected but a concurrent build
+    is already running it (a fresh-heartbeat lease exists in ``_dtex_leases``),
+    so this build stepped over it and ran the rest. A run with only
+    ``SUCCEEDED`` / ``SKIPPED`` / ``SKIPPED_LEASED`` streams still succeeds —
+    a leased skip is cooperative, not a failure."""
 
 
 # ---------------------------------------------------------------------------
@@ -1665,6 +1686,106 @@ def _parse_dt(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(str(value))
+
+
+# The default staleness threshold for a stream lease — docs/05 §5.5. A lease
+# whose ``heartbeat_at`` is older than this is considered dead (the holding
+# build crashed without releasing) and is reclaimable by a new acquire. 900s
+# (15 min) is comfortably longer than the between-batch heartbeat interval
+# (:data:`LEASE_HEARTBEAT_INTERVAL_SECONDS`) so a healthy but slow stream — one
+# whose single page takes minutes — is never mistaken for dead, yet short
+# enough that a crashed build frees its streams within one scheduler interval.
+LEASE_STALE_SECONDS = 900
+
+# How often a running stream refreshes its lease heartbeat — docs/05 §5.5.
+# The engine refreshes between batches (see runner), skipping the write when
+# fewer than this many seconds have elapsed since the last heartbeat, so a
+# fast many-batch stream does not hammer the destination with lease writes.
+LEASE_HEARTBEAT_INTERVAL_SECONDS = 60
+
+
+class LeaseStatus(_StrEnum):
+    """Lifecycle status of a ``_dtex_leases`` row — docs/05 §5.5."""
+
+    RUNNING = "running"
+    """A build is actively running this stream; heartbeat is being refreshed."""
+    DONE = "done"
+    """The stream finished; the lease is released and re-acquirable."""
+    FAILED = "failed"
+    """The stream errored; the lease is released (a terminal, non-live state)."""
+
+
+@dataclass
+class LeaseRecord:
+    """One ``_dtex_leases`` row — a stream's cross-build run lease (docs/05 §5.5).
+
+    Primary key is ``(connector, stream)`` — the same keying as
+    :class:`StateRecord`, so state and lease line up per stream. A lease is
+    *live* (blocks another build from running the stream) when its status is
+    ``running`` AND its ``heartbeat_at`` is within
+    :data:`LEASE_STALE_SECONDS` of now. Any other combination — a terminal
+    status, or a ``running`` row whose heartbeat went stale because the holder
+    crashed — is dead and freely re-acquirable.
+
+    # NOTE: not frozen — the engine stamps ``heartbeat_at`` in place across a
+    # run. Round-trips via ``to_row`` / ``from_row`` are the persistence
+    # boundary, matching :class:`StateRecord`.
+    """
+
+    connector: str
+    stream: str
+    run_id: str
+    status: LeaseStatus = LeaseStatus.RUNNING
+    acquired_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+
+    def is_live(self, *, now: datetime, stale_seconds: int = LEASE_STALE_SECONDS) -> bool:
+        """Is this lease currently blocking (running + fresh heartbeat)?
+
+        A ``running`` lease whose ``heartbeat_at`` is older than
+        ``stale_seconds`` is treated as dead (crashed holder) and returns
+        ``False`` so a new build can reclaim it. Terminal statuses
+        (``done`` / ``failed``) are never live.
+        """
+        if self.status is not LeaseStatus.RUNNING:
+            return False
+        if self.heartbeat_at is None:
+            return False
+        # A destination whose TIMESTAMP columns are timezone-naive (DuckDB —
+        # see its commit_state NOTE) hands back a naive heartbeat; ``now`` is
+        # UTC-aware. Both represent a UTC wall-clock instant, so coerce a naive
+        # value to UTC rather than crash on the aware/naive subtraction.
+        beat = self.heartbeat_at
+        if beat.tzinfo is None:
+            beat = beat.replace(tzinfo=UTC)
+        reference = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        age = (reference - beat).total_seconds()
+        return age <= stale_seconds
+
+    def to_row(self) -> dict[str, Any]:
+        """Serialize to a plain dict matching the ``_dtex_leases`` columns."""
+        return {
+            "connector": self.connector,
+            "stream": self.stream,
+            "run_id": self.run_id,
+            "status": self.status.value,
+            "acquired_at": None if self.acquired_at is None else self.acquired_at.isoformat(),
+            "heartbeat_at": (
+                None if self.heartbeat_at is None else self.heartbeat_at.isoformat()
+            ),
+        }
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> LeaseRecord:
+        """Deserialize a ``_dtex_leases`` row read back from a destination."""
+        return cls(
+            connector=str(row["connector"]),
+            stream=str(row["stream"]),
+            run_id=str(row["run_id"]),
+            status=LeaseStatus.parse(row["status"]),
+            acquired_at=_parse_dt(row.get("acquired_at")),
+            heartbeat_at=_parse_dt(row.get("heartbeat_at")),
+        )
 
 
 @dataclass(frozen=True)

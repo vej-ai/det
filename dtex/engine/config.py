@@ -101,7 +101,23 @@ class ProjectConfig:
     config_paths: tuple[str, ...] = ("configs",)
     vars: Mapping[str, Any] = ()  # type: ignore[assignment]
     working_dir: str = ".dtex"
+    # Per-source cap on how many streams one build actively leases at once —
+    # docs/05 §5.5. Shape in dtex_project.yml: ``concurrency: {<source>: N}``.
+    # A source absent from the map (or the whole key absent) is unbounded — the
+    # pre-leasing behavior, so existing project files are unchanged. Leasing
+    # itself is the correctness floor (a stream never double-runs regardless of
+    # this cap); ``max_parallel`` only bounds fan-out within a single build.
+    concurrency: Mapping[str, int] = ()  # type: ignore[assignment]
     root: Path = Path()
+
+    def max_parallel_for(self, source_name: str) -> int | None:
+        """The per-source stream-lease cap, or ``None`` for unbounded.
+
+        Reads ``concurrency[<source>]`` from ``dtex_project.yml``; absent ⇒
+        ``None`` (no cap — every selected, unleased stream runs this build).
+        """
+        value = dict(self.concurrency).get(source_name)
+        return None if value is None else int(value)
 
     @classmethod
     def load(cls, project_root: Path) -> ProjectConfig:
@@ -146,8 +162,33 @@ class ProjectConfig:
             config_paths=_paths("config_paths", ("configs",)),
             vars=dict(raw.get("vars") or {}),
             working_dir=str(raw.get("working_dir", ".dtex")),
+            concurrency=_parse_concurrency(raw.get("concurrency"), path),
             root=project_root,
         )
+
+
+def _parse_concurrency(raw: Any, path: Path) -> Mapping[str, int]:
+    """Parse the ``concurrency:`` map from ``dtex_project.yml`` — docs/05 §5.5.
+
+    Shape: ``{<source_name>: <positive int>}``. Absent ⇒ empty map (every
+    source unbounded — the pre-leasing default). A non-mapping value, or a
+    non-positive / non-integer cap, is a :class:`ConfigError` naming the
+    offending key so a typo fails loudly rather than silently disabling the
+    cap.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{path}: 'concurrency' must be a mapping of source → int")
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(
+                f"{path}: concurrency[{key!r}] must be a positive integer, "
+                f"got {value!r}"
+            )
+        out[str(key)] = value
+    return out
 
 
 @dataclass(frozen=True)

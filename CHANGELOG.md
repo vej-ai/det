@@ -12,6 +12,23 @@ For what is *planned* — versus what has shipped — see
 
 ### Added
 
+- **Stream-level run leasing — non-blocking parallel syncs.** A long-running
+  stream (e.g. a multi-hour bootstrap of a huge table) no longer blocks every
+  other stream's schedule. A destination that declares the new
+  `Capability.LEASE` (BigQuery and DuckDB now do) hosts a `_dtex_leases`
+  table; the engine leases each stream before running it. A stream already
+  held by a *live* lease from another concurrent build is skipped as the new
+  `StreamStatus.SKIPPED_LEASED` (a cooperative skip — the run still
+  succeeds) instead of double-run, and the build runs the rest. Leases carry
+  a heartbeat refreshed between batches; a lease whose heartbeat goes stale
+  (default 15 min — a crashed holder) is reclaimable, so a dead build never
+  blocks a stream forever. A per-source `concurrency: {<source>: N}` cap in
+  `dtex_project.yml` bounds how many streams one build leases at once
+  (leasing itself is the correctness floor — a stream never double-runs
+  regardless of the cap). Fully backward-compatible: a destination without
+  `Capability.LEASE`, or a project with no `concurrency:` key, behaves
+  exactly as before (sequential, no lease table, no coordination).
+
 - **`partition_by: none` — explicit partitioning opt-out.** A timestamp- or
   date-cursor stream is auto-promoted to TIME/DAY partitioning on the cursor
   column; there was no way to refuse. That default is hazardous for

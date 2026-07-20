@@ -83,7 +83,7 @@ def _events_meta(
 
 
 def test_capabilities_declares_tier_a_merge_evolution(duckdb_destination: LoadedConnector) -> None:
-    """DuckDB declares STATE, MERGE, SCHEMA_EVOLUTION, TRANSACTIONAL_LOAD and RUN_RECORDS."""
+    """DuckDB declares STATE, MERGE, SCHEMA_EVOLUTION, TRANSACTIONAL_LOAD, RUN_RECORDS, LEASE."""
     caps = _hooks(duckdb_destination)["capabilities"]()
     assert caps == {
         Capability.STATE,
@@ -91,6 +91,7 @@ def test_capabilities_declares_tier_a_merge_evolution(duckdb_destination: Loaded
         Capability.SCHEMA_EVOLUTION,
         Capability.TRANSACTIONAL_LOAD,
         Capability.RUN_RECORDS,
+        Capability.LEASE,
     }
 
 
