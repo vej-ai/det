@@ -321,6 +321,7 @@ class BQConn:
     replace_truncated: set[str] = field(default_factory=set)
     state_table_ready: bool = False
     runs_table_ready: bool = False
+    lease_table_ready: bool = False
 
 
 # --------------------------------------------------------------------------

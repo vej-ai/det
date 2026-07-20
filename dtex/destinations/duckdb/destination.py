@@ -49,6 +49,8 @@ from dtex import (
     Batch,
     Capability,
     Config,
+    LeaseRecord,
+    LeaseStatus,
     RunRecord,
     Schema,
     StateRecord,
@@ -86,6 +88,11 @@ _STATE_TABLE = "_dtex_state"
 # first write_run_record call via the ``DuckConn.runs_table_ready`` flag.
 _RUNS_TABLE = "_dtex_runs"
 
+# The engine-owned stream-lease table — docs/05 §5.5. One row per
+# (connector, stream); same ``_dtex_`` namespace. Created lazily on first
+# lease op via ``DuckConn.lease_table_ready``.
+_LEASE_TABLE = "_dtex_leases"
+
 
 @dataclass
 class DuckConn:
@@ -115,6 +122,7 @@ class DuckConn:
     replace_truncated: set[str] = field(default_factory=set)
     state_table_ready: bool = False
     runs_table_ready: bool = False
+    lease_table_ready: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -151,6 +159,7 @@ def capabilities() -> set[Capability]:
         Capability.SCHEMA_EVOLUTION,
         Capability.TRANSACTIONAL_LOAD,
         Capability.RUN_RECORDS,
+        Capability.LEASE,
     }
 
 
@@ -738,6 +747,185 @@ def _decode_json(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+# --------------------------------------------------------------------------
+# Stream leasing — the _dtex_leases table — docs/05 §5.5 (Capability.LEASE)
+# --------------------------------------------------------------------------
+
+
+def _ensure_lease_table(conn: DuckConn) -> None:
+    """Create ``_dtex_leases`` lazily on first use — docs/05 §5.5.
+
+    Six columns mirroring :meth:`LeaseRecord.to_row`; primary key
+    ``(connector, stream)`` — one lease per stream. ``acquired_at`` /
+    ``heartbeat_at`` are ``TIMESTAMP`` (UTC wall-clock, same convention as
+    ``_dtex_state.updated_at``).
+    """
+    if conn.lease_table_ready:
+        return
+    table = qualified_table(conn.dataset, _LEASE_TABLE)
+    conn.conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {table} ("
+        f"  {quote_identifier('connector', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('stream', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('run_id', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('status', kind='column')} VARCHAR NOT NULL, "
+        f"  {quote_identifier('acquired_at', kind='column')} TIMESTAMP, "
+        f"  {quote_identifier('heartbeat_at', kind='column')} TIMESTAMP, "
+        f"  PRIMARY KEY ({quote_identifier('connector', kind='column')}, "
+        f"{quote_identifier('stream', kind='column')})"
+        f")"
+    )
+    conn.lease_table_ready = True
+
+
+@destination.read_leases
+def read_leases(conn: DuckConn, connector: str) -> list[LeaseRecord]:
+    """Load every ``_dtex_leases`` row for a connector — docs/05 §5.5.
+
+    Called once at run start so the engine can decide which streams are held
+    by a live lease. Liveness (fresh heartbeat vs. stale) is judged by the
+    engine (:meth:`LeaseRecord.is_live`), not here — this hook just returns the
+    raw rows.
+    """
+    _ensure_lease_table(conn)
+    table = qualified_table(conn.dataset, _LEASE_TABLE)
+    rows = conn.conn.execute(
+        f"SELECT connector, stream, run_id, status, acquired_at, heartbeat_at "
+        f"FROM {table} WHERE connector = ?",
+        [connector],
+    ).fetchall()
+    return [
+        LeaseRecord.from_row(
+            {
+                "connector": r[0],
+                "stream": r[1],
+                "run_id": r[2],
+                "status": r[3],
+                "acquired_at": r[4],
+                "heartbeat_at": r[5],
+            }
+        )
+        for r in rows
+    ]
+
+
+@destination.acquire_lease
+def acquire_lease(conn: DuckConn, lease: LeaseRecord) -> bool:
+    """Compare-and-set acquire of a stream lease — docs/05 §5.5. Returns won?
+
+    Writes the ``running`` lease row only if no *live* lease currently holds
+    the stream: either no row exists, or the existing row is this run's own,
+    or its heartbeat is stale (crashed holder — reclaimable). The read + write
+    run inside a transaction so two concurrent builds cannot both observe
+    "free" and both win — the loser's ``INSERT ... ON CONFLICT`` sees the
+    winner's row and the guard rejects it (returns ``False``).
+
+    # NOTE: DuckDB gives us serializable single-writer semantics on one file;
+    # the transaction here makes the check-then-set atomic against another
+    # connection to the same DB. For BigQuery, the equivalent atomicity comes
+    # from a single ``MERGE`` with the staleness guard in its ``ON`` clause.
+    """
+    _ensure_lease_table(conn)
+    table = qualified_table(conn.dataset, _LEASE_TABLE)
+    now = lease.heartbeat_at or datetime.now(UTC)
+    stale_cutoff = _stale_cutoff(now)
+
+    conn.conn.execute("BEGIN TRANSACTION")
+    try:
+        existing = conn.conn.execute(
+            f"SELECT run_id, status, heartbeat_at FROM {table} "
+            f"WHERE connector = ? AND stream = ?",
+            [lease.connector, lease.stream],
+        ).fetchone()
+        if existing is not None:
+            ex_run, ex_status, ex_beat = existing[0], existing[1], existing[2]
+            # The stored heartbeat is naive UTC (written via _naive_utc); the
+            # cutoff is aware UTC. Normalize the cutoff to naive UTC so the
+            # comparison is like-for-like (see _naive_utc for why the column
+            # is naive-UTC in the first place).
+            cutoff_naive = _naive_utc(stale_cutoff)
+            ex_beat_naive = ex_beat if ex_beat is not None else None
+            held_live = (
+                ex_status == LeaseStatus.RUNNING.value
+                and ex_run != lease.run_id
+                and ex_beat_naive is not None
+                and ex_beat_naive >= cutoff_naive
+            )
+            if held_live:
+                conn.conn.execute("ROLLBACK")
+                return False
+        conn.conn.execute(
+            f"INSERT INTO {table} "
+            f"(connector, stream, run_id, status, acquired_at, heartbeat_at) "
+            f"VALUES (?, ?, ?, ?, ?, ?) "
+            f"ON CONFLICT (connector, stream) DO UPDATE SET "
+            f"  run_id = EXCLUDED.run_id, status = EXCLUDED.status, "
+            f"  acquired_at = EXCLUDED.acquired_at, "
+            f"  heartbeat_at = EXCLUDED.heartbeat_at",
+            [
+                lease.connector,
+                lease.stream,
+                lease.run_id,
+                lease.status.value,
+                _naive_utc(lease.acquired_at or now),
+                _naive_utc(now),
+            ],
+        )
+        conn.conn.execute("COMMIT")
+        return True
+    except Exception:
+        conn.conn.execute("ROLLBACK")
+        raise
+
+
+@destination.release_lease
+def release_lease(conn: DuckConn, lease: LeaseRecord) -> None:
+    """Update a lease's status + heartbeat — docs/05 §5.5.
+
+    Used for both the periodic heartbeat refresh (status ``running``, new
+    ``heartbeat_at``) and terminal release (status ``done`` / ``failed``).
+    Only updates a row this run owns (``run_id`` match) so a heartbeat or
+    release can never stomp another build's lease — a defensive guard for the
+    reclaim case where a stale lease was overwritten by a new holder between
+    this run's acquire and release.
+    """
+    _ensure_lease_table(conn)
+    table = qualified_table(conn.dataset, _LEASE_TABLE)
+    now = lease.heartbeat_at or datetime.now(UTC)
+    conn.conn.execute(
+        f"UPDATE {table} SET status = ?, heartbeat_at = ? "
+        f"WHERE connector = ? AND stream = ? AND run_id = ?",
+        [lease.status.value, _naive_utc(now), lease.connector, lease.stream, lease.run_id],
+    )
+
+
+def _stale_cutoff(now: datetime) -> datetime:
+    """The timestamp before which a heartbeat is stale — docs/05 §5.5."""
+    from datetime import timedelta
+
+    from dtex.types import LEASE_STALE_SECONDS
+
+    return now - timedelta(seconds=LEASE_STALE_SECONDS)
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Convert a datetime to naive UTC wall-clock for a DuckDB TIMESTAMP column.
+
+    # NOTE: this is load-bearing, not cosmetic. DuckDB binds a *timezone-aware*
+    # Python datetime into a naive TIMESTAMP column by converting it to the
+    # process's LOCAL time (verified: a 10:17 UTC value lands as 13:17 in a
+    # UTC+3 process) and then hands it back naive — so a heartbeat written in
+    # one timezone and compared against a UTC ``now`` is wrong by the local
+    # offset, silently breaking staleness. Every timestamp this destination
+    # writes to ``_dtex_leases`` therefore goes through here: aware values are
+    # shifted to UTC then stripped, naive values are assumed already-UTC. The
+    # stored wall-clock is thus always UTC, matching ``_dtex_state.updated_at``.
+    """
+    if value.tzinfo is not None:
+        value = value.astimezone(UTC)
+    return value.replace(tzinfo=None)
 
 
 # --------------------------------------------------------------------------

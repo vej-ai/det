@@ -540,13 +540,14 @@ def _events_meta(
 def test_capabilities_declares_four_no_transactional_load(
     bigquery_destination: LoadedConnector,
 ) -> None:
-    """BigQuery declares STATE, MERGE, SCHEMA_EVOLUTION, RUN_RECORDS — NOT TRANSACTIONAL_LOAD."""
+    """BigQuery declares STATE/MERGE/SCHEMA_EVOLUTION/RUN_RECORDS/LEASE — not TRANSACTIONAL_LOAD."""
     caps = _hooks(bigquery_destination)["capabilities"]()
     assert caps == {
         Capability.STATE,
         Capability.MERGE,
         Capability.SCHEMA_EVOLUTION,
         Capability.RUN_RECORDS,
+        Capability.LEASE,
     }
     # And specifically: no TRANSACTIONAL_LOAD.
     assert Capability.TRANSACTIONAL_LOAD not in caps
@@ -1734,14 +1735,15 @@ def test_engine_resolves_destination_hooks_without_transaction(
     from dtex.engine.runner import _resolve_destination_hooks
 
     hooks, caps = _resolve_destination_hooks(bigquery_destination)
-    # The 4 declared capabilities, no TRANSACTIONAL_LOAD.
+    # The declared capabilities, no TRANSACTIONAL_LOAD.
     assert caps == {
         Capability.STATE,
         Capability.MERGE,
         Capability.SCHEMA_EVOLUTION,
         Capability.RUN_RECORDS,
+        Capability.LEASE,
     }
-    # Every required hook (core + state + run_records) is bound; no
+    # Every required hook (core + state + run_records + lease) is bound; no
     # transaction hook (since TRANSACTIONAL_LOAD is not declared).
     expected = {
         "capabilities",
@@ -1752,6 +1754,9 @@ def test_engine_resolves_destination_hooks_without_transaction(
         "read_state",
         "commit_state",
         "write_run_record",
+        "read_leases",
+        "acquire_lease",
+        "release_lease",
     }
     assert set(hooks) == expected
     assert "transaction" not in hooks

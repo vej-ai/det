@@ -63,6 +63,7 @@ from dtex import (
     Batch,
     Capability,
     Config,
+    LeaseRecord,
     RunRecord,
     Schema,
     StateRecord,
@@ -138,6 +139,10 @@ logger = logging.getLogger(__name__)
 _STATE_TABLE = "_dtex_state"
 _RUNS_TABLE = "_dtex_runs"
 
+# The engine-owned stream-lease table — docs/05 §5.5. One row per
+# (connector, stream); same ``_dtex_`` namespace. Created lazily.
+_LEASE_TABLE = "_dtex_leases"
+
 
 # --------------------------------------------------------------------------
 # capabilities — docs/05 §1
@@ -169,6 +174,7 @@ def capabilities() -> set[Capability]:
         Capability.MERGE,
         Capability.SCHEMA_EVOLUTION,
         Capability.RUN_RECORDS,
+        Capability.LEASE,
     }
 
 
@@ -1157,6 +1163,200 @@ def _runs_schema() -> Iterator[tuple[str, FieldType, str]]:
     yield "error_type", FieldType.STRING, "NULLABLE"
     yield "error_message", FieldType.STRING, "NULLABLE"
     yield "streams_json", FieldType.JSON, "NULLABLE"
+
+
+# --------------------------------------------------------------------------
+# Stream leasing — the _dtex_leases table — docs/05 §5.5 (Capability.LEASE)
+# --------------------------------------------------------------------------
+
+
+def _lease_schema() -> Iterator[tuple[str, FieldType]]:
+    """The canonical ``_dtex_leases`` column set — mirrors LeaseRecord.to_row()."""
+    yield "connector", FieldType.STRING
+    yield "stream", FieldType.STRING
+    yield "run_id", FieldType.STRING
+    yield "status", FieldType.STRING
+    yield "acquired_at", FieldType.TIMESTAMP
+    yield "heartbeat_at", FieldType.TIMESTAMP
+
+
+def _ensure_lease_table(conn: BQConn) -> None:
+    """Create ``_dtex_leases`` lazily on first use — docs/05 §5.5."""
+    if conn.lease_table_ready:
+        return
+    bq = _bigquery_module()
+    client = conn.client
+    fields = [
+        bq.SchemaField(
+            name=name,
+            field_type=bigquery_type(ftype),
+            mode="REQUIRED" if name in ("connector", "stream", "run_id") else "NULLABLE",
+        )
+        for name, ftype in _lease_schema()
+    ]
+    table_ref = bq.TableReference(
+        bq.DatasetReference(client.project, client.dataset), _LEASE_TABLE
+    )
+    client.bq.create_table(bq.Table(table_ref, schema=fields), exists_ok=True)
+    conn.lease_table_ready = True
+
+
+@destination.read_leases
+def read_leases(conn: BQConn, connector: str) -> list[LeaseRecord]:
+    """Load every ``_dtex_leases`` row for a connector — docs/05 §5.5.
+
+    Liveness is judged by the engine (:meth:`LeaseRecord.is_live`); this hook
+    returns raw rows via a parameterized query.
+    """
+    _ensure_lease_table(conn)
+    bq = _bigquery_module()
+    client = conn.client
+    table = fq_table(client.project, client.dataset, _LEASE_TABLE)
+    sql = (
+        f"SELECT connector, stream, run_id, status, acquired_at, heartbeat_at "
+        f"FROM {table} WHERE connector = @connector"
+    )
+    job_config = bq.QueryJobConfig(
+        query_parameters=[bq.ScalarQueryParameter("connector", "STRING", connector)]
+    )
+    job = client.bq.query(sql, job_config=job_config, location=client.location)
+    rows = list(job.result(timeout=client.job_timeout_seconds))
+    return [
+        LeaseRecord.from_row(
+            {
+                "connector": r["connector"],
+                "stream": r["stream"],
+                "run_id": r["run_id"],
+                "status": r["status"],
+                "acquired_at": r["acquired_at"],
+                "heartbeat_at": r["heartbeat_at"],
+            }
+        )
+        for r in rows
+    ]
+
+
+@destination.acquire_lease
+def acquire_lease(conn: BQConn, lease: LeaseRecord) -> bool:
+    """Compare-and-set acquire via a single guarded ``MERGE`` — docs/05 §5.5.
+
+    Atomicity comes from one ``MERGE``: it inserts/updates the lease row only
+    when NOT blocked by a live lease from another run. The staleness guard
+    lives in the matched-condition — a matched row is *overwritten* only if it
+    is this run's own, or terminal, or its heartbeat is older than the stale
+    cutoff. A live foreign lease matches neither branch, so the row is left
+    untouched. We then read back the row's ``run_id`` to learn whether we won
+    (our run_id landed) or lost the race (a concurrent winner's did).
+
+    # NOTE: BigQuery has no row locks, but a single MERGE statement is
+    # atomic, and concurrent MERGEs to the same table serialize (the second
+    # sees the first's committed effect or conflicts and retries at the SDK
+    # layer). Combined with the read-back check, two builds racing to acquire
+    # cannot both observe themselves as the winner.
+    """
+    _ensure_lease_table(conn)
+    bq = _bigquery_module()
+    client = conn.client
+    now = lease.heartbeat_at or datetime.now(UTC)
+    from dtex.types import LEASE_STALE_SECONDS
+
+    table = fq_table(client.project, client.dataset, _LEASE_TABLE)
+    sql = (
+        f"MERGE INTO {table} T "
+        f"USING (SELECT @connector AS connector, @stream AS stream, "
+        f"       @run_id AS run_id, @status AS status, "
+        f"       @acquired_at AS acquired_at, @heartbeat_at AS heartbeat_at) S "
+        f"ON T.connector = S.connector AND T.stream = S.stream "
+        # Overwrite a matched row ONLY when it is not a live foreign lease:
+        # our own run, or a terminal status, or a stale heartbeat.
+        f"WHEN MATCHED AND ("
+        f"  T.run_id = S.run_id OR T.status != 'running' "
+        f"  OR T.heartbeat_at IS NULL "
+        f"  OR TIMESTAMP_DIFF(S.heartbeat_at, T.heartbeat_at, SECOND) > @stale "
+        f") THEN UPDATE SET "
+        f"  run_id = S.run_id, status = S.status, "
+        f"  acquired_at = S.acquired_at, heartbeat_at = S.heartbeat_at "
+        f"WHEN NOT MATCHED THEN INSERT "
+        f"  (connector, stream, run_id, status, acquired_at, heartbeat_at) "
+        f"  VALUES (S.connector, S.stream, S.run_id, S.status, "
+        f"          S.acquired_at, S.heartbeat_at)"
+    )
+    params = [
+        bq.ScalarQueryParameter("connector", "STRING", lease.connector),
+        bq.ScalarQueryParameter("stream", "STRING", lease.stream),
+        bq.ScalarQueryParameter("run_id", "STRING", lease.run_id),
+        bq.ScalarQueryParameter("status", "STRING", lease.status.value),
+        bq.ScalarQueryParameter("acquired_at", "TIMESTAMP", lease.acquired_at or now),
+        bq.ScalarQueryParameter("heartbeat_at", "TIMESTAMP", now),
+        bq.ScalarQueryParameter("stale", "INT64", LEASE_STALE_SECONDS),
+    ]
+    job_config = bq.QueryJobConfig(query_parameters=params)
+
+    def _run() -> Any:
+        return client.bq.query(sql, job_config=job_config, location=client.location).result(
+            timeout=client.job_timeout_seconds
+        )
+
+    run_with_retries(
+        _run,
+        max_attempts=client.retry_max_attempts,
+        backoff_seconds=client.retry_backoff_seconds,
+    )
+
+    # Read back: did our run_id win the row?
+    check = (
+        f"SELECT run_id FROM {table} WHERE connector = @connector AND stream = @stream"
+    )
+    check_config = bq.QueryJobConfig(
+        query_parameters=[
+            bq.ScalarQueryParameter("connector", "STRING", lease.connector),
+            bq.ScalarQueryParameter("stream", "STRING", lease.stream),
+        ]
+    )
+    rows = list(
+        client.bq.query(check, job_config=check_config, location=client.location).result(
+            timeout=client.job_timeout_seconds
+        )
+    )
+    return bool(rows) and rows[0]["run_id"] == lease.run_id
+
+
+@destination.release_lease
+def release_lease(conn: BQConn, lease: LeaseRecord) -> None:
+    """Update a lease's status + heartbeat via parameterized DML — docs/05 §5.5.
+
+    Guarded on ``run_id`` so a heartbeat/release only touches a row this run
+    owns — it can never stomp a lease a new holder reclaimed after a stale
+    overwrite.
+    """
+    _ensure_lease_table(conn)
+    bq = _bigquery_module()
+    client = conn.client
+    now = lease.heartbeat_at or datetime.now(UTC)
+    table = fq_table(client.project, client.dataset, _LEASE_TABLE)
+    sql = (
+        f"UPDATE {table} SET status = @status, heartbeat_at = @heartbeat_at "
+        f"WHERE connector = @connector AND stream = @stream AND run_id = @run_id"
+    )
+    params = [
+        bq.ScalarQueryParameter("status", "STRING", lease.status.value),
+        bq.ScalarQueryParameter("heartbeat_at", "TIMESTAMP", now),
+        bq.ScalarQueryParameter("connector", "STRING", lease.connector),
+        bq.ScalarQueryParameter("stream", "STRING", lease.stream),
+        bq.ScalarQueryParameter("run_id", "STRING", lease.run_id),
+    ]
+    job_config = bq.QueryJobConfig(query_parameters=params)
+
+    def _run() -> Any:
+        return client.bq.query(sql, job_config=job_config, location=client.location).result(
+            timeout=client.job_timeout_seconds
+        )
+
+    run_with_retries(
+        _run,
+        max_attempts=client.retry_max_attempts,
+        backoff_seconds=client.retry_backoff_seconds,
+    )
 
 
 def _ensure_runs_table(conn: BQConn) -> None:
