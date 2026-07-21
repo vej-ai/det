@@ -10,6 +10,12 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-21
+
+Fixes a state-durability bug that let an interrupted `append`-mode bootstrap
+re-append duplicate rows on restart (root cause of a large CockroachDB
+duplication incident). No API or config change.
+
 ### Fixed
 
 - **An interrupted stream no longer loses its in-progress state (and, for an
@@ -30,6 +36,8 @@ For what is *planned* — versus what has shipped — see
   final end-of-stream commit still runs, a `FULL_REFRESH`-this-run incremental
   stream still writes no state, and a destination without a `commit_state`
   hook still commits nothing.
+
+## [0.5.0] — 2026-07-20
 
 Adds stream-level run leasing so a long-running stream (e.g. a multi-hour
 bootstrap of a huge table) no longer blocks the rest of a source's schedule,
@@ -597,7 +605,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/vej-ai/dtex/releases/tag/v0.5.1
 [0.5.0]: https://github.com/vej-ai/dtex/releases/tag/v0.5.0
 [0.4.0]: https://github.com/vej-ai/dtex/releases/tag/v0.4.0
 [0.3.1]: https://github.com/vej-ai/dtex/releases/tag/v0.3.1
