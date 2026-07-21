@@ -1703,6 +1703,21 @@ LEASE_STALE_SECONDS = 900
 # fast many-batch stream does not hammer the destination with lease writes.
 LEASE_HEARTBEAT_INTERVAL_SECONDS = 60
 
+# How often a running stream flushes its in-progress state (cursor + state_blob)
+# to the destination mid-stream — docs/05 §5.2. Without this, a stream's state
+# was committed only ONCE, after its batch loop finished; an interruption
+# (build timeout, cancel, crash) lost every mid-stream `state.set(...)` the
+# connector made — most critically a bootstrap's resume pointer. On restart the
+# stream then resumed from the last *persisted* pointer (far behind where it had
+# actually written) and, for an `append` stream, re-appended the whole overlap
+# as duplicates. Flushing between batches — always AFTER the batch's rows are
+# durable — bounds that re-append to at most one batch (the one whose rows
+# landed but whose state flush had not yet fired), which the destination's
+# primary-key dedup absorbs. Throttled like the lease heartbeat so a fast
+# many-batch stream does not pay a state write (a MERGE/DML on some warehouses)
+# per batch — the exact per-batch cost `append` mode exists to avoid.
+STATE_COMMIT_INTERVAL_SECONDS = 60
+
 
 class LeaseStatus(_StrEnum):
     """Lifecycle status of a ``_dtex_leases`` row — docs/05 §5.5."""

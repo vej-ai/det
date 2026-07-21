@@ -10,7 +10,26 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
-## [0.5.0] — 2026-07-20
+### Fixed
+
+- **An interrupted stream no longer loses its in-progress state (and, for an
+  `append` stream, no longer re-appends duplicates on restart).** State was
+  committed only once, after a stream's batch loop finished, so a build that
+  timed out, was cancelled, or crashed mid-stream lost every mid-stream
+  `state.set(...)` the connector had made — most critically a bootstrap's
+  resume pointer. The next run then resumed from the last *persisted* pointer,
+  far behind where it had actually written, and an `append` stream re-appended
+  the whole overlap as duplicate rows (this produced ~72M duplicates in a
+  118M-row CockroachDB bootstrap). The engine now flushes state periodically
+  during the batch loop — always *after* a batch's rows are durable
+  (commit-after-write ordering) and throttled to at most one write per
+  `STATE_COMMIT_INTERVAL_SECONDS` (60s) so a fast many-batch stream does not
+  pay a state write per batch. Worst-case re-append on a crash drops from
+  "everything since the last full-stream commit" to "at most one batch", which
+  the destination's primary-key dedup absorbs. Fully backward-compatible: the
+  final end-of-stream commit still runs, a `FULL_REFRESH`-this-run incremental
+  stream still writes no state, and a destination without a `commit_state`
+  hook still commits nothing.
 
 Adds stream-level run leasing so a long-running stream (e.g. a multi-hour
 bootstrap of a huge table) no longer blocks the rest of a source's schedule,
