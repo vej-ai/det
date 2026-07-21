@@ -63,6 +63,7 @@ from dtex.registry import compute_injection
 from dtex.secrets import load_project_plugins
 from dtex.types import (
     LEASE_HEARTBEAT_INTERVAL_SECONDS,
+    STATE_COMMIT_INTERVAL_SECONDS,
     Batch,
     Capability,
     Config,
@@ -811,6 +812,73 @@ def _run_one_stream(
     )
     hooks["ensure_schema"](conn, stream_meta)
 
+    # §3.1 state rule: when an INCREMENTAL-capable stream runs as FULL_REFRESH
+    # this invocation, the engine does NOT write _dtex_state. The prior cursor
+    # row (if any) stays intact, so a sibling incremental config sharing this
+    # source keeps its cursor. Streams that are naturally non-incremental (no
+    # cursor at all) still write state — _dtex_state also tracks rows_total /
+    # last_run_id for those, which is operator-visible audit info. This gates
+    # BOTH the mid-stream flushes and the final commit.
+    skip_state = is_full_refresh_stream and stream_def.is_incremental
+    # A destination that cannot host state (no ``commit_state`` hook) writes no
+    # state at all — the v1 engine mandates Capability.STATE, but a unit test
+    # or a future Tier-B path may drive a stream without it, and that must
+    # behave exactly as before this change: no commit, no error.
+    can_commit_state = "commit_state" in hooks
+
+    def _build_state_record(cursor_value: Any) -> StateRecord:
+        """Build the ``_dtex_state`` row for this stream at the current point.
+
+        Used identically by the throttled mid-stream flush and the final
+        end-of-stream commit so the two never diverge. ``rows_total`` is the
+        prior persisted total plus rows loaded so far this run; a mid-stream
+        flush therefore records a monotonically growing partial total, and the
+        final commit records the complete one.
+        """
+        return StateRecord(
+            connector=run_config.connector,
+            stream=stream_def.name,
+            cursor_value=cursor_value,
+            cursor_type=(
+                stream_def.incremental.cursor_type
+                if stream_def.incremental is not None
+                else None
+            ),
+            state_blob=state.to_dict(),
+            last_run_id=run_config.run_id,
+            rows_total=(prior.rows_total if prior is not None else 0) + rows_loaded,
+        )
+
+    # Throttled mid-stream state flush — docs/05 §5.2. Persists the connector's
+    # in-progress state (e.g. a bootstrap's resume pointer) so an interruption
+    # does not lose it and force a restart-from-far-behind that re-appends
+    # duplicates. MUST be invoked only AFTER a batch's rows are durable
+    # (commit-after-write ordering): the flush records "rows up to here are
+    # safely landed", so recording it before the write would, on a crash
+    # between flush and write, point a resume past rows that never landed.
+    # Wall-clock of the last mid-stream flush; ``None`` until the first flush.
+    # Held in a one-element list so the closure can rebind it (a plain
+    # ``nonlocal`` would work too; the list keeps the closure free of extra
+    # declarations and reads the same as ``_LeaseCoordinator._last_beat``).
+    last_state_flush: list[datetime | None] = [None]
+
+    def _maybe_flush_state() -> None:
+        if skip_state or not can_commit_state:
+            return
+        now = datetime.now(UTC)
+        prev = last_state_flush[0]
+        if prev is not None and (now - prev).total_seconds() < STATE_COMMIT_INTERVAL_SECONDS:
+            return
+        last_state_flush[0] = now
+        # Persist the cursor observed so far (falling back to the run's seed
+        # when nothing has been observed yet) alongside the connector's
+        # in-progress state_blob — the resume pointer that makes an
+        # interrupted stream restart correctly.
+        cursor_now = cursor.observed_max if cursor is not None else None
+        if cursor_now is None:
+            cursor_now = cursor_before
+        hooks["commit_state"](conn, run_config.run_id, [_build_state_record(cursor_now)])
+
     # -- 5c/5d: LOAD + COMMIT — inside the per-stream transaction -----------
     # The NORMALIZE step (docs/02 §Normalize) coerces each batch's values
     # to the resolved schema's declared FieldType right before write_batch.
@@ -824,8 +892,12 @@ def _run_one_stream(
             normalized = normalize_batch(first_batch, resolved_schema)
             written = hooks["write_batch"](conn, normalized, stream_meta)
             rows_loaded += written
+            # Order matters: heartbeat + state flush happen strictly AFTER the
+            # batch's rows are durable (write_batch returned). See
+            # STATE_COMMIT_INTERVAL_SECONDS for why the ordering is the crux.
             if heartbeat is not None:
                 heartbeat()
+            _maybe_flush_state()
             if run_log is not None:
                 run_log.emit(
                     "batch_loaded",
@@ -840,6 +912,7 @@ def _run_one_stream(
                 rows_loaded += written
                 if heartbeat is not None:
                     heartbeat()
+                _maybe_flush_state()
                 if run_log is not None:
                     run_log.emit(
                         "batch_loaded",
@@ -852,29 +925,14 @@ def _run_one_stream(
         if cursor is not None and cursor.observed_max is not None:
             cursor_after = cursor.observed_max
 
-        # §3.1 state rule: when an INCREMENTAL-capable stream runs as
-        # FULL_REFRESH this invocation, the engine does NOT write
-        # _dtex_state. The prior cursor row (if any) stays intact, so a
-        # sibling incremental config sharing this source keeps its cursor.
-        # Streams that are naturally non-incremental (no cursor at all)
-        # still write state — _dtex_state also tracks rows_total /
-        # last_run_id for those, which is operator-visible audit info.
-        skip_state = is_full_refresh_stream and stream_def.is_incremental
-        if not skip_state:
-            record = StateRecord(
-                connector=run_config.connector,
-                stream=stream_def.name,
-                cursor_value=cursor_after,
-                cursor_type=(
-                    stream_def.incremental.cursor_type
-                    if stream_def.incremental is not None
-                    else None
-                ),
-                state_blob=state.to_dict(),
-                last_run_id=run_config.run_id,
-                rows_total=(prior.rows_total if prior is not None else 0) + rows_loaded,
+        # Final commit carries the terminal cursor + complete rows_total. It
+        # always runs (subject to the same skip_state / capability guards as
+        # the mid-stream flushes), so a stream that never crossed a flush
+        # interval still persists its state exactly once, as before.
+        if not skip_state and can_commit_state:
+            hooks["commit_state"](
+                conn, run_config.run_id, [_build_state_record(cursor_after)]
             )
-            hooks["commit_state"](conn, run_config.run_id, [record])
 
     if run_log is not None:
         run_log.emit(
