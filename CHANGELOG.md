@@ -10,6 +10,13 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-22
+
+Adds intra-config stream parallelism: `dtex run -p <config> --threads N` now
+runs a single config's streams concurrently (previously `--threads` only
+applied to `--tag`). Backward-compatible — unset or `1` is the prior
+sequential behavior.
+
 ### Added
 
 - **Stream-level parallelism for `dtex run -p <config> --threads N`.**
@@ -625,7 +632,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/vej-ai/dtex/releases/tag/v0.6.0
 [0.5.1]: https://github.com/vej-ai/dtex/releases/tag/v0.5.1
 [0.5.0]: https://github.com/vej-ai/dtex/releases/tag/v0.5.0
 [0.4.0]: https://github.com/vej-ai/dtex/releases/tag/v0.4.0
