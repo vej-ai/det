@@ -212,10 +212,10 @@ def cli() -> None:
     type=click.IntRange(min=1),
     default=None,
     metavar="N",
-    help="Pipeline-level concurrency for --tag (stage 8e). Overrides "
-    "profiles.yml `threads:`. Each destination's "
-    "@destination.max_concurrent_writes caps further. Meaningless with "
-    "-p (single config) — ignored with a debug log there.",
+    help="Concurrency budget. With --tag: how many configs run at once "
+    "(overrides profiles.yml `threads:`). With -p: how many of the config's "
+    "streams run at once. Either way each destination's "
+    "@destination.max_concurrent_writes caps it further (DuckDB → 1).",
 )
 def run(
     config: str | None,
@@ -297,18 +297,9 @@ def run(
 
     # -p path — the single-config invocation that's existed since stage 8.B.
     assert config is not None  # validated above
-    # --threads has no meaning with -p (one config = no parallelism). Note
-    # in the debug log per the task spec, then silently ignore — surfacing
-    # it as a user-visible warning would clutter CI output for orchestrators
-    # that always pass --threads. The debug log is enough for an operator
-    # actively investigating.
-    if threads is not None:
-        import logging as _logging
-
-        _logging.getLogger("dtex.cli").debug(
-            "--threads %d ignored with -p (single-config runs are not parallelizable)",
-            threads,
-        )
+    # --threads now applies to -p: it runs the config's streams concurrently
+    # (up to N, clamped by the destination's max_concurrent_writes). None/1 ⇒
+    # sequential, the original behavior.
     src_overrides = _parse_kv("param", params)
 
     # dtex.run() never raises — it returns a FAILED RunResult.
@@ -320,6 +311,7 @@ def run(
         destination_params_override=dest_overrides or None,
         full_refresh=full_refresh,
         select=selected,
+        threads=threads,
     )
     print_run_result(result)
     raise SystemExit(0 if result.status is RunStatus.SUCCEEDED else 1)

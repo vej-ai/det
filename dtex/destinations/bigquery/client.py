@@ -25,6 +25,7 @@ every hook then sees the fake. One swap point, total coverage.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -322,6 +323,14 @@ class BQConn:
     state_table_ready: bool = False
     runs_table_ready: bool = False
     lease_table_ready: bool = False
+    # Guards the mutable per-run scratch above (the ``*_ready`` create-once
+    # flags and the ``replace_truncated`` set) when the engine runs streams
+    # concurrently (`dtex run -p … --threads N`). BigQuery's own client is
+    # thread-safe and every load/query is an independent job, so the ONLY
+    # shared mutable state is this bookkeeping; guarding it here keeps the
+    # "create the _dtex_* table at most once" and "truncate a replace target
+    # at most once per run" invariants under concurrent first-callers.
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 # --------------------------------------------------------------------------

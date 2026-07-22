@@ -170,13 +170,21 @@ def capabilities() -> set[Capability]:
 
 @destination.max_concurrent_writes
 def max_concurrent_writes(config: Config) -> int:
-    """Cap concurrent pipelines targeting DuckDB at 1 — file-lock bound.
+    """Cap concurrent writes to DuckDB at 1 — single-connection bound.
 
-    DuckDB uses a file lock on the ``.duckdb`` database; two writer
-    connections on the same file at the same time would corrupt it. The
-    engine's pipeline-level parallelism (``dtex run --tag … --threads N``,
-    stage 8e) honors whatever this hook returns and serializes pipelines
-    targeting DuckDB even when the project ``threads:`` is high.
+    DuckDB uses a file lock on the ``.duckdb`` database, and one dtex run
+    holds a single ``duckdb.DuckDBPyConnection`` shared across all streams
+    (see :class:`DuckConn`). Two streams writing through that one connection
+    concurrently — or two writer connections on the same file — would corrupt
+    the transaction / the file. Returning 1 makes BOTH engine parallelism
+    paths serialize on DuckDB: ``dtex run --tag … --threads N`` (across
+    configs) AND ``dtex run -p … --threads N`` (across streams within one
+    config). Because the engine clamps stream concurrency to
+    ``min(threads, max_concurrent_writes)``, this ``1`` is exactly why DuckDB
+    needs no per-connection lock — streams never touch it concurrently, so
+    the ``DuckConn`` scratch (``replace_truncated``, the ``*_ready`` flags)
+    and the per-stream ``transaction`` BEGIN/COMMIT stay single-threaded by
+    construction.
 
     ``config`` is ignored — DuckDB's file-lock model is destination-wide,
     not param-tunable. Accepting the argument keeps the hook signature

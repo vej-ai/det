@@ -958,26 +958,33 @@ def _ensure_state_table(conn: BQConn) -> None:
     but declaring it is good hygiene and feeds downstream tools that read
     the table metadata.
     """
+    # Double-checked under the conn lock so concurrent streams (--threads N)
+    # create _dtex_state at most once. create_table(exists_ok=True) is itself
+    # idempotent, so the lock is about not issuing N redundant create calls +
+    # a clean single flip of the ready flag, not correctness of the DDL.
     if conn.state_table_ready:
         return
-    bq = _bigquery_module()
-    client = conn.client
+    with conn.lock:
+        if conn.state_table_ready:
+            return
+        bq = _bigquery_module()
+        client = conn.client
 
-    fields = [
-        bq.SchemaField(
-            name=name,
-            field_type=bigquery_type(ftype),
-            mode="REQUIRED" if name in ("connector", "stream") else "NULLABLE",
+        fields = [
+            bq.SchemaField(
+                name=name,
+                field_type=bigquery_type(ftype),
+                mode="REQUIRED" if name in ("connector", "stream") else "NULLABLE",
+            )
+            for name, ftype in _state_schema()
+        ]
+
+        table_ref = bq.TableReference(
+            bq.DatasetReference(client.project, client.dataset), _STATE_TABLE
         )
-        for name, ftype in _state_schema()
-    ]
-
-    table_ref = bq.TableReference(
-        bq.DatasetReference(client.project, client.dataset), _STATE_TABLE
-    )
-    table = bq.Table(table_ref, schema=fields)
-    client.bq.create_table(table, exists_ok=True)
-    conn.state_table_ready = True
+        table = bq.Table(table_ref, schema=fields)
+        client.bq.create_table(table, exists_ok=True)
+        conn.state_table_ready = True
 
 
 def _encode_json_column(value: Any) -> Any:
@@ -1181,24 +1188,33 @@ def _lease_schema() -> Iterator[tuple[str, FieldType]]:
 
 
 def _ensure_lease_table(conn: BQConn) -> None:
-    """Create ``_dtex_leases`` lazily on first use — docs/05 §5.5."""
+    """Create ``_dtex_leases`` lazily on first use — docs/05 §5.5.
+
+    Double-checked under the conn lock: with --threads N every stream's
+    try_acquire calls this, and they must not each issue a create.
+    """
     if conn.lease_table_ready:
         return
-    bq = _bigquery_module()
-    client = conn.client
-    fields = [
-        bq.SchemaField(
-            name=name,
-            field_type=bigquery_type(ftype),
-            mode="REQUIRED" if name in ("connector", "stream", "run_id") else "NULLABLE",
+    with conn.lock:
+        if conn.lease_table_ready:
+            return
+        bq = _bigquery_module()
+        client = conn.client
+        fields = [
+            bq.SchemaField(
+                name=name,
+                field_type=bigquery_type(ftype),
+                mode="REQUIRED"
+                if name in ("connector", "stream", "run_id")
+                else "NULLABLE",
+            )
+            for name, ftype in _lease_schema()
+        ]
+        table_ref = bq.TableReference(
+            bq.DatasetReference(client.project, client.dataset), _LEASE_TABLE
         )
-        for name, ftype in _lease_schema()
-    ]
-    table_ref = bq.TableReference(
-        bq.DatasetReference(client.project, client.dataset), _LEASE_TABLE
-    )
-    client.bq.create_table(bq.Table(table_ref, schema=fields), exists_ok=True)
-    conn.lease_table_ready = True
+        client.bq.create_table(bq.Table(table_ref, schema=fields), exists_ok=True)
+        conn.lease_table_ready = True
 
 
 @destination.read_leases
