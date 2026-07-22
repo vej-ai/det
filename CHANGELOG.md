@@ -10,6 +10,26 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Added
+
+- **Stream-level parallelism for `dtex run -p <config> --threads N`.**
+  `--threads` previously applied only to `--tag` (running whole configs
+  concurrently) and was ignored with `-p`; a single config always ran its
+  streams sequentially. Now `-p … --threads N` runs up to N of the config's
+  streams concurrently via a thread pool, clamped down by the destination's
+  `@destination.max_concurrent_writes` — so BigQuery parallelizes (default
+  cap 10) while DuckDB stays serial (cap 1, its single shared connection
+  can't take concurrent writers). Failure and ordering semantics are
+  unchanged: one stream failing fails the whole run, in-flight streams finish
+  (queued ones are cancelled), and the returned `streams` list is always in
+  declared order regardless of completion order. Fully backward-compatible —
+  `--threads` unset or `1` runs streams sequentially exactly as before. The
+  engine's shared per-run destination state (the `_dtex_*` create-once flags,
+  the replace-truncate guard) and the lease coordinator's bookkeeping are now
+  lock-guarded so concurrent streams stay correct; `active_stream` log tagging
+  is left unset in parallel mode (every JSONL event already carries an
+  explicit `stream=` field).
+
 ## [0.5.1] — 2026-07-21
 
 Fixes a state-durability bug that let an interrupted `append`-mode bootstrap

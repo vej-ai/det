@@ -1743,7 +1743,8 @@ def test_engine_resolves_destination_hooks_without_transaction(
         Capability.RUN_RECORDS,
         Capability.LEASE,
     }
-    # Every required hook (core + state + run_records + lease) is bound; no
+    # Every required hook (core + state + run_records + lease) is bound, plus
+    # the optional max_concurrent_writes (stage 8e stream parallelism cap); no
     # transaction hook (since TRANSACTIONAL_LOAD is not declared).
     expected = {
         "capabilities",
@@ -1757,6 +1758,7 @@ def test_engine_resolves_destination_hooks_without_transaction(
         "read_leases",
         "acquire_lease",
         "release_lease",
+        "max_concurrent_writes",
     }
     assert set(hooks) == expected
     assert "transaction" not in hooks

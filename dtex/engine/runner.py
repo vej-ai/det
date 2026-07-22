@@ -507,6 +507,13 @@ def _resolve_destination_hooks(
                     f"hook required to host stream leases (docs/05 §5.5)"
                 )
             hooks[name] = hook.func
+
+    # Optional hook (stage 8e): bound when present so stream-level parallelism
+    # (`dtex run -p … --threads N`) can clamp concurrency to it. Absent ⇒ the
+    # engine treats the destination as unbounded and only ``threads`` limits.
+    mcw = registry.hook("max_concurrent_writes")
+    if mcw is not None:
+        hooks["max_concurrent_writes"] = mcw.func
     return hooks, capabilities
 
 
@@ -562,6 +569,15 @@ class _LeaseCoordinator:
         self._held: set[str] = set()
         # Last heartbeat wall-clock per held stream, for throttling.
         self._last_beat: dict[str, datetime] = {}
+        # Guards the mutable bookkeeping above (_held, _last_beat, and reads of
+        # _live_by_other) so the coordinator is safe when the engine runs
+        # streams concurrently (`dtex run -p … --threads N`). try_acquire /
+        # heartbeat / release are all called from worker threads; without this
+        # the max_parallel check (read len(_held) then add) would race two
+        # acquires past the cap, and the _last_beat throttle could double-write.
+        # The destination's acquire_lease is the *cross-process* compare-and-set
+        # (two builds); this lock is the *in-process* guard (two threads).
+        self._lock = threading.Lock()
 
     def try_acquire(self, stream: str) -> bool:
         """Attempt to lease ``stream`` for this run. Returns ``False`` to skip.
@@ -571,21 +587,33 @@ class _LeaseCoordinator:
         lease row is written (status ``running``, fresh heartbeat) and the
         stream is recorded as held.
         """
-        if stream in self._live_by_other:
-            self._log.info(
-                "stream %r is leased by run %r (live) — skipping",
-                stream,
-                self._live_by_other[stream].run_id,
-            )
-            return False
-        if self._max_parallel is not None and len(self._held) >= self._max_parallel:
-            self._log.info(
-                "stream %r not leased — max_parallel=%d reached this build",
-                stream,
-                self._max_parallel,
-            )
-            return False
         now = datetime.now(UTC)
+        # Reserve the slot under the lock: the skip-set read, the max_parallel
+        # check, and the tentative _held.add must be atomic against another
+        # worker thread doing the same, or two acquires slip past the cap. We
+        # add to _held *before* the (slow, network) acquire_lease call so the
+        # cap accounts for in-flight acquisitions; on a lost race we back it out.
+        with self._lock:
+            if stream in self._live_by_other:
+                self._log.info(
+                    "stream %r is leased by run %r (live) — skipping",
+                    stream,
+                    self._live_by_other[stream].run_id,
+                )
+                return False
+            if (
+                self._max_parallel is not None
+                and len(self._held) >= self._max_parallel
+            ):
+                self._log.info(
+                    "stream %r not leased — max_parallel=%d reached this build",
+                    stream,
+                    self._max_parallel,
+                )
+                return False
+            self._held.add(stream)
+            self._last_beat[stream] = now
+
         record = LeaseRecord(
             connector=self._connector,
             stream=stream,
@@ -597,14 +625,15 @@ class _LeaseCoordinator:
         # acquire_lease is the destination's compare-and-set: it must refuse
         # (return False) if a *live* lease from another run appeared between
         # our read and now (the race two concurrent builds hit). A refusal
-        # here means we lost the race — treat exactly like a pre-existing
-        # live lease and skip.
+        # here means we lost the race — back the slot out (under the lock) and
+        # skip, exactly like a pre-existing live lease.
         won = self._hooks["acquire_lease"](self._conn, record)
         if not won:
+            with self._lock:
+                self._held.discard(stream)
+                self._last_beat.pop(stream, None)
             self._log.info("stream %r lost lease race — skipping", stream)
             return False
-        self._held.add(stream)
-        self._last_beat[stream] = now
         return True
 
     def heartbeat_for(self, stream: str) -> Callable[[], None]:
@@ -612,13 +641,19 @@ class _LeaseCoordinator:
 
         def _beat() -> None:
             now = datetime.now(UTC)
-            last = self._last_beat.get(stream)
-            if (
-                last is not None
-                and (now - last).total_seconds() < LEASE_HEARTBEAT_INTERVAL_SECONDS
-            ):
-                return
-            self._last_beat[stream] = now
+            # Throttle check + timestamp update under the lock so two batches
+            # of the *same* stream (or the release path) can't both decide to
+            # write. The actual release_lease network call is done outside the
+            # lock — it targets this stream's own row and needs no in-process
+            # mutual exclusion beyond the throttle bookkeeping.
+            with self._lock:
+                last = self._last_beat.get(stream)
+                if (
+                    last is not None
+                    and (now - last).total_seconds() < LEASE_HEARTBEAT_INTERVAL_SECONDS
+                ):
+                    return
+                self._last_beat[stream] = now
             self._hooks["release_lease"](
                 self._conn,
                 LeaseRecord(
@@ -638,8 +673,13 @@ class _LeaseCoordinator:
         A no-op for a stream this run never acquired — so a skipped-leased
         stream never has its (other run's) lease touched.
         """
-        if stream not in self._held:
-            return
+        with self._lock:
+            if stream not in self._held:
+                return
+        # Release the row (network) outside the lock, then drop the local slot.
+        # A concurrent try_acquire for a *different* stream can proceed while
+        # this release is in flight; one for this same stream cannot exist
+        # (this run holds it), so there is no lost-update window on _held.
         self._hooks["release_lease"](
             self._conn,
             LeaseRecord(
@@ -650,7 +690,9 @@ class _LeaseCoordinator:
                 heartbeat_at=datetime.now(UTC),
             ),
         )
-        self._held.discard(stream)
+        with self._lock:
+            self._held.discard(stream)
+            self._last_beat.pop(stream, None)
 
 
 def _safe_release(
@@ -1020,6 +1062,29 @@ def _split_error(error: BaseException | None) -> tuple[str | None, str | None]:
     if error is None:
         return None, None
     return type(error).__name__, str(error)
+
+
+def _stream_write_cap(
+    hooks: Mapping[str, Callable[..., Any]],
+    dest_config: Config,
+) -> int:
+    """Resolve the destination's ``max_concurrent_writes`` for stream parallelism.
+
+    Stage-5 stream concurrency is clamped to this so a destination that can't
+    take concurrent writers serializes regardless of ``--threads`` (DuckDB
+    returns 1). A destination that doesn't declare the hook is unbounded
+    (``sys.maxsize``) — only the ``threads`` budget then limits it. A hook that
+    raises is treated as unbounded and the failure surfaces later on a real
+    write, not here (mirrors ``_destination_concurrency_cap``'s planning-stage
+    fallback for the ``--tag`` path).
+    """
+    hook = hooks.get("max_concurrent_writes")
+    if hook is None:
+        return _UNLIMITED_CONCURRENCY
+    try:
+        return max(1, int(hook(Config(params=dict(dest_config.params)))))
+    except Exception:  # noqa: BLE001 — planning-stage fallback, see docstring.
+        return _UNLIMITED_CONCURRENCY
 
 
 # ---------------------------------------------------------------------------
@@ -1478,6 +1543,7 @@ def run(
     destination_params_override: Mapping[str, Any] | None = None,
     full_refresh: bool = False,
     select: tuple[str, ...] = (),
+    threads: int | None = None,
     _log_stream: TextIO | None = None,
 ) -> RunResult:
     """Run one config end to end — the 6-stage lifecycle (docs/02), config-driven.
@@ -1520,6 +1586,15 @@ def run(
       and re-extract from the beginning (docs/03 §3.2).
     * ``select`` — when non-empty, *replaces* the config's ``select:`` (the CLI
       ``--select`` semantics, docs/07).
+    * ``threads`` — stream-level concurrency within this one config. ``None``
+      or ``1`` (the default) runs streams sequentially in declared order —
+      byte-identical to the pre-parallel behavior. ``>1`` runs up to that many
+      streams concurrently via a :class:`~concurrent.futures.ThreadPoolExecutor`,
+      clamped down by the destination's ``@destination.max_concurrent_writes``
+      (so DuckDB, which returns 1, always serializes). Failure and result
+      ordering are unchanged: one stream failing fails the run, and the
+      returned ``streams`` list is always in declared order regardless of
+      completion order.
 
     Never raises on a connector/destination failure: returns a ``RunResult``
     with ``status=FAILED`` and a populated ``error`` (docs/07 §4.1). Callers
@@ -1741,28 +1816,49 @@ def run(
                     stream_name=stream_name,
                 )
 
-        # -- Stage 5: RUN STREAMS (sequential, declared order) --------------
-        stream_error: Exception | None = None
-        for stream_def in source.manifest.streams:
-            if not run_config.selects(stream_def.name):
+        # -- Stage 5: RUN STREAMS -------------------------------------------
+        # Effective stream concurrency: the caller's ``threads`` (or 1),
+        # clamped DOWN by the destination's ``@destination.max_concurrent_writes``
+        # so a destination that can't take concurrent writers (DuckDB → 1)
+        # serializes regardless of what the operator asked for. A destination
+        # without the hook is treated as unbounded (only ``threads`` limits it).
+        selected_streams = [
+            sd for sd in source.manifest.streams if run_config.selects(sd.name)
+        ]
+        for sd in source.manifest.streams:
+            if not run_config.selects(sd.name):
                 streams.append(
-                    StreamResult(name=stream_def.name, status=StreamStatus.SKIPPED)
+                    StreamResult(name=sd.name, status=StreamStatus.SKIPPED)
                 )
-                continue
-            # Stream leasing (docs/05 §5.5): try to acquire before running.
-            # A live lease held by another build ⇒ skip as SKIPPED_LEASED
-            # (cooperative, not a failure) and move to the next stream.
-            if leases is not None and not leases.try_acquire(stream_def.name):
-                streams.append(
-                    StreamResult(
-                        name=stream_def.name, status=StreamStatus.SKIPPED_LEASED
-                    )
-                )
-                run_log.emit("stream_skipped_leased", stream=stream_def.name)
-                continue
+        requested_threads = max(1, int(threads)) if threads is not None else 1
+        dest_cap = _stream_write_cap(hooks, dest_config)
+        effective_threads = max(1, min(requested_threads, dest_cap))
 
+        # The per-stream unit of work, shared by the sequential and parallel
+        # dispatchers. Returns the StreamResult to record (SKIPPED_LEASED for a
+        # cooperatively-skipped stream) or raises on a genuine stream failure —
+        # the raise is caught here so the lease is released FAILED and the
+        # exception is re-raised to fail the whole run (unchanged semantics).
+        stream_error: Exception | None = None
+        error_lock = threading.Lock()
+
+        def _execute_stream(stream_def: StreamDef) -> StreamResult:
+            # Leasing (docs/05 §5.5): acquire before running; a live lease from
+            # another build ⇒ cooperative SKIPPED_LEASED (not a failure).
+            if leases is not None and not leases.try_acquire(stream_def.name):
+                run_log.emit("stream_skipped_leased", stream=stream_def.name)
+                return StreamResult(
+                    name=stream_def.name, status=StreamStatus.SKIPPED_LEASED
+                )
             log.info("running stream %r", stream_def.name)
-            run_log.active_stream = stream_def.name
+            # active_stream is a single-valued field that can't represent
+            # multiple concurrent streams; set it only in the sequential path
+            # (effective_threads == 1). Every JSONL event already carries an
+            # explicit ``stream=`` field, so per-event attribution is intact in
+            # parallel mode — active_stream is just the fallback tag for stdlib
+            # log lines, left None (untagged) when streams run concurrently.
+            if effective_threads == 1:
+                run_log.active_stream = stream_def.name
             try:
                 result = _run_one_stream(
                     stream_def,
@@ -1782,11 +1878,6 @@ def run(
                     ),
                 )
             except Exception as exc:  # noqa: BLE001 — recorded, then re-raised.
-                streams.append(
-                    StreamResult(name=stream_def.name, status=StreamStatus.FAILED)
-                )
-                # Capture the traceback in the JSONL (the table-side record
-                # deliberately omits tracebacks — docs/09 §4 NOTE).
                 run_log.emit(
                     "stream_failed",
                     stream=stream_def.name,
@@ -1799,17 +1890,76 @@ def run(
                 # rather than waiting out the stale timeout.
                 if leases is not None:
                     _safe_release(leases, stream_def.name, LeaseStatus.FAILED, log)
-                stream_error = exc
-                break
+                raise
             else:
-                streams.append(result)
                 if leases is not None:
                     _safe_release(leases, stream_def.name, LeaseStatus.DONE, log)
                 log.info(
                     "stream %r loaded %d row(s)", stream_def.name, result.rows_loaded
                 )
+                return result
             finally:
-                run_log.active_stream = None
+                if effective_threads == 1:
+                    run_log.active_stream = None
+
+        # Results keyed by stream name so the final list can be rebuilt in
+        # declared order regardless of completion order (the public contract).
+        results_by_name: dict[str, StreamResult] = {}
+
+        if effective_threads == 1 or len(selected_streams) <= 1:
+            # Sequential path — a literal loop, kept distinct from the
+            # single-worker executor for debuggability (a stack trace is the
+            # caller's own thread; breakpoint() Just Works). Stops at the first
+            # failure, exactly as before parallelism existed.
+            for stream_def in selected_streams:
+                try:
+                    results_by_name[stream_def.name] = _execute_stream(stream_def)
+                except Exception as exc:  # noqa: BLE001 — recorded, then re-raised below.
+                    results_by_name[stream_def.name] = StreamResult(
+                        name=stream_def.name, status=StreamStatus.FAILED
+                    )
+                    stream_error = exc
+                    break
+        else:
+            # Parallel path — up to ``effective_threads`` streams at once. A
+            # failing stream fails the run (first exception wins), but in-flight
+            # streams are allowed to finish rather than being force-cancelled:
+            # each holds its own destination transaction / lease and cancelling
+            # mid-write could strand a half-committed load or an unreleased
+            # lease. Not-yet-started futures ARE cancelled so a failure stops
+            # new work promptly.
+            with ThreadPoolExecutor(
+                max_workers=effective_threads,
+                thread_name_prefix=f"dtex-{config_name}",
+            ) as pool:
+                future_to_stream = {
+                    pool.submit(_execute_stream, sd): sd for sd in selected_streams
+                }
+                for future in as_completed(future_to_stream):
+                    stream_def = future_to_stream[future]
+                    try:
+                        results_by_name[stream_def.name] = future.result()
+                    except Exception as exc:  # noqa: BLE001 — first failure fails the run.
+                        results_by_name[stream_def.name] = StreamResult(
+                            name=stream_def.name, status=StreamStatus.FAILED
+                        )
+                        with error_lock:
+                            if stream_error is None:
+                                stream_error = exc
+                        # Cancel queued-but-unstarted work; running futures run on.
+                        for pending in future_to_stream:
+                            pending.cancel()
+
+        # ``streams`` currently holds only the SKIPPED entries; merge the
+        # executed results back in manifest order for a stable, declared-order
+        # final list.
+        skipped_by_name = {s.name: s for s in streams}
+        streams = []
+        for sd in source.manifest.streams:
+            if sd.name in results_by_name:
+                streams.append(results_by_name[sd.name])
+            elif sd.name in skipped_by_name:
+                streams.append(skipped_by_name[sd.name])
 
         if stream_error is not None:
             raise stream_error
