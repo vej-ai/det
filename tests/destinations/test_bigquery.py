@@ -1318,6 +1318,32 @@ def test_write_batch_merge_loads_to_staging_runs_merge_drops_staging(
     assert staging_table in bq.deleted_tables
 
 
+def test_write_batch_merge_evolves_target_for_batch_only_columns(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """A merge batch carrying an undeclared column evolves the TARGET table too.
+
+    Regression: the staging table picked up batch-augmented columns via its
+    own _ensure_load_target, but the target never did — so the MERGE (which
+    references every schema column) failed with "Unrecognized name".
+    """
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+    hooks["ensure_schema"](conn, _events_meta())
+
+    meta = _events_meta(WriteDisposition.MERGE, primary_key=("id",))
+    hooks["write_batch"](conn, [{"id": 1, "name": "a", "cello_ucc": "ref-1"}], meta)
+
+    bq = conn.client.bq
+    # The target table now carries the batch-only column.
+    target = bq._tables["events"]
+    assert "cello_ucc" in {f.name for f in target.schema}
+    # And the MERGE that referenced it ran.
+    assert any("`cello_ucc`" in q["sql"] for q in bq.queries)
+
+
 def test_write_batch_merge_drops_staging_even_on_merge_failure(
     bigquery_destination: LoadedConnector,
     fake_bq: _FakeBigQueryModule,

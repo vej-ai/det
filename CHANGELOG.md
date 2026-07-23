@@ -10,6 +10,17 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Fixed
+
+- **BigQuery merge: evolve the TARGET table for batch-only columns.** A merge
+  batch carrying a column beyond the declared stream schema (the `evolve`
+  default) evolved only the per-batch staging table; the MERGE — which
+  references every schema column — then failed against the target with
+  `400 Unrecognized name: <column>`, wedging the stream until the column was
+  added by hand. `_merge_via_staging` now runs `_ensure_load_target` on the
+  target before merging, mirroring the staging path. (Hit in production when
+  a new `cello_ucc` column appeared on an upstream table.)
+
 ## [0.6.0] — 2026-07-22
 
 Adds intra-config stream parallelism: `dtex run -p <config> --threads N` now

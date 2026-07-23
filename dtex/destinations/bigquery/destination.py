@@ -891,6 +891,13 @@ def _merge_via_staging(
     # the TRUNCATE round-trip a WRITE_TRUNCATE disposition now implies).
     _load_to_table(conn, staging_name, batch, schema, disposition="WRITE_APPEND")
 
+    # The MERGE references every column of ``schema`` — including columns
+    # the batch introduced beyond the declared stream schema (the ``evolve``
+    # default). The staging table got them via its own _ensure_load_target;
+    # the *target* must be evolved too, or the MERGE 400s with
+    # "Unrecognized name: <new column>".
+    _ensure_load_target(conn, target_table, schema)
+
     try:
         columns = tuple(f.name for f in schema.fields)
         sql = merge_sql(
