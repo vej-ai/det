@@ -1088,6 +1088,18 @@ def commit_state(conn: BQConn, run_id: str, records: list[StateRecord]) -> None:
     applies identically to BigQuery's JSON column).
     ``updated_at`` is stamped with the current UTC time when the record
     has not already set it.
+
+    # NOTE: the MERGE runs under ``conn.lock``. The engine calls this hook
+    # once per stream (each stream commits its own record when it finishes)
+    # and again per throttled mid-stream flush — so under ``--threads N``
+    # several streams issue a ``_dtex_state`` MERGE at once. BigQuery
+    # serializes DML per table and rejects the losers with "Could not
+    # serialize access to table _dtex_state due to concurrent update" (the
+    # same failure class the batched lease hooks fixed on ``_dtex_leases``).
+    # Unlike leases, state commits cannot be batched across streams — streams
+    # finish at different times — so the lock serializes them in-process
+    # instead. The MERGE is small and infrequent, so the contention cost is
+    # negligible. Sequential runs never contend, so the lock is a no-op there.
     """
     if not records:
         return
@@ -1115,39 +1127,40 @@ def commit_state(conn: BQConn, run_id: str, records: list[StateRecord]) -> None:
         f"        S.state_blob, S.last_run_id, S.rows_total, S.updated_at)"
     )
 
-    for record in records:
-        if record.last_run_id is None:
-            record.last_run_id = run_id
-        if record.updated_at is None:
-            record.updated_at = now
-        row = record.to_row()
-        params = [
-            bq.ScalarQueryParameter("connector", "STRING", row["connector"]),
-            bq.ScalarQueryParameter("stream", "STRING", row["stream"]),
-            bq.ScalarQueryParameter(
-                "cursor_value", "JSON", _encode_json_column(row["cursor_value"])
-            ),
-            bq.ScalarQueryParameter("cursor_type", "STRING", row["cursor_type"]),
-            bq.ScalarQueryParameter(
-                "state_blob", "JSON", _encode_json_column(row["state_blob"])
-            ),
-            bq.ScalarQueryParameter("last_run_id", "STRING", row["last_run_id"]),
-            bq.ScalarQueryParameter("rows_total", "INT64", row["rows_total"]),
-            bq.ScalarQueryParameter(
-                "updated_at", "TIMESTAMP", record.updated_at
-            ),
-        ]
-        job_config = bq.QueryJobConfig(query_parameters=params)
+    with conn.lock:
+        for record in records:
+            if record.last_run_id is None:
+                record.last_run_id = run_id
+            if record.updated_at is None:
+                record.updated_at = now
+            row = record.to_row()
+            params = [
+                bq.ScalarQueryParameter("connector", "STRING", row["connector"]),
+                bq.ScalarQueryParameter("stream", "STRING", row["stream"]),
+                bq.ScalarQueryParameter(
+                    "cursor_value", "JSON", _encode_json_column(row["cursor_value"])
+                ),
+                bq.ScalarQueryParameter("cursor_type", "STRING", row["cursor_type"]),
+                bq.ScalarQueryParameter(
+                    "state_blob", "JSON", _encode_json_column(row["state_blob"])
+                ),
+                bq.ScalarQueryParameter("last_run_id", "STRING", row["last_run_id"]),
+                bq.ScalarQueryParameter("rows_total", "INT64", row["rows_total"]),
+                bq.ScalarQueryParameter(
+                    "updated_at", "TIMESTAMP", record.updated_at
+                ),
+            ]
+            job_config = bq.QueryJobConfig(query_parameters=params)
 
-        def _run(_sql: str = sql, _jc: Any = job_config) -> Any:
-            job = client.bq.query(_sql, job_config=_jc, location=client.location)
-            return job.result(timeout=client.job_timeout_seconds)
+            def _run(_sql: str = sql, _jc: Any = job_config) -> Any:
+                job = client.bq.query(_sql, job_config=_jc, location=client.location)
+                return job.result(timeout=client.job_timeout_seconds)
 
-        run_with_retries(
-            _run,
-            max_attempts=client.retry_max_attempts,
-            backoff_seconds=client.retry_backoff_seconds,
-        )
+            run_with_retries(
+                _run,
+                max_attempts=client.retry_max_attempts,
+                backoff_seconds=client.retry_backoff_seconds,
+            )
 
 
 # --------------------------------------------------------------------------

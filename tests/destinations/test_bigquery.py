@@ -17,6 +17,8 @@ Two paths:
 from __future__ import annotations
 
 import os
+import threading
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -1999,3 +2001,65 @@ def test_integration_partition_auto_default_and_drift_against_live_bigquery(
         except Exception:  # noqa: BLE001 — cleanup
             pass
         hooks["close"](conn)
+
+
+# ===========================================================================
+# commit_state under --threads — must serialize DML on _dtex_state
+# ===========================================================================
+
+
+def test_commit_state_serializes_concurrent_calls(
+    bigquery_destination: LoadedConnector,
+    fake_bq: _FakeBigQueryModule,
+    fake_gcs: type[_FakeStorageClient],
+) -> None:
+    """Concurrent commit_state calls never overlap their _dtex_state DML.
+
+    The engine calls commit_state once per stream (and per throttled flush),
+    so under ``--threads N`` several run at once. BigQuery serializes DML per
+    table and rejects overlap with "Could not serialize access to table
+    _dtex_state due to concurrent update". commit_state holds ``conn.lock``
+    around its MERGE, so this models the collision — the fake's ``query``
+    raises if two calls are in flight together — and asserts it never fires.
+    """
+    conn = _open_with_fakes(bigquery_destination)
+    hooks = _hooks(bigquery_destination)
+
+    in_flight = threading.Lock()
+    collided = threading.Event()
+
+    orig_query = conn.client.bq.query
+
+    def _serializing_query(sql: str, **kwargs: Any) -> Any:
+        if "_dtex_state" in sql:
+            if not in_flight.acquire(blocking=False):
+                collided.set()
+                raise RuntimeError("concurrent update to _dtex_state")
+            try:
+                time.sleep(0.003)  # widen the overlap window
+                return orig_query(sql, **kwargs)
+            finally:
+                in_flight.release()
+        return orig_query(sql, **kwargs)
+
+    conn.client.bq.query = _serializing_query  # type: ignore[assignment]
+
+    def _commit(i: int) -> None:
+        rec = StateRecord(
+            connector="ckdb",
+            stream=f"s{i}",
+            cursor_value=None,
+            cursor_type=CursorType.TIMESTAMP,
+            state_blob={},
+            last_run_id="run-x",
+            rows_total=0,
+        )
+        hooks["commit_state"](conn, "run-x", [rec])
+
+    threads = [threading.Thread(target=_commit, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not collided.is_set(), "commit_state DML overlapped — conn.lock not held"

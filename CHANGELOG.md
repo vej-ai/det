@@ -10,6 +10,25 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-07-23
+
+Second half of the `--threads` concurrency fix: per-stream `commit_state`
+collided on `_dtex_state` the same way lease DML collided on `_dtex_leases`
+(0.6.3). No API or config change.
+
+### Fixed
+
+- **`commit_state` serializes its `_dtex_state` DML under `--threads`.** The
+  engine commits state once per stream (and per throttled mid-stream flush),
+  so N concurrent streams issued N MERGEs on the one `_dtex_state` table and
+  BigQuery rejected the losers (`Could not serialize access to table
+  _dtex_state due to concurrent update`). Unlike the lease hooks, state
+  commits cannot be batched across streams (streams finish at different
+  times), so the MERGE now runs under the shared connection lock — small and
+  infrequent, so contention is negligible, and a no-op on sequential runs. A
+  test models BigQuery's per-table DML serialization and fails without the
+  lock.
+
 ## [0.6.3] — 2026-07-23
 
 Fixes `dtex run -p <config> --threads N` on BigQuery: per-stream lease DML
@@ -686,7 +705,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/vej-ai/dtex/releases/tag/v0.6.4
 [0.6.3]: https://github.com/vej-ai/dtex/releases/tag/v0.6.3
 [0.6.2]: https://github.com/vej-ai/dtex/releases/tag/v0.6.2
 [0.6.1]: https://github.com/vej-ai/dtex/releases/tag/v0.6.1
