@@ -10,6 +10,8 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-07-23
+
 ### Fixed
 
 - **BigQuery merge: evolve the TARGET table for batch-only columns.** A merge
