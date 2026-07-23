@@ -37,7 +37,7 @@ raw ``duckdb`` connection — see its docstring for why.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -819,94 +819,116 @@ def read_leases(conn: DuckConn, connector: str) -> list[LeaseRecord]:
     ]
 
 
-@destination.acquire_lease
-def acquire_lease(conn: DuckConn, lease: LeaseRecord) -> bool:
-    """Compare-and-set acquire of a stream lease — docs/05 §5.5. Returns won?
+@destination.acquire_leases
+def acquire_leases(conn: DuckConn, leases: Sequence[LeaseRecord]) -> set[str]:
+    """Batched compare-and-set acquire — docs/05 §5.5. Returns the won streams.
 
-    Writes the ``running`` lease row only if no *live* lease currently holds
-    the stream: either no row exists, or the existing row is this run's own,
-    or its heartbeat is stale (crashed holder — reclaimable). The read + write
-    run inside a transaction so two concurrent builds cannot both observe
-    "free" and both win — the loser's ``INSERT ... ON CONFLICT`` sees the
-    winner's row and the guard rejects it (returns ``False``).
+    DuckDB is single-writer (its ``max_concurrent_writes`` is 1, so the engine
+    never runs streams concurrently against it), so the batching here is to
+    satisfy the batched hook contract, not to dodge a serialization error the
+    way BigQuery must. The whole set is acquired in ONE transaction — either
+    every eligible lease lands or none does — and the per-lease win rule is the
+    same proven check-then-set as before: a candidate wins unless a *live*
+    lease from another run already holds the stream.
 
-    # NOTE: DuckDB gives us serializable single-writer semantics on one file;
-    # the transaction here makes the check-then-set atomic against another
-    # connection to the same DB. For BigQuery, the equivalent atomicity comes
-    # from a single ``MERGE`` with the staleness guard in its ``ON`` clause.
+    # NOTE: the win decision is made per-row against the state read at the top
+    # of the transaction. Two candidates in the SAME set never contend (the
+    # engine passes distinct streams), so intra-batch ordering is irrelevant.
     """
+    if not leases:
+        return set()
     _ensure_lease_table(conn)
     table = qualified_table(conn.dataset, _LEASE_TABLE)
-    now = lease.heartbeat_at or datetime.now(UTC)
-    stale_cutoff = _stale_cutoff(now)
+    won: set[str] = set()
 
     conn.conn.execute("BEGIN TRANSACTION")
     try:
-        existing = conn.conn.execute(
-            f"SELECT run_id, status, heartbeat_at FROM {table} "
-            f"WHERE connector = ? AND stream = ?",
-            [lease.connector, lease.stream],
-        ).fetchone()
-        if existing is not None:
-            ex_run, ex_status, ex_beat = existing[0], existing[1], existing[2]
-            # The stored heartbeat is naive UTC (written via _naive_utc); the
-            # cutoff is aware UTC. Normalize the cutoff to naive UTC so the
-            # comparison is like-for-like (see _naive_utc for why the column
-            # is naive-UTC in the first place).
-            cutoff_naive = _naive_utc(stale_cutoff)
-            ex_beat_naive = ex_beat if ex_beat is not None else None
-            held_live = (
-                ex_status == LeaseStatus.RUNNING.value
-                and ex_run != lease.run_id
-                and ex_beat_naive is not None
-                and ex_beat_naive >= cutoff_naive
+        for lease in leases:
+            now = lease.heartbeat_at or datetime.now(UTC)
+            cutoff_naive = _naive_utc(_stale_cutoff(now))
+            existing = conn.conn.execute(
+                f"SELECT run_id, status, heartbeat_at FROM {table} "
+                f"WHERE connector = ? AND stream = ?",
+                [lease.connector, lease.stream],
+            ).fetchone()
+            if existing is not None:
+                ex_run, ex_status, ex_beat = existing[0], existing[1], existing[2]
+                held_live = (
+                    ex_status == LeaseStatus.RUNNING.value
+                    and ex_run != lease.run_id
+                    and ex_beat is not None
+                    and ex_beat >= cutoff_naive
+                )
+                if held_live:
+                    continue  # another run holds it live — skip, do not win
+            conn.conn.execute(
+                f"INSERT INTO {table} "
+                f"(connector, stream, run_id, status, acquired_at, heartbeat_at) "
+                f"VALUES (?, ?, ?, ?, ?, ?) "
+                f"ON CONFLICT (connector, stream) DO UPDATE SET "
+                f"  run_id = EXCLUDED.run_id, status = EXCLUDED.status, "
+                f"  acquired_at = EXCLUDED.acquired_at, "
+                f"  heartbeat_at = EXCLUDED.heartbeat_at",
+                [
+                    lease.connector,
+                    lease.stream,
+                    lease.run_id,
+                    lease.status.value,
+                    _naive_utc(lease.acquired_at or now),
+                    _naive_utc(now),
+                ],
             )
-            if held_live:
-                conn.conn.execute("ROLLBACK")
-                return False
-        conn.conn.execute(
-            f"INSERT INTO {table} "
-            f"(connector, stream, run_id, status, acquired_at, heartbeat_at) "
-            f"VALUES (?, ?, ?, ?, ?, ?) "
-            f"ON CONFLICT (connector, stream) DO UPDATE SET "
-            f"  run_id = EXCLUDED.run_id, status = EXCLUDED.status, "
-            f"  acquired_at = EXCLUDED.acquired_at, "
-            f"  heartbeat_at = EXCLUDED.heartbeat_at",
-            [
-                lease.connector,
-                lease.stream,
-                lease.run_id,
-                lease.status.value,
-                _naive_utc(lease.acquired_at or now),
-                _naive_utc(now),
-            ],
-        )
+            won.add(lease.stream)
         conn.conn.execute("COMMIT")
-        return True
+        return won
     except Exception:
         conn.conn.execute("ROLLBACK")
         raise
 
 
-@destination.release_lease
-def release_lease(conn: DuckConn, lease: LeaseRecord) -> None:
-    """Update a lease's status + heartbeat — docs/05 §5.5.
+@destination.heartbeat_leases
+def heartbeat_leases(conn: DuckConn, leases: Sequence[LeaseRecord]) -> None:
+    """Refresh every held lease's heartbeat — docs/05 §5.5. Batched no-DML-if-empty."""
+    _update_leases(conn, leases)
 
-    Used for both the periodic heartbeat refresh (status ``running``, new
-    ``heartbeat_at``) and terminal release (status ``done`` / ``failed``).
-    Only updates a row this run owns (``run_id`` match) so a heartbeat or
-    release can never stomp another build's lease — a defensive guard for the
-    reclaim case where a stale lease was overwritten by a new holder between
-    this run's acquire and release.
+
+@destination.release_leases
+def release_leases(conn: DuckConn, leases: Sequence[LeaseRecord]) -> None:
+    """Release every held lease with its per-stream terminal status — docs/05 §5.5."""
+    _update_leases(conn, leases)
+
+
+def _update_leases(conn: DuckConn, leases: Sequence[LeaseRecord]) -> None:
+    """Shared batched status+heartbeat UPDATE for heartbeat / release.
+
+    Each row's own ``status`` is written (so heartbeat keeps ``running`` and
+    release writes ``done``/``failed``), ``run_id``-guarded so a refresh or
+    release never stomps a lease another holder reclaimed. One transaction for
+    the whole set.
     """
+    if not leases:
+        return
     _ensure_lease_table(conn)
     table = qualified_table(conn.dataset, _LEASE_TABLE)
-    now = lease.heartbeat_at or datetime.now(UTC)
-    conn.conn.execute(
-        f"UPDATE {table} SET status = ?, heartbeat_at = ? "
-        f"WHERE connector = ? AND stream = ? AND run_id = ?",
-        [lease.status.value, _naive_utc(now), lease.connector, lease.stream, lease.run_id],
-    )
+    conn.conn.execute("BEGIN TRANSACTION")
+    try:
+        for lease in leases:
+            now = lease.heartbeat_at or datetime.now(UTC)
+            conn.conn.execute(
+                f"UPDATE {table} SET status = ?, heartbeat_at = ? "
+                f"WHERE connector = ? AND stream = ? AND run_id = ?",
+                [
+                    lease.status.value,
+                    _naive_utc(now),
+                    lease.connector,
+                    lease.stream,
+                    lease.run_id,
+                ],
+            )
+        conn.conn.execute("COMMIT")
+    except Exception:
+        conn.conn.execute("ROLLBACK")
+        raise
 
 
 def _stale_cutoff(now: datetime) -> datetime:
