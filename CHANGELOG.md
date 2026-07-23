@@ -10,6 +10,29 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-07-23
+
+Fixes `dtex run -p <config> --threads N` on BigQuery: per-stream lease DML
+collided on the single `_dtex_leases` table (BigQuery serializes DML per
+table), failing concurrent streams with "Could not serialize access". Lease
+acquire/heartbeat/release are now batched into one statement over the whole
+stream set, driven main-thread-only. No API or config change.
+
+### Fixed
+
+- **Batched lease DML — stream parallelism no longer collides on `_dtex_leases`.**
+  Leasing (0.5.0) issued one MERGE/UPDATE per stream; stream parallelism (0.6.0)
+  ran N streams at once, so N lease statements hit the one lease table
+  concurrently and BigQuery rejected the losers (`Could not serialize access to
+  table _dtex_leases due to concurrent update`), taking down a `--threads` run.
+  The three mutating lease hooks are now batched (`acquire_leases` /
+  `heartbeat_leases` / `release_leases`), each a single statement over the whole
+  candidate set, issued from the engine's main thread while worker threads run
+  streams. A test models BigQuery's per-table DML serialization (raises if two
+  lease statements overlap) so this class of bug fails in CI, not prod. DuckDB
+  batches in one transaction (it is single-writer regardless). Fully
+  backward-compatible.
+
 ## [0.6.2] — 2026-07-23
 
 Fixes a CLI crash that turned a successful run into a failure the first time a
@@ -663,7 +686,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/vej-ai/dtex/releases/tag/v0.6.3
 [0.6.2]: https://github.com/vej-ai/dtex/releases/tag/v0.6.2
 [0.6.1]: https://github.com/vej-ai/dtex/releases/tag/v0.6.1
 [0.6.0]: https://github.com/vej-ai/dtex/releases/tag/v0.6.0
