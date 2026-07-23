@@ -1782,8 +1782,9 @@ def test_engine_resolves_destination_hooks_without_transaction(
         "commit_state",
         "write_run_record",
         "read_leases",
-        "acquire_lease",
-        "release_lease",
+        "acquire_leases",
+        "heartbeat_leases",
+        "release_leases",
         "max_concurrent_writes",
     }
     assert set(hooks) == expected

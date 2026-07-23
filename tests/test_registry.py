@@ -273,12 +273,16 @@ def test_destination_full_hook_set_registers() -> None:
         def read_leases(conn, connector):  # type: ignore[no-untyped-def]
             return []
 
-        @destination.acquire_lease
-        def acquire_lease(conn, lease):  # type: ignore[no-untyped-def]
-            return True
+        @destination.acquire_leases
+        def acquire_leases(conn, leases):  # type: ignore[no-untyped-def]
+            return {lease.stream for lease in leases}
 
-        @destination.release_lease
-        def release_lease(conn, lease):  # type: ignore[no-untyped-def]
+        @destination.heartbeat_leases
+        def heartbeat_leases(conn, leases):  # type: ignore[no-untyped-def]
+            pass
+
+        @destination.release_leases
+        def release_leases(conn, leases):  # type: ignore[no-untyped-def]
             pass
 
         @destination.close
@@ -620,12 +624,18 @@ def test_constants_are_consistent() -> None:
     assert STREAM_INJECTABLES == frozenset(
         {"config", "state", "cursor", "log", "stream_def"}
     )
-    # Fourteen hooks: 11 as of stage 8e + the three lease hooks (docs/05 §5.5).
-    assert len(DESTINATION_HOOKS) == 14
+    # Fifteen hooks: 11 as of stage 8e + the four batched lease hooks
+    # (read + acquire/heartbeat/release, docs/05 §5.5).
+    assert len(DESTINATION_HOOKS) == 15
     assert "transaction" in DESTINATION_HOOKS
     assert "write_run_record" in DESTINATION_HOOKS
     assert "max_concurrent_writes" in DESTINATION_HOOKS
-    assert {"read_leases", "acquire_lease", "release_lease"} <= DESTINATION_HOOKS
+    assert {
+        "read_leases",
+        "acquire_leases",
+        "heartbeat_leases",
+        "release_leases",
+    } <= DESTINATION_HOOKS
 
 
 def test_stream_registration_is_frozen() -> None:
