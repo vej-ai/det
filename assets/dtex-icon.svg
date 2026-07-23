@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="dtex">
+  <title>dtex</title>
+  <desc>Three source rows converging into a single destination — extract and load.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round">
+    <!-- Source rows: three datasets / streams -->
+    <path d="M9 19 H26"/>
+    <path d="M9 32 H26"/>
+    <path d="M9 45 H26"/>
+    <!-- Convergence into one destination point -->
+    <path d="M30 19 C44 19 44 30 51 32"/>
+    <path d="M30 32 H51"/>
+    <path d="M30 45 C44 45 44 34 51 32"/>
+  </g>
+</svg>
