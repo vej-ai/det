@@ -362,13 +362,23 @@ DESTINATION_HOOKS: frozenset[str] = frozenset(
 )
 """Every valid ``@destination.*`` hook name — docs/03 §3.4, docs/05 §1.
 
-Fourteen hooks. ``@destination.<anything-else>`` (e.g. a ``write_batchs`` typo)
+Fifteen hooks. ``@destination.<anything-else>`` (e.g. a ``write_batchs`` typo)
 raises :class:`AttributeError` at import time.
 
-``read_leases`` / ``acquire_lease`` / ``release_lease`` are *conditionally*
-mandatory: a destination that declares ``Capability.LEASE`` must define all
-three (the stream run-leasing surface — docs/05 §5.5). Without the capability
-the engine never calls them and the destination behaves exactly as before.
+``read_leases`` / ``acquire_leases`` / ``heartbeat_leases`` /
+``release_leases`` are *conditionally* mandatory: a destination that declares
+``Capability.LEASE`` must define all four (the stream run-leasing surface —
+docs/05 §5.5). Without the capability the engine never calls them and the
+destination behaves exactly as before.
+
+# NOTE: the three mutating lease hooks are *batched* — they take a
+# ``Sequence[LeaseRecord]`` covering every stream at once, not one record per
+# call. This is a correctness requirement, not an optimization: BigQuery
+# serializes DML per table, so one lease statement *per stream* issued from
+# concurrent worker threads (``dtex run -p … --threads N``) makes the losers
+# fail with "Could not serialize access to table … due to concurrent update".
+# Batching collapses N concurrent statements into one, and the engine drives
+# all three from the main thread only (see ``_LeaseCoordinator``).
 
 ``transaction`` is a *conditionally* mandatory hook: a destination that
 declares ``Capability.TRANSACTIONAL_LOAD`` must define it (a context-manager

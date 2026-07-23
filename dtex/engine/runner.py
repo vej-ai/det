@@ -46,8 +46,14 @@ import sys
 import threading
 import traceback as _tb
 import uuid
-from collections.abc import Callable, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import (
+    CancelledError,
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from contextlib import nullcontext
 from datetime import UTC, date, datetime
 from io import StringIO
@@ -99,7 +105,20 @@ from dtex.types import (
 # leaves the capability-dependent check to the engine).
 _CORE_HOOKS = ("capabilities", "open", "ensure_schema", "write_batch", "close")
 _STATE_HOOKS = ("read_state", "commit_state")
-_LEASE_HOOKS = ("read_leases", "acquire_lease", "release_lease")
+_LEASE_HOOKS = (
+    "read_leases",
+    "acquire_leases",
+    "heartbeat_leases",
+    "release_leases",
+)
+
+# How often the parallel dispatcher's main thread wakes to pump the batched
+# lease heartbeat. Deliberately much shorter than
+# LEASE_HEARTBEAT_INTERVAL_SECONDS: this is only the *polling* cadence, and
+# the beat itself is self-throttled to the real interval, so a short poll
+# costs one cheap comparison and keeps a long-running stream's lease fresh
+# even when no stream completes for minutes.
+_LEASE_PUMP_INTERVAL_SECONDS = 5.0
 
 
 class EngineError(Exception):
@@ -530,16 +549,27 @@ class _LeaseCoordinator:
     ``None`` coordinator is the backward-compatible no-op path). It:
 
     * reads every existing lease for the source once at run start,
-    * decides per stream whether to :meth:`acquire` (and skips it as
-      ``SKIPPED_LEASED`` when a *live* lease from another build holds it),
-    * enforces the per-source ``max_parallel`` cap on how many streams this
-      one build leases,
-    * hands each running stream a throttled :meth:`heartbeat` callback, and
-    * :meth:`release`s each lease with a terminal status.
+    * :meth:`acquire_all`s the whole selected stream set in ONE batched call
+      before any stream runs (skipping streams a *live* lease from another
+      build holds, and honoring the per-source ``max_parallel`` cap),
+    * :meth:`beat`s every held lease with ONE batched call on a throttle, and
+    * :meth:`release_all`s every held lease in ONE batched call at the end.
 
     A build only ever *releases* leases it acquired this run — it never
     terminates another build's lease, so two builds cooperate rather than
     fight. A crashed build's lease is reclaimed by staleness, not by force.
+
+    # NOTE: every mutating lease call is BATCHED (whole stream set per call)
+    # and issued from the MAIN thread only — never from a worker thread. This
+    # is a correctness requirement discovered in production: with
+    # ``--threads N`` the old per-stream design had N worker threads each
+    # issuing their own lease DML against the single ``_dtex_leases`` table,
+    # and BigQuery — which serializes DML per table — failed the losers with
+    # "Could not serialize access to table … due to concurrent update",
+    # killing the run. One statement per phase cannot self-conflict, so
+    # leasing and stream parallelism compose. This also removes the need for
+    # the in-process lock the per-stream design required: the coordinator's
+    # bookkeeping is now only ever touched by the main thread.
     """
 
     def __init__(
@@ -565,150 +595,148 @@ class _LeaseCoordinator:
             for lease in existing
             if lease.run_id != run_id and lease.is_live(now=now)
         }
-        # Streams this run has acquired (so it only releases its own).
+        # Streams this run acquired (so it only ever releases its own).
         self._held: set[str] = set()
-        # Last heartbeat wall-clock per held stream, for throttling.
-        self._last_beat: dict[str, datetime] = {}
-        # Guards the mutable bookkeeping above (_held, _last_beat, and reads of
-        # _live_by_other) so the coordinator is safe when the engine runs
-        # streams concurrently (`dtex run -p … --threads N`). try_acquire /
-        # heartbeat / release are all called from worker threads; without this
-        # the max_parallel check (read len(_held) then add) would race two
-        # acquires past the cap, and the _last_beat throttle could double-write.
-        # The destination's acquire_lease is the *cross-process* compare-and-set
-        # (two builds); this lock is the *in-process* guard (two threads).
-        self._lock = threading.Lock()
+        # Wall-clock of the last batched heartbeat, for throttling. One value
+        # for the whole run (not per stream) — the heartbeat is now a single
+        # statement covering every held lease.
+        self._last_beat: datetime | None = None
 
-    def try_acquire(self, stream: str) -> bool:
-        """Attempt to lease ``stream`` for this run. Returns ``False`` to skip.
+    def acquire_all(self, streams: Sequence[str]) -> set[str]:
+        """Lease as many of ``streams`` as this build may run. Returns the won set.
 
-        Returns ``False`` when another live lease holds the stream, or when
-        this build has already hit its ``max_parallel`` cap. On ``True`` the
-        lease row is written (status ``running``, fresh heartbeat) and the
-        stream is recorded as held.
+        One batched destination call for the whole candidate set. A stream is
+        excluded up front when a *live* lease from another build holds it, or
+        when the per-source ``max_parallel`` cap is already met by the
+        preceding candidates (declared order decides who gets the slots). The
+        destination's batched compare-and-set is still authoritative: it may
+        refuse a candidate that a concurrent build won between our read and
+        the write, and those are dropped from the returned set too.
+
+        Called once, from the main thread, BEFORE any stream starts.
         """
-        now = datetime.now(UTC)
-        # Reserve the slot under the lock: the skip-set read, the max_parallel
-        # check, and the tentative _held.add must be atomic against another
-        # worker thread doing the same, or two acquires slip past the cap. We
-        # add to _held *before* the (slow, network) acquire_lease call so the
-        # cap accounts for in-flight acquisitions; on a lost race we back it out.
-        with self._lock:
+        candidates: list[str] = []
+        for stream in streams:
             if stream in self._live_by_other:
                 self._log.info(
                     "stream %r is leased by run %r (live) — skipping",
                     stream,
                     self._live_by_other[stream].run_id,
                 )
-                return False
-            if (
-                self._max_parallel is not None
-                and len(self._held) >= self._max_parallel
-            ):
+                continue
+            if self._max_parallel is not None and len(candidates) >= self._max_parallel:
                 self._log.info(
                     "stream %r not leased — max_parallel=%d reached this build",
                     stream,
                     self._max_parallel,
                 )
-                return False
-            self._held.add(stream)
-            self._last_beat[stream] = now
+                continue
+            candidates.append(stream)
 
-        record = LeaseRecord(
-            connector=self._connector,
-            stream=stream,
-            run_id=self._run_id,
-            status=LeaseStatus.RUNNING,
-            acquired_at=now,
-            heartbeat_at=now,
-        )
-        # acquire_lease is the destination's compare-and-set: it must refuse
-        # (return False) if a *live* lease from another run appeared between
-        # our read and now (the race two concurrent builds hit). A refusal
-        # here means we lost the race — back the slot out (under the lock) and
-        # skip, exactly like a pre-existing live lease.
-        won = self._hooks["acquire_lease"](self._conn, record)
-        if not won:
-            with self._lock:
-                self._held.discard(stream)
-                self._last_beat.pop(stream, None)
-            self._log.info("stream %r lost lease race — skipping", stream)
-            return False
-        return True
+        if not candidates:
+            return set()
 
-    def heartbeat_for(self, stream: str) -> Callable[[], None]:
-        """Return the throttled per-batch heartbeat callback for ``stream``."""
-
-        def _beat() -> None:
-            now = datetime.now(UTC)
-            # Throttle check + timestamp update under the lock so two batches
-            # of the *same* stream (or the release path) can't both decide to
-            # write. The actual release_lease network call is done outside the
-            # lock — it targets this stream's own row and needs no in-process
-            # mutual exclusion beyond the throttle bookkeeping.
-            with self._lock:
-                last = self._last_beat.get(stream)
-                if (
-                    last is not None
-                    and (now - last).total_seconds() < LEASE_HEARTBEAT_INTERVAL_SECONDS
-                ):
-                    return
-                self._last_beat[stream] = now
-            self._hooks["release_lease"](
-                self._conn,
-                LeaseRecord(
-                    connector=self._connector,
-                    stream=stream,
-                    run_id=self._run_id,
-                    status=LeaseStatus.RUNNING,
-                    heartbeat_at=now,
-                ),
-            )
-
-        return _beat
-
-    def release(self, stream: str, *, status: LeaseStatus) -> None:
-        """Release a held lease with a terminal status (``done`` / ``failed``).
-
-        A no-op for a stream this run never acquired — so a skipped-leased
-        stream never has its (other run's) lease touched.
-        """
-        with self._lock:
-            if stream not in self._held:
-                return
-        # Release the row (network) outside the lock, then drop the local slot.
-        # A concurrent try_acquire for a *different* stream can proceed while
-        # this release is in flight; one for this same stream cannot exist
-        # (this run holds it), so there is no lost-update window on _held.
-        self._hooks["release_lease"](
-            self._conn,
+        now = datetime.now(UTC)
+        records = [
             LeaseRecord(
                 connector=self._connector,
                 stream=stream,
                 run_id=self._run_id,
-                status=status,
-                heartbeat_at=datetime.now(UTC),
-            ),
-        )
-        with self._lock:
-            self._held.discard(stream)
-            self._last_beat.pop(stream, None)
+                status=LeaseStatus.RUNNING,
+                acquired_at=now,
+                heartbeat_at=now,
+            )
+            for stream in candidates
+        ]
+        won = set(self._hooks["acquire_leases"](self._conn, records))
+        for stream in candidates:
+            if stream not in won:
+                self._log.info("stream %r lost lease race — skipping", stream)
+        self._held = {s for s in candidates if s in won}
+        self._last_beat = now
+        return set(self._held)
+
+    def beat(self) -> None:
+        """Refresh every held lease in ONE batched call, throttled.
+
+        Driven from the main thread while worker threads run streams — a
+        worker never touches ``_dtex_leases``. A no-op when nothing is held or
+        the throttle interval has not elapsed.
+        """
+        if not self._held:
+            return
+        now = datetime.now(UTC)
+        if (
+            self._last_beat is not None
+            and (now - self._last_beat).total_seconds() < LEASE_HEARTBEAT_INTERVAL_SECONDS
+        ):
+            return
+        self._last_beat = now
+        records = [
+            LeaseRecord(
+                connector=self._connector,
+                stream=stream,
+                run_id=self._run_id,
+                status=LeaseStatus.RUNNING,
+                heartbeat_at=now,
+            )
+            for stream in sorted(self._held)
+        ]
+        self._hooks["heartbeat_leases"](self._conn, records)
+
+    def release_all(self, statuses: Mapping[str, LeaseStatus]) -> None:
+        """Release every held lease in ONE batched call with per-stream statuses.
+
+        ``statuses`` maps stream → terminal status; a held stream missing from
+        it is released ``FAILED`` (it neither completed nor was recorded, so
+        the conservative status is the honest one). Streams this run never
+        acquired are untouched — a skipped-leased stream never has the other
+        build's lease disturbed.
+        """
+        if not self._held:
+            return
+        now = datetime.now(UTC)
+        records = [
+            LeaseRecord(
+                connector=self._connector,
+                stream=stream,
+                run_id=self._run_id,
+                status=statuses.get(stream, LeaseStatus.FAILED),
+                heartbeat_at=now,
+            )
+            for stream in sorted(self._held)
+        ]
+        self._hooks["release_leases"](self._conn, records)
+        self._held = set()
 
 
-def _safe_release(
-    leases: _LeaseCoordinator, stream: str, status: LeaseStatus, log: Any
+def _safe_release_all(
+    leases: _LeaseCoordinator, statuses: Mapping[str, LeaseStatus], log: Any
 ) -> None:
-    """Release a lease, swallowing any release error so it can't mask the run.
+    """Release every held lease, swallowing errors so they can't mask the run.
 
     A lease release is best-effort bookkeeping: if the destination write fails
-    (e.g. the connection is already broken because the stream just crashed),
-    the lease will simply be reclaimed by staleness later. Never let a release
+    (e.g. the connection is already broken because a stream just crashed), the
+    leases will simply be reclaimed by staleness later. Never let a release
     failure replace the real stream error the caller is about to propagate.
     """
     try:
-        leases.release(stream, status=status)
+        leases.release_all(statuses)
     except Exception as exc:  # noqa: BLE001 — bookkeeping must not mask the run.
-        log.warning("failed to release lease for stream %r: %s", stream, exc)
+        log.warning("failed to release leases: %s", exc)
+
+
+def _safe_beat(leases: _LeaseCoordinator, log: Any) -> None:
+    """Refresh held leases, swallowing errors — a missed beat is not fatal.
+
+    A failed heartbeat only risks the leases going stale (and so becoming
+    reclaimable by another build); it must never take down a run that is
+    otherwise loading data fine.
+    """
+    try:
+        leases.beat()
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must not mask the run.
+        log.warning("failed to refresh leases: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1834,22 +1862,37 @@ def run(
         dest_cap = _stream_write_cap(hooks, dest_config)
         effective_threads = max(1, min(requested_threads, dest_cap))
 
+        # -- Leasing: acquire the WHOLE selected set up front, in one batched
+        # call from this (the main) thread — docs/05 §5.5. Streams a live
+        # foreign lease holds, or that the max_parallel cap excludes, come back
+        # unleased and are recorded SKIPPED_LEASED without ever running. No
+        # lease DML is issued from a worker thread (see _LeaseCoordinator's
+        # NOTE: per-stream lease writes from N threads collide on BigQuery,
+        # which serializes DML per table).
+        leased: set[str] | None = None
+        if leases is not None:
+            leased = leases.acquire_all([sd.name for sd in selected_streams])
+            for sd in selected_streams:
+                if sd.name not in leased:
+                    run_log.emit("stream_skipped_leased", stream=sd.name)
+                    streams.append(
+                        StreamResult(
+                            name=sd.name, status=StreamStatus.SKIPPED_LEASED
+                        )
+                    )
+            selected_streams = [sd for sd in selected_streams if sd.name in leased]
+
         # The per-stream unit of work, shared by the sequential and parallel
-        # dispatchers. Returns the StreamResult to record (SKIPPED_LEASED for a
-        # cooperatively-skipped stream) or raises on a genuine stream failure —
-        # the raise is caught here so the lease is released FAILED and the
-        # exception is re-raised to fail the whole run (unchanged semantics).
+        # dispatchers. Returns the StreamResult to record, or raises on a
+        # genuine stream failure — the raise is caught by the dispatcher, which
+        # fails the run (unchanged semantics). Leases are NOT touched here.
         stream_error: Exception | None = None
         error_lock = threading.Lock()
+        # Terminal lease status per stream, filled as streams finish and
+        # applied in one batched release after the dispatcher drains.
+        lease_statuses: dict[str, LeaseStatus] = {}
 
         def _execute_stream(stream_def: StreamDef) -> StreamResult:
-            # Leasing (docs/05 §5.5): acquire before running; a live lease from
-            # another build ⇒ cooperative SKIPPED_LEASED (not a failure).
-            if leases is not None and not leases.try_acquire(stream_def.name):
-                run_log.emit("stream_skipped_leased", stream=stream_def.name)
-                return StreamResult(
-                    name=stream_def.name, status=StreamStatus.SKIPPED_LEASED
-                )
             log.info("running stream %r", stream_def.name)
             # active_stream is a single-valued field that can't represent
             # multiple concurrent streams; set it only in the sequential path
@@ -1871,9 +1914,14 @@ def run(
                     log,
                     run_log=run_log,
                     stream_config_override=per_stream_config.get(stream_def.name),
+                    # The between-batch beat is wired only in the SEQUENTIAL
+                    # path, where this *is* the main thread — so the batched
+                    # heartbeat statement is still single-threaded. In parallel
+                    # mode the dispatcher below beats from the main thread
+                    # instead; a worker must never issue lease DML.
                     heartbeat=(
-                        leases.heartbeat_for(stream_def.name)
-                        if leases is not None
+                        (lambda: _safe_beat(leases, log))
+                        if leases is not None and effective_threads == 1
                         else None
                     ),
                 )
@@ -1885,15 +1933,15 @@ def run(
                     error_message=str(exc),
                     traceback=_format_traceback(exc),
                 )
-                # Release this run's lease as FAILED before propagating, so a
-                # crash on one stream frees it for the next build immediately
-                # rather than waiting out the stale timeout.
-                if leases is not None:
-                    _safe_release(leases, stream_def.name, LeaseStatus.FAILED, log)
+                # Record the terminal lease status; the single batched release
+                # after the dispatcher applies it. (A crash still frees the
+                # lease promptly — the release runs in the finally below.)
+                with error_lock:
+                    lease_statuses[stream_def.name] = LeaseStatus.FAILED
                 raise
             else:
-                if leases is not None:
-                    _safe_release(leases, stream_def.name, LeaseStatus.DONE, log)
+                with error_lock:
+                    lease_statuses[stream_def.name] = LeaseStatus.DONE
                 log.info(
                     "stream %r loaded %d row(s)", stream_def.name, result.rows_loaded
                 )
@@ -1935,20 +1983,48 @@ def run(
                 future_to_stream = {
                     pool.submit(_execute_stream, sd): sd for sd in selected_streams
                 }
-                for future in as_completed(future_to_stream):
-                    stream_def = future_to_stream[future]
-                    try:
-                        results_by_name[stream_def.name] = future.result()
-                    except Exception as exc:  # noqa: BLE001 — first failure fails the run.
-                        results_by_name[stream_def.name] = StreamResult(
-                            name=stream_def.name, status=StreamStatus.FAILED
-                        )
-                        with error_lock:
-                            if stream_error is None:
-                                stream_error = exc
-                        # Cancel queued-but-unstarted work; running futures run on.
-                        for pending in future_to_stream:
-                            pending.cancel()
+                # Collect completions while pumping the batched lease heartbeat
+                # from THIS (the main) thread. ``wait`` with a timeout is what
+                # gives the main thread a periodic wake-up: ``as_completed``
+                # would block until a stream finishes, and a stream that runs
+                # longer than LEASE_STALE_SECONDS would let its own lease go
+                # stale mid-run. The beat is self-throttled, so waking often is
+                # cheap — the vast majority of these calls return immediately.
+                pending_futures = set(future_to_stream)
+                while pending_futures:
+                    done, pending_futures = wait(
+                        pending_futures, timeout=_LEASE_PUMP_INTERVAL_SECONDS
+                    )
+                    if leases is not None:
+                        _safe_beat(leases, log)
+                    for future in done:
+                        stream_def = future_to_stream[future]
+                        try:
+                            results_by_name[stream_def.name] = future.result()
+                        except CancelledError:
+                            # Cancelled after a sibling failed — never started,
+                            # so there is nothing to record beyond the FAILED
+                            # run the sibling already caused.
+                            continue
+                        except Exception as exc:  # noqa: BLE001 — first failure fails the run.
+                            results_by_name[stream_def.name] = StreamResult(
+                                name=stream_def.name, status=StreamStatus.FAILED
+                            )
+                            with error_lock:
+                                if stream_error is None:
+                                    stream_error = exc
+                            # Cancel queued-but-unstarted work; running futures
+                            # run on (cancelling mid-write could strand a
+                            # half-committed load).
+                            for p in pending_futures:
+                                p.cancel()
+
+        # Every stream has finished (or was cancelled): release all leases this
+        # run holds in ONE batched call, from the main thread. A stream that
+        # never recorded a status (cancelled before it started) is released
+        # FAILED by release_all's default — conservative and honest.
+        if leases is not None:
+            _safe_release_all(leases, lease_statuses, log)
 
         # ``streams`` currently holds only the SKIPPED entries; merge the
         # executed results back in manifest order for a stable, declared-order
