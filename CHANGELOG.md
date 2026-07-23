@@ -10,6 +10,24 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-07-23
+
+Fixes a CLI crash that turned a successful run into a failure the first time a
+stream was actually leased-skipped. No API or config change.
+
+### Fixed
+
+- **`StreamStatus.SKIPPED_LEASED` no longer crashes the run summary.** The
+  per-status glyph table (`_STREAM_MARK`) never got an entry for the
+  `SKIPPED_LEASED` status added in 0.5.0, so `print_run_result` raised
+  `KeyError: SKIPPED_LEASED` the first time a run actually skipped a
+  leased-elsewhere stream — *after* the sync had done its work, turning a
+  green run red. Added the missing entry and routed the lookup through a
+  `_mark_for` accessor that falls back to the status name instead of raising,
+  so a status added to the enum in future can never again fail a run purely on
+  the display line. A test now walks every `StreamStatus` member through the
+  render path.
+
 ## [0.6.1] — 2026-07-23
 
 ### Fixed
@@ -645,7 +663,9 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/vej-ai/dtex/releases/tag/v0.6.2
+[0.6.1]: https://github.com/vej-ai/dtex/releases/tag/v0.6.1
 [0.6.0]: https://github.com/vej-ai/dtex/releases/tag/v0.6.0
 [0.5.1]: https://github.com/vej-ai/dtex/releases/tag/v0.5.1
 [0.5.0]: https://github.com/vej-ai/dtex/releases/tag/v0.5.0

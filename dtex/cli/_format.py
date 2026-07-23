@@ -31,11 +31,29 @@ def _visible_len(text: str) -> int:
     return len(_ANSI_RE.sub("", text))
 
 # Per-status glyphs/colors for stream + run lines — a quick visual scan signal.
+# Must cover EVERY StreamStatus member: the lookup below is on the render path
+# of every run, so a missing entry crashes the CLI *after* the sync already
+# did its work (that is exactly how SKIPPED_LEASED — added in 0.5.0 — took
+# down a run the first time a stream was actually leased-skipped). The
+# ``_mark_for`` accessor also degrades gracefully rather than KeyError, so a
+# future status added to the enum can never again turn a successful sync into
+# a red build purely on the display line.
 _STREAM_MARK: dict[StreamStatus, tuple[str, str]] = {
     StreamStatus.SUCCEEDED: ("ok", "green"),
     StreamStatus.FAILED: ("FAIL", "red"),
     StreamStatus.SKIPPED: ("skip", "yellow"),
+    StreamStatus.SKIPPED_LEASED: ("leased", "yellow"),
 }
+
+
+def _mark_for(status: StreamStatus) -> tuple[str, str]:
+    """Glyph/color for a stream status — never raises on an unmapped member.
+
+    Falls back to the status's own name in the neutral color so a status
+    added to the enum but not to :data:`_STREAM_MARK` renders (uglily) instead
+    of crashing the whole run's output.
+    """
+    return _STREAM_MARK.get(status, (status.value, "yellow"))
 
 
 def render_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
@@ -91,7 +109,7 @@ def print_run_result(result: RunResult) -> None:
 
     stream_rows: list[list[str]] = []
     for s in result.streams:
-        mark, color = _STREAM_MARK[s.status]
+        mark, color = _mark_for(s.status)
         cursor = ""
         if s.cursor_before is not None or s.cursor_after is not None:
             cursor = f"{_fmt_cursor(s.cursor_before)} -> {_fmt_cursor(s.cursor_after)}"
