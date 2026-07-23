@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 import dtex
-from dtex import Config, RunStatus, StreamStatus
+from dtex import Config, LeaseStatus, RunStatus, StreamStatus
 from dtex.engine import runner
 from dtex.engine.runner import _LeaseCoordinator, _stream_write_cap
 from tests.conftest import ECHO_CONNECTOR_DIR, LoadedConnector
@@ -79,105 +79,128 @@ def test_duckdb_max_concurrent_writes_is_one(
 
 
 # ===========================================================================
-# _LeaseCoordinator under concurrency — the in-process lock
+# _LeaseCoordinator — batched, main-thread-only acquisition
 # ===========================================================================
 
 
-class _FakeLeaseHooks:
-    """Minimal lease hooks backing _LeaseCoordinator with an in-memory store.
+class _SerializingLeaseHooks:
+    """Batched lease hooks that MODEL BigQuery's per-table DML serialization.
 
-    acquire_lease is a compare-and-set over a dict guarded by its own lock, so
-    it models the destination's cross-process CAS; the coordinator's lock is
-    the *in-process* guard this test is really exercising. ``acquire_delay``
-    forces threads to interleave inside try_acquire.
+    Every mutating lease op (acquire/heartbeat/release) is DML on the single
+    ``_dtex_leases`` table. This fake raises if two such ops are ever in flight
+    at once — exactly the ``Could not serialize access to table … due to
+    concurrent update`` error that took down a prod ``--threads`` run when the
+    old design issued one lease statement PER STREAM from worker threads.
+
+    A test that drives leasing correctly (all lease DML batched and on the main
+    thread) never trips it; the old per-stream design would. ``acquire_calls``
+    counts statements so a test can assert "one batched call, not N".
     """
 
-    def __init__(self, acquire_delay: float = 0.0) -> None:
-        self._store: dict[tuple[str, str], Any] = {}
-        self._lock = threading.Lock()
-        self._acquire_delay = acquire_delay
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, str], str] = {}
+        self._in_flight = threading.Lock()
         self.acquire_calls = 0
+        self.heartbeat_calls = 0
+        self.release_calls = 0
+
+    def _guard(self) -> Any:
+        # A non-blocking acquire: if another lease statement holds it, that is
+        # a concurrent-DML violation, not something to wait on.
+        if not self._in_flight.acquire(blocking=False):
+            raise RuntimeError(
+                "concurrent update to _dtex_leases — lease DML must be serialized"
+            )
+        return self._in_flight
 
     def read_leases(self, conn: Any, connector: str) -> list[Any]:
         return []
 
-    def acquire_lease(self, conn: Any, lease: Any) -> bool:
-        if self._acquire_delay:
-            time.sleep(self._acquire_delay)
-        with self._lock:
+    def acquire_leases(self, conn: Any, leases: Any) -> set[str]:
+        lock = self._guard()
+        try:
+            time.sleep(0.002)  # widen the window a racing caller could collide in
             self.acquire_calls += 1
-            key = (lease.connector, lease.stream)
-            if key in self._store:
-                return False
-            self._store[key] = lease.run_id
-            return True
+            won: set[str] = set()
+            for lease in leases:
+                key = (lease.connector, lease.stream)
+                if key in self._store and self._store[key] != lease.run_id:
+                    continue
+                self._store[key] = lease.run_id
+                won.add(lease.stream)
+            return won
+        finally:
+            lock.release()
 
-    def release_lease(self, conn: Any, lease: Any) -> None:
-        return None
+    def heartbeat_leases(self, conn: Any, leases: Any) -> None:
+        lock = self._guard()
+        try:
+            time.sleep(0.002)
+            self.heartbeat_calls += 1
+        finally:
+            lock.release()
+
+    def release_leases(self, conn: Any, leases: Any) -> None:
+        lock = self._guard()
+        try:
+            time.sleep(0.002)
+            self.release_calls += 1
+        finally:
+            lock.release()
 
     def as_dict(self) -> dict[str, Callable[..., Any]]:
         return {
             "read_leases": self.read_leases,
-            "acquire_lease": self.acquire_lease,
-            "release_lease": self.release_lease,
+            "acquire_leases": self.acquire_leases,
+            "heartbeat_leases": self.heartbeat_leases,
+            "release_leases": self.release_leases,
         }
 
 
-def test_coordinator_max_parallel_holds_under_thread_race() -> None:
-    """Many threads racing try_acquire never exceed max_parallel held streams.
+def test_coordinator_acquire_all_is_one_batched_call() -> None:
+    """acquire_all over N streams makes exactly ONE acquire DML statement.
 
-    Without the coordinator's lock, the `len(_held) >= cap` check and the
-    `_held.add` race, letting more than `cap` streams through. Each thread
-    targets a distinct stream (so the destination CAS always says yes) — the
-    only thing that can hold the line is the in-process cap check.
+    Regression for the prod bug: the old design issued one MERGE per stream,
+    which serialized/collided on _dtex_leases under --threads. The serializing
+    fake would raise on overlap; here we also assert the statement COUNT is 1,
+    proving the batching (not just that it happens not to overlap).
     """
-    hooks = _FakeLeaseHooks(acquire_delay=0.001).as_dict()
+    fake = _SerializingLeaseHooks()
     coord = _LeaseCoordinator(
-        hooks, conn=object(), connector="c", run_id="r1", max_parallel=3,
-        log=logging.getLogger("test.parallel"),
+        fake.as_dict(), conn=object(), connector="c", run_id="r1",
+        max_parallel=None, log=logging.getLogger("test.parallel"),
     )
-    results: list[bool] = []
-    results_lock = threading.Lock()
-
-    def _try(stream: str) -> None:
-        won = coord.try_acquire(stream)
-        with results_lock:
-            results.append(won)
-
-    threads = [
-        threading.Thread(target=_try, args=(f"s{i}",)) for i in range(20)
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    # Exactly max_parallel acquisitions succeed, no more — the cap held.
-    assert sum(results) == 3
+    won = coord.acquire_all([f"s{i}" for i in range(20)])
+    assert won == {f"s{i}" for i in range(20)}
+    assert fake.acquire_calls == 1  # one batched statement, not 20
 
 
-def test_coordinator_distinct_streams_all_acquire_when_uncapped() -> None:
-    """With no cap, every distinct stream acquires even under a thread race."""
-    hooks = _FakeLeaseHooks(acquire_delay=0.001).as_dict()
+def test_coordinator_beat_and_release_are_batched_and_serialized() -> None:
+    """Heartbeat and release each make ONE statement and never overlap acquire."""
+    fake = _SerializingLeaseHooks()
     coord = _LeaseCoordinator(
-        hooks, conn=object(), connector="c", run_id="r1", max_parallel=None,
-        log=logging.getLogger("test.parallel"),
+        fake.as_dict(), conn=object(), connector="c", run_id="r1",
+        max_parallel=None, log=logging.getLogger("test.parallel"),
     )
-    won: list[bool] = []
-    lock = threading.Lock()
+    coord.acquire_all(["a", "b", "c"])
+    coord._last_beat = None  # bypass the throttle so beat() actually fires
+    coord.beat()
+    coord.release_all({"a": LeaseStatus.DONE, "b": LeaseStatus.DONE, "c": LeaseStatus.FAILED})
+    assert fake.acquire_calls == 1
+    assert fake.heartbeat_calls == 1
+    assert fake.release_calls == 1
 
-    def _try(stream: str) -> None:
-        r = coord.try_acquire(stream)
-        with lock:
-            won.append(r)
 
-    ts = [threading.Thread(target=_try, args=(f"s{i}",)) for i in range(12)]
-    for t in ts:
-        t.start()
-    for t in ts:
-        t.join()
-    assert all(won)
-    assert sum(won) == 12
+def test_coordinator_max_parallel_caps_one_batched_acquire() -> None:
+    """The per-source cap is honored inside a single batched acquire_all."""
+    fake = _SerializingLeaseHooks()
+    coord = _LeaseCoordinator(
+        fake.as_dict(), conn=object(), connector="c", run_id="r1",
+        max_parallel=3, log=logging.getLogger("test.parallel"),
+    )
+    won = coord.acquire_all([f"s{i}" for i in range(20)])
+    assert won == {"s0", "s1", "s2"}  # first three in declared order
+    assert fake.acquire_calls == 1
 
 
 # ===========================================================================

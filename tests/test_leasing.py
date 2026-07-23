@@ -104,15 +104,42 @@ def _lease(stream: str, run_id: str, *, status: LeaseStatus = LeaseStatus.RUNNIN
     )
 
 
+# The lease hooks are batched (docs/05 §5.5): acquire_leases takes a list and
+# returns the set of won stream names; heartbeat_leases / release_leases take
+# a list. These thin single-record wrappers keep the per-record assertions
+# below readable while exercising the real batched hooks.
+def _acquire(h: dict[str, Any], conn: Any, lease: LeaseRecord) -> bool:
+    return lease.stream in h["acquire_leases"](conn, [lease])
+
+
+def _release(h: dict[str, Any], conn: Any, lease: LeaseRecord) -> None:
+    h["release_leases"](conn, [lease])
+
+
 def test_acquire_on_free_stream_wins(duckdb_destination: LoadedConnector, tmp_path: Path) -> None:
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
-    assert h["acquire_lease"](conn, _lease("message", "r1")) is True
+    assert _acquire(h, conn, _lease("message", "r1")) is True
     leases = h["read_leases"](conn, "ckdb")
     assert len(leases) == 1
     assert leases[0].stream == "message"
     assert leases[0].run_id == "r1"
     assert leases[0].status is LeaseStatus.RUNNING
+
+
+def test_batched_acquire_returns_only_the_won_streams(
+    duckdb_destination: LoadedConnector, tmp_path: Path
+) -> None:
+    """One acquire_leases call over a mixed set returns exactly the winners."""
+    h = _hooks(duckdb_destination)
+    conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
+    # r1 already holds 'chat' live; a batched r2 acquire of {chat, message}
+    # must win only 'message'.
+    assert _acquire(h, conn, _lease("chat", "r1")) is True
+    won = h["acquire_leases"](conn, [_lease("chat", "r2"), _lease("message", "r2")])
+    assert won == {"message"}
+    by_stream = {le.stream: le.run_id for le in h["read_leases"](conn, "ckdb")}
+    assert by_stream == {"chat": "r1", "message": "r2"}
 
 
 def test_second_run_cannot_acquire_live_lease(
@@ -121,9 +148,9 @@ def test_second_run_cannot_acquire_live_lease(
     """The core guarantee: a live lease blocks another run's acquire."""
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
-    assert h["acquire_lease"](conn, _lease("message", "r1")) is True
+    assert _acquire(h, conn, _lease("message", "r1")) is True
     # r2 tries the same stream while r1's lease is fresh → loses.
-    assert h["acquire_lease"](conn, _lease("message", "r2")) is False
+    assert _acquire(h, conn, _lease("message", "r2")) is False
     # r1 still owns it.
     assert h["read_leases"](conn, "ckdb")[0].run_id == "r1"
 
@@ -135,9 +162,9 @@ def test_stale_lease_is_reclaimable(
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
     stale = datetime.now(UTC) - timedelta(seconds=LEASE_STALE_SECONDS + 60)
-    assert h["acquire_lease"](conn, _lease("message", "r1", beat=stale)) is True
+    assert _acquire(h, conn, _lease("message", "r1", beat=stale)) is True
     # r2 acquires because r1's heartbeat is stale (r1 "crashed").
-    assert h["acquire_lease"](conn, _lease("message", "r2")) is True
+    assert _acquire(h, conn, _lease("message", "r2")) is True
     leases = h["read_leases"](conn, "ckdb")
     assert leases[0].run_id == "r2"
 
@@ -147,13 +174,13 @@ def test_release_sets_terminal_status_and_frees_stream(
 ) -> None:
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
-    h["acquire_lease"](conn, _lease("message", "r1"))
-    h["release_lease"](conn, _lease("message", "r1", status=LeaseStatus.DONE))
+    _acquire(h, conn, _lease("message", "r1"))
+    _release(h, conn, _lease("message", "r1", status=LeaseStatus.DONE))
     lease = h["read_leases"](conn, "ckdb")[0]
     assert lease.status is LeaseStatus.DONE
     assert lease.is_live(now=datetime.now(UTC)) is False
     # A fresh run can now take the (released) stream.
-    assert h["acquire_lease"](conn, _lease("message", "r2")) is True
+    assert _acquire(h, conn, _lease("message", "r2")) is True
 
 
 def test_heartbeat_keeps_lease_live(
@@ -161,10 +188,10 @@ def test_heartbeat_keeps_lease_live(
 ) -> None:
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
-    # Acquire with an almost-stale heartbeat, then refresh it.
+    # Acquire with an almost-stale heartbeat, then refresh it via heartbeat_leases.
     old = datetime.now(UTC) - timedelta(seconds=LEASE_STALE_SECONDS - 5)
-    h["acquire_lease"](conn, _lease("message", "r1", beat=old))
-    h["release_lease"](conn, _lease("message", "r1", status=LeaseStatus.RUNNING))
+    _acquire(h, conn, _lease("message", "r1", beat=old))
+    h["heartbeat_leases"](conn, [_lease("message", "r1", status=LeaseStatus.RUNNING)])
     lease = h["read_leases"](conn, "ckdb")[0]
     assert lease.status is LeaseStatus.RUNNING
     assert lease.is_live(now=datetime.now(UTC)) is True
@@ -177,10 +204,10 @@ def test_release_only_touches_own_run(
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
     stale = datetime.now(UTC) - timedelta(seconds=LEASE_STALE_SECONDS + 60)
-    h["acquire_lease"](conn, _lease("message", "r1", beat=stale))
-    h["acquire_lease"](conn, _lease("message", "r2"))  # reclaims from stale r1
+    _acquire(h, conn, _lease("message", "r1", beat=stale))
+    _acquire(h, conn, _lease("message", "r2"))  # reclaims from stale r1
     # r1 belatedly tries to release its (now-lost) lease → no effect on r2.
-    h["release_lease"](conn, _lease("message", "r1", status=LeaseStatus.FAILED))
+    _release(h, conn, _lease("message", "r1", status=LeaseStatus.FAILED))
     lease = h["read_leases"](conn, "ckdb")[0]
     assert lease.run_id == "r2"
     assert lease.status is LeaseStatus.RUNNING
@@ -207,11 +234,12 @@ def test_coordinator_skips_stream_leased_by_other_run(
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
     # r1 holds message.
-    h["acquire_lease"](conn, _lease("message", "r1"))
-    # r2's coordinator reads leases at construction → sees message live.
+    _acquire(h, conn, _lease("message", "r1"))
+    # r2's coordinator reads leases at construction → sees message live, so a
+    # batched acquire_all wins only the free stream.
     coord = _coordinator(h, conn, "r2", None)
-    assert coord.try_acquire("message") is False   # leased by r1
-    assert coord.try_acquire("chat") is True         # free
+    won = coord.acquire_all(["message", "chat"])
+    assert won == {"chat"}
 
 
 def test_coordinator_max_parallel_caps_acquisitions(
@@ -220,12 +248,10 @@ def test_coordinator_max_parallel_caps_acquisitions(
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
     coord = _coordinator(h, conn, "r1", 2)
-    assert coord.try_acquire("a") is True
-    assert coord.try_acquire("b") is True
-    assert coord.try_acquire("c") is False   # cap of 2 reached
-    # Releasing one frees a slot.
-    coord.release("a", status=LeaseStatus.DONE)
-    assert coord.try_acquire("c") is True
+    # A single batched acquire over three candidates honors the cap: the first
+    # two in declared order win, the third is left for a later build.
+    won = coord.acquire_all(["a", "b", "c"])
+    assert won == {"a", "b"}
 
 
 def test_coordinator_release_is_noop_for_unheld_stream(
@@ -233,11 +259,11 @@ def test_coordinator_release_is_noop_for_unheld_stream(
 ) -> None:
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
-    h["acquire_lease"](conn, _lease("message", "r1"))
+    _acquire(h, conn, _lease("message", "r1"))
     coord = _coordinator(h, conn, "r2", None)
-    coord.try_acquire("message")   # returns False, r2 does not hold it
-    # r2 releasing message must not touch r1's lease.
-    coord.release("message", status=LeaseStatus.FAILED)
+    coord.acquire_all(["message"])   # wins nothing — r1 holds it live
+    # r2 releasing everything it holds (nothing) must not touch r1's lease.
+    coord.release_all({})
     assert h["read_leases"](conn, "ckdb")[0].run_id == "r1"
 
 
@@ -297,5 +323,4 @@ def test_no_prior_leases_means_every_stream_acquirable(
     h = _hooks(duckdb_destination)
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
     coord = _coordinator(h, conn, "r1", None)
-    for stream in ("a", "b", "c", "d"):
-        assert coord.try_acquire(stream) is True
+    assert coord.acquire_all(["a", "b", "c", "d"]) == {"a", "b", "c", "d"}
