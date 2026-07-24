@@ -824,6 +824,64 @@ def test_run_inferred_schema_for_undeclared_stream(
     assert rows == [(1, "a", 1.5, True)]
 
 
+def test_run_new_upstream_column_lands_without_failing(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """A NEW column appearing in a later batch lands; the run does not fail.
+
+    Drift case #1 (new upstream column). The stream declares {id, name}; batch 2
+    also carries 'added_at'. The default (evolve + schema_drift: warn) must add
+    the column and keep going, not fail — the cello_ucc-class incident.
+    """
+    _write_project(tmp_path)
+    folder = tmp_path / "sources" / "newcol"
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: newcol
+            kind: source
+            version: "1.0.0"
+            summary: a stream whose batch 2 grows a new column.
+            streams:
+              - name: rows
+                table: newcol_rows
+                write_disposition: append
+                schema:
+                  - {name: id,   type: INTEGER}
+                  - {name: name, type: STRING}
+            """
+        )
+    )
+    (folder / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from dtex import Batch, stream
+            from collections.abc import Iterator
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1, "name": "a"}]
+                # New undeclared column appears mid-stream.
+                yield [{"id": 2, "name": "b", "added_at": "2026-07-24"}]
+            """
+        )
+    )
+    _write_config(tmp_path, name="newcol_dev", source="newcol")
+    result = dtex.run(
+        config="newcol_dev",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "succeeded", result.error
+    # Both rows landed; the new column exists and carries its value where present.
+    rows = _query(
+        duckdb_path, "SELECT id, name, added_at FROM newcol_rows ORDER BY id"
+    )
+    assert rows == [(1, "a", None), (2, "b", "2026-07-24")]
+
+
 def test_run_strict_schema_rejects_divergence(
     tmp_path: Path, duckdb_path: str
 ) -> None:

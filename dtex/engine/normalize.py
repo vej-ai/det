@@ -75,6 +75,7 @@ DriftReporter = Callable[[str, str, str], None]
 # for tests to assert against.
 DRIFT_TYPE_MISMATCH = "type_mismatch"  # value could not coerce to declared type
 DRIFT_MISSING_COLUMN = "missing_column"  # declared column absent from the record
+DRIFT_NEW_COLUMN = "new_column"  # column in the data but not the declared schema
 
 
 # ---------------------------------------------------------------------------
