@@ -1852,6 +1852,10 @@ class RunConfig:
     select: tuple[str, ...] = ()
     full_refresh: bool = False
     dry_run: bool = False
+    # Value-level drift policy for the NORMALIZE step (docs/02 §Normalize).
+    # Resolved from ``dtex_project.yml``'s ``schema_drift:`` key; defaults to
+    # ``warn`` so a stale declared schema degrades instead of failing the run.
+    schema_drift: SchemaDrift = SchemaDrift.WARN
 
     @property
     def is_select_all(self) -> bool:

@@ -1783,6 +1783,7 @@ def run(
             config=source_config,
             select=effective_select,
             full_refresh=full_refresh,
+            schema_drift=project.schema_drift,
         )
 
         # The single ``run_start`` event — emitted *after* discovery + resolve
