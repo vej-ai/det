@@ -1056,11 +1056,16 @@ def test_run_normalize_coerces_all_string_csv_style_batch(
     assert "TIMESTAMP" in ts_rows[0][0].upper()
 
 
-def test_run_normalize_uncoercible_value_strict_mode_rolls_back(
+def test_run_normalize_uncoercible_value_schema_drift_fail_rolls_back(
     tmp_path: Path, duckdb_path: str
 ) -> None:
-    """A strict-mode stream with an uncoercible value in batch 2 fails atomically."""
-    _write_project(tmp_path)
+    """With ``schema_drift: fail`` an uncoercible value in batch 2 fails atomically.
+
+    This is the opt-in strict escape hatch — the pre-0.6.5 behavior. Without
+    it the default is ``warn`` (see the companion test), which would coerce-or-
+    null and succeed.
+    """
+    _write_project(tmp_path, vars_block="schema_drift: fail")
     folder = tmp_path / "sources" / "strict_norm"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
@@ -1116,13 +1121,17 @@ def test_run_normalize_uncoercible_value_strict_mode_rolls_back(
     assert landed[0][0] == 0
 
 
-def test_run_normalize_uncoercible_value_evolve_mode_also_fails(
+def test_run_normalize_uncoercible_value_default_warn_succeeds_and_nulls(
     tmp_path: Path, duckdb_path: str
 ) -> None:
-    """Evolve mode also fails on uncoercible values — strict's distinction is about
-    schema changes, not value-type drift. Both paths surface the same error.
+    """The DEFAULT (schema_drift: warn) does not fail on an uncoercible value.
+
+    Regression for the 2026-07-24 prod outage: a value that contradicts its
+    declared type must not kill the run. The run succeeds, the drifted cell is
+    stored as NULL (INTEGER is not STRING/JSON, so the fallback is NULL), and
+    every well-typed row still lands.
     """
-    _write_project(tmp_path)
+    _write_project(tmp_path)  # no schema_drift key → default 'warn'
     folder = tmp_path / "sources" / "evolve_norm"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
@@ -1131,7 +1140,7 @@ def test_run_normalize_uncoercible_value_evolve_mode_also_fails(
             name: evolve_norm
             kind: source
             version: "1.0.0"
-            summary: evolve-mode stream where batch 2 has an uncoercible cell.
+            summary: default-warn stream where batch 2 has an uncoercible cell.
             streams:
               - name: rows
                 table: evolve_norm_rows
@@ -1163,14 +1172,14 @@ def test_run_normalize_uncoercible_value_evolve_mode_also_fails(
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
     )
-    assert result.status.value == "failed"
-    assert result.error is not None
-    assert "INTEGER" in str(result.error)
-    assert "not-a-number" in str(result.error)
+    # The whole point: drift does NOT fail the run.
+    assert result.status.value == "succeeded", result.error
 
-    # Rollback held — table is empty.
-    landed = _query(duckdb_path, "SELECT COUNT(*) FROM evolve_norm_rows")
-    assert landed[0][0] == 0
+    # Both rows landed; the coercible one kept its value, the drifted one nulled.
+    rows = _query(
+        duckdb_path, "SELECT id, amount FROM evolve_norm_rows ORDER BY id"
+    )
+    assert rows == [(1, 100), (2, None)]
 
 
 # A couple of contract-type sanity checks the engine depends on.

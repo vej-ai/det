@@ -198,6 +198,57 @@ def _infer_schema(first_batch: Batch) -> Schema:
     return Schema(fields=tuple(Field(name=c, type=types[c]) for c in columns))
 
 
+class _DriftReporter:
+    """De-duplicating sink for value-level schema-drift events — docs/02 §Normalize.
+
+    ``normalize_batch`` calls this for EVERY drifted cell (a drifted column
+    typically drifts on every row, and a run has many batches), so the first
+    job is de-duplication: a given ``(column, kind)`` is warned exactly ONCE
+    per stream, no matter how many rows or batches hit it. Warning per row
+    would bury the signal and hammer the log.
+
+    Each first occurrence:
+    * logs a WARNING (operator-visible without reading the JSONL), and
+    * emits a structured ``schema_drift`` event to the run's JSONL log so a
+      tool can enumerate drift without scraping log text.
+
+    ``count`` tallies distinct (column, kind) drifts so the caller can note
+    "N columns drifted this stream" in the stream's result / summary.
+    """
+
+    def __init__(self, stream: str, log: Any, run_log: RunLog | None) -> None:
+        self._stream = stream
+        self._log = log
+        self._run_log = run_log
+        self._seen: set[tuple[str, str]] = set()
+
+    def __call__(self, column: str, kind: str, detail: str) -> None:
+        key = (column, kind)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self._log.warning(
+            "schema drift in stream %r: column %r (%s) — %s",
+            self._stream,
+            column,
+            kind,
+            detail,
+        )
+        if self._run_log is not None:
+            self._run_log.emit(
+                "schema_drift",
+                stream=self._stream,
+                column=column,
+                kind=kind,
+                detail=detail,
+            )
+
+    @property
+    def count(self) -> int:
+        """Number of distinct (column, kind) drifts seen this stream."""
+        return len(self._seen)
+
+
 def _check_strict_schema(stream: StreamDef, declared: Schema, first_batch: Batch) -> None:
     """Fail a ``strict`` stream whose first batch diverges from its schema — docs/05 §3.2."""
     declared_names = set(declared.names)
@@ -862,6 +913,13 @@ def _run_one_stream(
     else:
         resolved_schema = stream_def.schema if stream_def.schema is not None else Schema()
 
+    # NORMALIZE drift policy for this run (docs/02 §Normalize). ``warn`` (the
+    # default) coerces-or-nulls a value that contradicts its declared type and
+    # reports it; ``fail`` restores the strict raise. The reporter dedups per
+    # (column, kind) so a drifted column warns once per stream, not per row.
+    drift_policy = run_config.schema_drift
+    drift_reporter = _DriftReporter(stream_def.name, log, run_log)
+
     # Partition resolution needs the resolved schema (the short-form backward-
     # compat check inspects the field type), so it lives after schema
     # resolution and before ensure_schema. The destination's ensure_schema is
@@ -959,7 +1017,10 @@ def _run_one_stream(
     with _stream_transaction(hooks, conn, stream_meta):
         if first_batch is not None:
             rows_extracted += len(first_batch)
-            normalized = normalize_batch(first_batch, resolved_schema)
+            normalized = normalize_batch(
+                first_batch, resolved_schema,
+                policy=drift_policy, on_drift=drift_reporter,
+            )
             written = hooks["write_batch"](conn, normalized, stream_meta)
             rows_loaded += written
             # Order matters: heartbeat + state flush happen strictly AFTER the
@@ -977,7 +1038,10 @@ def _run_one_stream(
                 )
             for batch in batches:
                 rows_extracted += len(batch)
-                normalized = normalize_batch(batch, resolved_schema)
+                normalized = normalize_batch(
+                    batch, resolved_schema,
+                    policy=drift_policy, on_drift=drift_reporter,
+                )
                 written = hooks["write_batch"](conn, normalized, stream_meta)
                 rows_loaded += written
                 if heartbeat is not None:
