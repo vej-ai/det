@@ -882,6 +882,59 @@ def test_run_new_upstream_column_lands_without_failing(
     assert rows == [(1, "a", None), (2, "b", "2026-07-24")]
 
 
+def test_run_schema_drift_fail_still_evolves_new_column(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """Even with schema_drift: fail, a NEW column is additive and lands.
+
+    ``fail`` governs VALUE contradictions (a bool in a BYTES column), not the
+    arrival of a new column — that is schema evolution, which stays lenient.
+    A stream that only grows a column must still succeed under ``fail``.
+    """
+    _write_project(tmp_path, vars_block="schema_drift: fail")
+    folder = tmp_path / "sources" / "failcol"
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: failcol
+            kind: source
+            version: "1.0.0"
+            summary: fail-mode stream that only grows a new column.
+            streams:
+              - name: rows
+                table: failcol_rows
+                write_disposition: append
+                schema:
+                  - {name: id, type: INTEGER}
+            """
+        )
+    )
+    (folder / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from dtex import Batch, stream
+            from collections.abc import Iterator
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1}]
+                yield [{"id": 2, "extra": "grown"}]
+            """
+        )
+    )
+    _write_config(tmp_path, name="failcol_dev", source="failcol")
+    result = dtex.run(
+        config="failcol_dev",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "succeeded", result.error
+    rows = _query(duckdb_path, "SELECT id, extra FROM failcol_rows ORDER BY id")
+    assert rows == [(1, None), (2, "grown")]
+
+
 def test_run_strict_schema_rejects_divergence(
     tmp_path: Path, duckdb_path: str
 ) -> None:

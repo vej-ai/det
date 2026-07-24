@@ -10,6 +10,34 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Added
+
+- **Graceful schema-drift handling — a stale declared schema no longer kills
+  the run.** A live upstream source drifts: columns get added, removed, or
+  change type. Previously any of these hard-failed the stream — a declared
+  `BYTES` column that started yielding `bool` raised inside NORMALIZE and
+  failed *every* run (2026-07-24), and a new upstream column broke the load
+  with `BinderException` (DuckDB) / `Unrecognized name` (BigQuery MERGE). The
+  NORMALIZE step is now drift-tolerant, controlled by a project-level
+  `schema_drift:` setting in `dtex_project.yml`:
+  - `warn` (**the default**): a value that cannot coerce to its declared type
+    is stored as a safe fallback — `str(value)` for STRING/JSON targets, else
+    `NULL` — so the writer never sees a type-contradicting value; a declared
+    column missing from the data binds NULL; and a new undeclared column
+    appearing in any batch grows the schema, evolves the destination table,
+    and lands. Each distinct drift is logged once per `(stream, column)` (never
+    per row) as a WARNING and a structured `schema_drift` event in the run's
+    JSONL log (fields: `stream`, `column`, `kind`, `detail`; `kind` ∈
+    `type_mismatch` / `missing_column` / `new_column`).
+  - `fail`: the pre-0.6.5 strict behavior — an un-coercible value raises
+    `CoercionError` and fails the stream. New columns are still additive
+    (evolution is not a value contradiction), so a stream that only grows a
+    column succeeds even under `fail`.
+
+  Backward-compatible for library callers: `normalize_batch` still defaults to
+  the strict raise when called without a policy; only the engine's run path
+  opts into `warn`.
+
 ## [0.6.4] — 2026-07-23
 
 Second half of the `--threads` concurrency fix: per-stream `commit_state`
