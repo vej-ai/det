@@ -57,6 +57,7 @@ from dtex.types import (
     ParamSpec,
     ParamType,
     PipelineConfig,
+    SchemaDrift,
     SecretRef,
 )
 
@@ -108,6 +109,13 @@ class ProjectConfig:
     # itself is the correctness floor (a stream never double-runs regardless of
     # this cap); ``max_parallel`` only bounds fan-out within a single build.
     concurrency: Mapping[str, int] = ()  # type: ignore[assignment]
+    # Run-level value-drift policy — docs/02 §Normalize. Shape in
+    # dtex_project.yml: ``schema_drift: warn`` (default) or ``schema_drift:
+    # fail``. ``warn`` coerces-or-nulls a cell whose value contradicts its
+    # declared FieldType and logs one warning per (stream, column); ``fail``
+    # restores the pre-0.6.5 strict raise. Absent ⇒ ``warn``, so a stale
+    # declared schema degrades gracefully instead of killing the run.
+    schema_drift: SchemaDrift = SchemaDrift.WARN
     root: Path = Path()
 
     def max_parallel_for(self, source_name: str) -> int | None:
@@ -163,6 +171,7 @@ class ProjectConfig:
             vars=dict(raw.get("vars") or {}),
             working_dir=str(raw.get("working_dir", ".dtex")),
             concurrency=_parse_concurrency(raw.get("concurrency"), path),
+            schema_drift=_parse_schema_drift(raw.get("schema_drift"), path),
             root=project_root,
         )
 
@@ -189,6 +198,30 @@ def _parse_concurrency(raw: Any, path: Path) -> Mapping[str, int]:
             )
         out[str(key)] = value
     return out
+
+
+def _parse_schema_drift(raw: Any, path: Path) -> SchemaDrift:
+    """Parse the ``schema_drift:`` key from ``dtex_project.yml`` — docs/02 §Normalize.
+
+    Shape: a bare string, ``warn`` (default) or ``fail``. Absent ⇒ ``warn`` so
+    existing project files degrade gracefully without opting in. An unknown
+    value is a :class:`ConfigError` naming the offending value rather than a
+    silent fallback (a typo like ``warnn`` should fail loudly, not quietly pick
+    strict-or-lenient).
+    """
+    if raw is None:
+        return SchemaDrift.WARN
+    if not isinstance(raw, str):
+        raise ConfigError(
+            f"{path}: 'schema_drift' must be a string ('warn' or 'fail'), "
+            f"got {type(raw).__name__}"
+        )
+    try:
+        return SchemaDrift(raw.strip().lower())
+    except ValueError as exc:
+        raise ConfigError(
+            f"{path}: 'schema_drift' must be 'warn' or 'fail', got {raw!r}"
+        ) from exc
 
 
 @dataclass(frozen=True)

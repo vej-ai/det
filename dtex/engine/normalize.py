@@ -56,12 +56,26 @@ from __future__ import annotations
 import base64
 import binascii
 import decimal
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Any
 
-from dtex.types import Batch, CoercionError, FieldType, Schema
+from dtex.types import Batch, CoercionError, FieldType, Schema, SchemaDrift
 
 __all__ = ["coerce_value", "normalize_batch"]
+
+# A drift-report sink: called ``(column, kind, detail)`` the first time a given
+# (column, kind) drift is seen in a batch stream. The runner supplies one that
+# dedups per (stream, column, kind) and emits a ``schema_drift`` JSONL event +
+# a WARNING; unit tests supply a list-appending stub. ``None`` means "no
+# reporting" (the pure-coercion call path, e.g. a destination re-normalizing).
+DriftReporter = Callable[[str, str, str], None]
+
+# Drift kinds carried to the reporter — stable strings for the JSONL event and
+# for tests to assert against.
+DRIFT_TYPE_MISMATCH = "type_mismatch"  # value could not coerce to declared type
+DRIFT_MISSING_COLUMN = "missing_column"  # declared column absent from the record
+DRIFT_NEW_COLUMN = "new_column"  # column in the data but not the declared schema
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +550,34 @@ def _looks_like_base64(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def normalize_batch(batch: Batch, schema: Schema) -> Batch:
+def _drift_fallback(value: Any, field_type: FieldType) -> Any:
+    """The safe representation a WARN-mode cell falls back to on coercion failure.
+
+    The invariant the fallback must uphold: the value handed to the Arrow /
+    Parquet writer (and the destination generally) must NEVER contradict the
+    column's declared type — that contradiction is exactly what raised
+    ``ArrowTypeError: Expected bytes, got a 'bool'`` in prod. So:
+
+    * STRING / JSON targets accept anything (STRING stringifies, JSON is
+      permissive), so keep the value as ``str(value)`` — lossless-ish and
+      always valid for those columns.
+    * every other target gets ``None``. NULL is the one value valid for any
+      typed column, so a bool landing in a BYTES column becomes NULL rather
+      than crashing the writer. The drift is logged; the operator sees the
+      column went null and can fix the declared schema.
+    """
+    if field_type in (FieldType.STRING, FieldType.JSON):
+        return str(value)
+    return None
+
+
+def normalize_batch(
+    batch: Batch,
+    schema: Schema,
+    *,
+    policy: SchemaDrift = SchemaDrift.FAIL,
+    on_drift: DriftReporter | None = None,
+) -> Batch:
     """Return a new :class:`~dtex.types.Batch` with every cell coerced to its declared type.
 
     Per-record dict mutation is fine internally — we build fresh dicts to
@@ -553,6 +594,21 @@ def normalize_batch(batch: Batch, schema: Schema) -> Batch:
     is the schema-evolution path's responsibility) or accepted a declared
     schema (in which case the author chose what columns matter; extras are
     additive-evolution territory).
+
+    Schema-drift policy (docs/02 §Normalize):
+
+    * ``policy=SchemaDrift.FAIL`` (the historical behavior, and the default
+      when called without a policy) — a value that cannot coerce raises
+      :class:`~dtex.types.CoercionError`, failing the stream.
+    * ``policy=SchemaDrift.WARN`` — a value that cannot coerce falls back to a
+      safe representation (:func:`_drift_fallback`: ``str`` for STRING/JSON,
+      else ``NULL``) so the writer never sees a type-contradicting value, and
+      ``on_drift`` is called ``(column, DRIFT_TYPE_MISMATCH, detail)``. A
+      column declared in ``schema`` but absent from a record reports
+      ``DRIFT_MISSING_COLUMN`` (its value is simply not set — the destination
+      binds NULL). The ``on_drift`` sink is responsible for de-duplicating,
+      so this function reports EVERY drifted cell; the runner's reporter
+      collapses them to one warning per (stream, column, kind).
 
     Performance: the per-field-type lookup is hoisted out of the per-
     record loop (precomputed once per batch) so the hot loop is a flat
@@ -579,13 +635,38 @@ def normalize_batch(batch: Batch, schema: Schema) -> Batch:
         # so the caller still gets fresh dicts (uniform contract).
         return [dict(record) for record in batch]
 
+    lenient = policy is SchemaDrift.WARN
     out: list[dict[str, Any]] = []
     for record in batch:
         new_record = dict(record)  # copy first so extras carry over verbatim
         for name, ftype in typed_columns:
-            if name in new_record:
-                new_record[name] = coerce_value(
-                    new_record[name], ftype, column=name
-                )
+            if name not in new_record:
+                # Declared column absent from this record — removed upstream.
+                # The destination binds NULL for it; just report the drift so
+                # the operator learns the declared schema is stale. Only
+                # meaningful in lenient mode (FAIL never reaches here — a
+                # missing column was already tolerated pre-0.6.5).
+                if lenient and on_drift is not None:
+                    on_drift(
+                        name,
+                        DRIFT_MISSING_COLUMN,
+                        f"column {name!r} declared but absent from the source data",
+                    )
+                continue
+            try:
+                new_record[name] = coerce_value(new_record[name], ftype, column=name)
+            except CoercionError:
+                if not lenient:
+                    raise
+                original = new_record[name]
+                new_record[name] = _drift_fallback(original, ftype)
+                if on_drift is not None:
+                    on_drift(
+                        name,
+                        DRIFT_TYPE_MISMATCH,
+                        f"value of type {type(original).__name__} did not coerce "
+                        f"to {ftype.value}; stored as "
+                        f"{'text' if new_record[name] is not None else 'NULL'}",
+                    )
         out.append(new_record)
     return out

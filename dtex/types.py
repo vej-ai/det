@@ -335,6 +335,30 @@ class SchemaContract(_StrEnum):
     """Any schema difference from the existing table fails the run."""
 
 
+class SchemaDrift(_StrEnum):
+    """Run-level policy for VALUE-level schema drift — docs/02 §Normalize.
+
+    Distinct from :class:`SchemaContract`, which governs *table*-level column
+    evolution (add-column vs. fail). ``SchemaDrift`` governs what NORMALIZE does
+    when a cell's actual value contradicts its declared :class:`FieldType` — the
+    case that took prod down on 2026-07-24 (a declared ``BYTES`` column started
+    yielding ``bool``, and the strict coercion raised, killing every run).
+
+    Locked design decision: the default is ``warn`` (lenient). A stale declared
+    schema is the norm for a live upstream source, and one drifted cell must not
+    kill a 23-stream run; the strict ``fail`` mode is the opt-in escape hatch for
+    pipelines that would rather stop than carry a coerced/nulled value.
+    """
+
+    WARN = "warn"
+    """Coerce what is coercible; on a coercion failure, fall back to a safe
+    representation (``str(value)`` for STRING-able targets, else ``NULL``) and
+    log ONE ``schema_drift`` warning per (stream, column). The run continues."""
+    FAIL = "fail"
+    """Any un-coercible value raises :class:`CoercionError` — the pre-0.6.5
+    behavior. For pipelines that must stop on drift rather than carry it."""
+
+
 class ParamType(_StrEnum):
     """The value type of a declared connector param — docs/03 §2.4.
 
@@ -1828,6 +1852,10 @@ class RunConfig:
     select: tuple[str, ...] = ()
     full_refresh: bool = False
     dry_run: bool = False
+    # Value-level drift policy for the NORMALIZE step (docs/02 §Normalize).
+    # Resolved from ``dtex_project.yml``'s ``schema_drift:`` key; defaults to
+    # ``warn`` so a stale declared schema degrades instead of failing the run.
+    schema_drift: SchemaDrift = SchemaDrift.WARN
 
     @property
     def is_select_all(self) -> bool:

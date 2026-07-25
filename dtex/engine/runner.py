@@ -64,7 +64,7 @@ from dtex.engine import config as cfg
 from dtex.engine import configs as cfgs
 from dtex.engine import discovery as disc
 from dtex.engine.logger import Redactor, RunLog, build_logger
-from dtex.engine.normalize import normalize_batch
+from dtex.engine.normalize import DRIFT_NEW_COLUMN, normalize_batch
 from dtex.registry import compute_injection
 from dtex.secrets import load_project_plugins
 from dtex.types import (
@@ -196,6 +196,57 @@ def _infer_schema(first_batch: Batch) -> Schema:
             elif types[key] is FieldType.STRING and value is not None:
                 types[key] = _infer_field_type(value)
     return Schema(fields=tuple(Field(name=c, type=types[c]) for c in columns))
+
+
+class _DriftReporter:
+    """De-duplicating sink for value-level schema-drift events — docs/02 §Normalize.
+
+    ``normalize_batch`` calls this for EVERY drifted cell (a drifted column
+    typically drifts on every row, and a run has many batches), so the first
+    job is de-duplication: a given ``(column, kind)`` is warned exactly ONCE
+    per stream, no matter how many rows or batches hit it. Warning per row
+    would bury the signal and hammer the log.
+
+    Each first occurrence:
+    * logs a WARNING (operator-visible without reading the JSONL), and
+    * emits a structured ``schema_drift`` event to the run's JSONL log so a
+      tool can enumerate drift without scraping log text.
+
+    ``count`` tallies distinct (column, kind) drifts so the caller can note
+    "N columns drifted this stream" in the stream's result / summary.
+    """
+
+    def __init__(self, stream: str, log: Any, run_log: RunLog | None) -> None:
+        self._stream = stream
+        self._log = log
+        self._run_log = run_log
+        self._seen: set[tuple[str, str]] = set()
+
+    def __call__(self, column: str, kind: str, detail: str) -> None:
+        key = (column, kind)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self._log.warning(
+            "schema drift in stream %r: column %r (%s) — %s",
+            self._stream,
+            column,
+            kind,
+            detail,
+        )
+        if self._run_log is not None:
+            self._run_log.emit(
+                "schema_drift",
+                stream=self._stream,
+                column=column,
+                kind=kind,
+                detail=detail,
+            )
+
+    @property
+    def count(self) -> int:
+        """Number of distinct (column, kind) drifts seen this stream."""
+        return len(self._seen)
 
 
 def _check_strict_schema(stream: StreamDef, declared: Schema, first_batch: Batch) -> None:
@@ -862,6 +913,13 @@ def _run_one_stream(
     else:
         resolved_schema = stream_def.schema if stream_def.schema is not None else Schema()
 
+    # NORMALIZE drift policy for this run (docs/02 §Normalize). ``warn`` (the
+    # default) coerces-or-nulls a value that contradicts its declared type and
+    # reports it; ``fail`` restores the strict raise. The reporter dedups per
+    # (column, kind) so a drifted column warns once per stream, not per row.
+    drift_policy = run_config.schema_drift
+    drift_reporter = _DriftReporter(stream_def.name, log, run_log)
+
     # Partition resolution needs the resolved schema (the short-form backward-
     # compat check inspects the field type), so it lives after schema
     # resolution and before ensure_schema. The destination's ensure_schema is
@@ -881,6 +939,14 @@ def _run_one_stream(
         stream_def, resolved_schema, partition=partition
     )
     hooks["ensure_schema"](conn, stream_meta)
+
+    # Mutable schema/meta cell — a later batch can grow a NEW column the
+    # resolved schema (fixed from the first batch) never saw. When that
+    # happens ``_load_batch`` below extends the schema, re-runs
+    # ``ensure_schema`` so the destination adds the column, and reports the
+    # drift. Held in a one-element list so the closure can rebind it.
+    schema_cell: list[Schema] = [resolved_schema]
+    meta_cell: list[StreamMeta] = [stream_meta]
 
     # §3.1 state rule: when an INCREMENTAL-capable stream runs as FULL_REFRESH
     # this invocation, the engine does NOT write _dtex_state. The prior cursor
@@ -956,40 +1022,76 @@ def _run_one_stream(
     # the destination's transaction rolls back any partial load — same
     # crash-safety guarantee as a write_batch failure. See
     # :mod:`dtex.engine.normalize` for the per-FieldType rules.
-    with _stream_transaction(hooks, conn, stream_meta):
+    def _evolve_for_new_columns(batch: Batch) -> None:
+        """Grow the schema + re-ensure the table for any NEW column in ``batch``.
+
+        The resolved schema is fixed from the first batch; a later batch may
+        carry a column that never existed. Without this the destination's
+        table (created for the first-batch columns) rejects the write
+        (``BinderException`` on DuckDB, ``Unrecognized name`` on a BigQuery
+        MERGE). New columns are inferred (STRING when the sampled value is
+        None), appended to the schema, and ``ensure_schema`` is called again so
+        the destination adds them. Reported as drift so the operator sees the
+        source grew. Only meaningful under lenient drift — under ``fail`` we
+        also evolve (a new column is additive, not a value contradiction), but
+        it is still reported.
+        """
+        known = set(schema_cell[0].names)
+        new_types: dict[str, FieldType] = {}
+        for record in batch:
+            for key, value in record.items():
+                if key not in known and key not in new_types:
+                    new_types[key] = _infer_field_type(value)
+                elif key in new_types and new_types[key] is FieldType.STRING and value is not None:
+                    new_types[key] = _infer_field_type(value)
+        if not new_types:
+            return
+        added = tuple(Field(name=n, type=t) for n, t in new_types.items())
+        schema_cell[0] = Schema(fields=schema_cell[0].fields + added)
+        meta_cell[0] = StreamMeta.from_stream_def(
+            stream_def, schema_cell[0], partition=partition
+        )
+        hooks["ensure_schema"](conn, meta_cell[0])
+        for name, ftype in new_types.items():
+            drift_reporter(
+                name,
+                DRIFT_NEW_COLUMN,
+                f"column {name!r} appeared in the source (inferred {ftype.value})",
+            )
+
+    def _load_batch(batch: Batch) -> None:
+        """Evolve for new columns, normalize, write, then heartbeat + flush.
+
+        The single per-batch load path for both the first batch and the rest,
+        so the drift/evolution behavior can never diverge between them.
+        """
+        nonlocal rows_extracted, rows_loaded
+        rows_extracted += len(batch)
+        _evolve_for_new_columns(batch)
+        normalized = normalize_batch(
+            batch, schema_cell[0], policy=drift_policy, on_drift=drift_reporter
+        )
+        written = hooks["write_batch"](conn, normalized, meta_cell[0])
+        rows_loaded += written
+        # Order matters: heartbeat + state flush happen strictly AFTER the
+        # batch's rows are durable (write_batch returned). See
+        # STATE_COMMIT_INTERVAL_SECONDS for why the ordering is the crux.
+        if heartbeat is not None:
+            heartbeat()
+        _maybe_flush_state()
+        if run_log is not None:
+            run_log.emit(
+                "batch_loaded",
+                stream=stream_def.name,
+                rows=written,
+                cumulative_rows=rows_loaded,
+            )
+
+    with _stream_transaction(hooks, conn, meta_cell[0]):
         if first_batch is not None:
-            rows_extracted += len(first_batch)
-            normalized = normalize_batch(first_batch, resolved_schema)
-            written = hooks["write_batch"](conn, normalized, stream_meta)
-            rows_loaded += written
-            # Order matters: heartbeat + state flush happen strictly AFTER the
-            # batch's rows are durable (write_batch returned). See
-            # STATE_COMMIT_INTERVAL_SECONDS for why the ordering is the crux.
-            if heartbeat is not None:
-                heartbeat()
-            _maybe_flush_state()
-            if run_log is not None:
-                run_log.emit(
-                    "batch_loaded",
-                    stream=stream_def.name,
-                    rows=written,
-                    cumulative_rows=rows_loaded,
-                )
+            _load_batch(first_batch)
             for batch in batches:
-                rows_extracted += len(batch)
-                normalized = normalize_batch(batch, resolved_schema)
-                written = hooks["write_batch"](conn, normalized, stream_meta)
-                rows_loaded += written
-                if heartbeat is not None:
-                    heartbeat()
-                _maybe_flush_state()
-                if run_log is not None:
-                    run_log.emit(
-                        "batch_loaded",
-                        stream=stream_def.name,
-                        rows=written,
-                        cumulative_rows=rows_loaded,
-                    )
+                _load_batch(batch)
 
         cursor_after = cursor_before
         if cursor is not None and cursor.observed_max is not None:
@@ -1783,6 +1885,7 @@ def run(
             config=source_config,
             select=effective_select,
             full_refresh=full_refresh,
+            schema_drift=project.schema_drift,
         )
 
         # The single ``run_start`` event — emitted *after* discovery + resolve

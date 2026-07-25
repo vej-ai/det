@@ -824,6 +824,117 @@ def test_run_inferred_schema_for_undeclared_stream(
     assert rows == [(1, "a", 1.5, True)]
 
 
+def test_run_new_upstream_column_lands_without_failing(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """A NEW column appearing in a later batch lands; the run does not fail.
+
+    Drift case #1 (new upstream column). The stream declares {id, name}; batch 2
+    also carries 'added_at'. The default (evolve + schema_drift: warn) must add
+    the column and keep going, not fail — the cello_ucc-class incident.
+    """
+    _write_project(tmp_path)
+    folder = tmp_path / "sources" / "newcol"
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: newcol
+            kind: source
+            version: "1.0.0"
+            summary: a stream whose batch 2 grows a new column.
+            streams:
+              - name: rows
+                table: newcol_rows
+                write_disposition: append
+                schema:
+                  - {name: id,   type: INTEGER}
+                  - {name: name, type: STRING}
+            """
+        )
+    )
+    (folder / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from dtex import Batch, stream
+            from collections.abc import Iterator
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1, "name": "a"}]
+                # New undeclared column appears mid-stream.
+                yield [{"id": 2, "name": "b", "added_at": "2026-07-24"}]
+            """
+        )
+    )
+    _write_config(tmp_path, name="newcol_dev", source="newcol")
+    result = dtex.run(
+        config="newcol_dev",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "succeeded", result.error
+    # Both rows landed; the new column exists and carries its value where present.
+    rows = _query(
+        duckdb_path, "SELECT id, name, added_at FROM newcol_rows ORDER BY id"
+    )
+    assert rows == [(1, "a", None), (2, "b", "2026-07-24")]
+
+
+def test_run_schema_drift_fail_still_evolves_new_column(
+    tmp_path: Path, duckdb_path: str
+) -> None:
+    """Even with schema_drift: fail, a NEW column is additive and lands.
+
+    ``fail`` governs VALUE contradictions (a bool in a BYTES column), not the
+    arrival of a new column — that is schema evolution, which stays lenient.
+    A stream that only grows a column must still succeed under ``fail``.
+    """
+    _write_project(tmp_path, vars_block="schema_drift: fail")
+    folder = tmp_path / "sources" / "failcol"
+    folder.mkdir(parents=True)
+    (folder / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: failcol
+            kind: source
+            version: "1.0.0"
+            summary: fail-mode stream that only grows a new column.
+            streams:
+              - name: rows
+                table: failcol_rows
+                write_disposition: append
+                schema:
+                  - {name: id, type: INTEGER}
+            """
+        )
+    )
+    (folder / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            from dtex import Batch, stream
+            from collections.abc import Iterator
+
+
+            @stream(name="rows")
+            def rows() -> Iterator[Batch]:
+                yield [{"id": 1}]
+                yield [{"id": 2, "extra": "grown"}]
+            """
+        )
+    )
+    _write_config(tmp_path, name="failcol_dev", source="failcol")
+    result = dtex.run(
+        config="failcol_dev",
+        project_dir=str(tmp_path),
+        destination_params_override={"path": duckdb_path},
+    )
+    assert result.status.value == "succeeded", result.error
+    rows = _query(duckdb_path, "SELECT id, extra FROM failcol_rows ORDER BY id")
+    assert rows == [(1, None), (2, "grown")]
+
+
 def test_run_strict_schema_rejects_divergence(
     tmp_path: Path, duckdb_path: str
 ) -> None:
@@ -1056,11 +1167,16 @@ def test_run_normalize_coerces_all_string_csv_style_batch(
     assert "TIMESTAMP" in ts_rows[0][0].upper()
 
 
-def test_run_normalize_uncoercible_value_strict_mode_rolls_back(
+def test_run_normalize_uncoercible_value_schema_drift_fail_rolls_back(
     tmp_path: Path, duckdb_path: str
 ) -> None:
-    """A strict-mode stream with an uncoercible value in batch 2 fails atomically."""
-    _write_project(tmp_path)
+    """With ``schema_drift: fail`` an uncoercible value in batch 2 fails atomically.
+
+    This is the opt-in strict escape hatch — the pre-0.6.5 behavior. Without
+    it the default is ``warn`` (see the companion test), which would coerce-or-
+    null and succeed.
+    """
+    _write_project(tmp_path, vars_block="schema_drift: fail")
     folder = tmp_path / "sources" / "strict_norm"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
@@ -1116,13 +1232,17 @@ def test_run_normalize_uncoercible_value_strict_mode_rolls_back(
     assert landed[0][0] == 0
 
 
-def test_run_normalize_uncoercible_value_evolve_mode_also_fails(
+def test_run_normalize_uncoercible_value_default_warn_succeeds_and_nulls(
     tmp_path: Path, duckdb_path: str
 ) -> None:
-    """Evolve mode also fails on uncoercible values — strict's distinction is about
-    schema changes, not value-type drift. Both paths surface the same error.
+    """The DEFAULT (schema_drift: warn) does not fail on an uncoercible value.
+
+    Regression for the 2026-07-24 prod outage: a value that contradicts its
+    declared type must not kill the run. The run succeeds, the drifted cell is
+    stored as NULL (INTEGER is not STRING/JSON, so the fallback is NULL), and
+    every well-typed row still lands.
     """
-    _write_project(tmp_path)
+    _write_project(tmp_path)  # no schema_drift key → default 'warn'
     folder = tmp_path / "sources" / "evolve_norm"
     folder.mkdir(parents=True)
     (folder / "register.yaml").write_text(
@@ -1131,7 +1251,7 @@ def test_run_normalize_uncoercible_value_evolve_mode_also_fails(
             name: evolve_norm
             kind: source
             version: "1.0.0"
-            summary: evolve-mode stream where batch 2 has an uncoercible cell.
+            summary: default-warn stream where batch 2 has an uncoercible cell.
             streams:
               - name: rows
                 table: evolve_norm_rows
@@ -1163,14 +1283,14 @@ def test_run_normalize_uncoercible_value_evolve_mode_also_fails(
         project_dir=str(tmp_path),
         destination_params_override={"path": duckdb_path},
     )
-    assert result.status.value == "failed"
-    assert result.error is not None
-    assert "INTEGER" in str(result.error)
-    assert "not-a-number" in str(result.error)
+    # The whole point: drift does NOT fail the run.
+    assert result.status.value == "succeeded", result.error
 
-    # Rollback held — table is empty.
-    landed = _query(duckdb_path, "SELECT COUNT(*) FROM evolve_norm_rows")
-    assert landed[0][0] == 0
+    # Both rows landed; the coercible one kept its value, the drifted one nulled.
+    rows = _query(
+        duckdb_path, "SELECT id, amount FROM evolve_norm_rows ORDER BY id"
+    )
+    assert rows == [(1, 100), (2, None)]
 
 
 # A couple of contract-type sanity checks the engine depends on.
