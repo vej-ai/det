@@ -10,6 +10,13 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-25
+
+Graceful schema-drift handling: an upstream schema change (a new column, a
+removed column, or a column whose values stop matching the declared type) now
+degrades to a warning instead of failing the run. Controlled by
+`schema_drift: warn|fail` in `dtex_project.yml` (default `warn`).
+
 ### Added
 
 - **Graceful schema-drift handling — a stale declared schema no longer kills
@@ -733,7 +740,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/vej-ai/dtex/releases/tag/v0.7.0
 [0.6.4]: https://github.com/vej-ai/dtex/releases/tag/v0.6.4
 [0.6.3]: https://github.com/vej-ai/dtex/releases/tag/v0.6.3
 [0.6.2]: https://github.com/vej-ai/dtex/releases/tag/v0.6.2
