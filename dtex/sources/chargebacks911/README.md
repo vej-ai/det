@@ -67,6 +67,10 @@ carry only URLs, status codes, and the server's own `message` string.
 | `page_size` | `500` | Rows per page (`limit`). The chargebacks endpoint caps at 2500. |
 | `lookback_days` | `7` | Overlap window on every incremental run — catches late updates; merge makes the re-pull idempotent. |
 
+The FIRST run (and `--full-refresh`) pulls **without date filters**: CB911's
+server 503s computing wide `date_column` windows, so the bootstrap is the
+unfiltered full sweep and incremental windows only start once state exists.
+
 ## The two streams
 
 ### `alerts`

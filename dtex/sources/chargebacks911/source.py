@@ -4,9 +4,11 @@ Both streams share one shape:
 
 1. Compute the pull window: ``start_date = (cursor date − lookback_days)``,
    ``end_date = today``. The cursor value is a STRING date (ISO-shaped, so
-   string ordering is chronological); the engine hands back either the
-   ``initial_value`` on the first run or the last committed max.
-2. Pass the endpoint's server-side filter —
+   string ordering is chronological). On a virgin run the engine hands back
+   ``None`` (the streams deliberately declare no ``initial_value``) and the
+   pull goes out UNFILTERED — CB911's server times out (503) computing wide
+   ``date_column`` windows, so the bootstrap must be the full sweep.
+2. On incremental runs, pass the endpoint's server-side filter —
    ``date_column=date_updated&start_date=...&end_date=...`` — on the first
    request; the client repeats it on every page.
 3. Paginate with ``limit`` + ``page`` until a short page.
@@ -92,6 +94,11 @@ def _date_params(cursor: Cursor, lookback_days: int) -> dict[str, str]:
     """
     start_value = cursor.start_value()
     if start_value is None:
+        # First-ever run (no persisted state; the streams declare no
+        # initial_value) or --full-refresh: pull WITHOUT date filters.
+        # CB911's server 503s computing wide date_column windows — the
+        # unfiltered sweep is the only bootstrap that works (verified live
+        # 2026-08-03).
         return {}
     start = date.fromisoformat(str(start_value)[:10]) - timedelta(days=lookback_days)
     return {

@@ -10,6 +10,18 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-03
+
+### Fixed
+
+- **chargebacks911: bootstrap without date filters.** CB911's server times
+  out (HTTP 503) computing wide `date_column` windows regardless of page
+  size, which made every first run fail. The streams no longer declare an
+  `initial_value`; a virgin run (or `--full-refresh`) now pulls the
+  unfiltered full sweep — which the server handles instantly — and
+  incremental date windows begin once cursor state exists. Verified against
+  the production API.
+
 ## [0.8.0] — 2026-08-03
 
 ### Added
@@ -761,7 +773,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/vej-ai/dtex/releases/tag/v0.8.1
 [0.8.0]: https://github.com/vej-ai/dtex/releases/tag/v0.8.0
 [0.7.0]: https://github.com/vej-ai/dtex/releases/tag/v0.7.0
 [0.6.4]: https://github.com/vej-ai/dtex/releases/tag/v0.6.4

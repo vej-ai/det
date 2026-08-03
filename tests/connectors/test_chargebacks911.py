@@ -542,12 +542,12 @@ def test_end_to_end_alerts(
     ]
     assert "an_undeclared_field" not in columns  # projection held
 
-    # The date filter went out on the data request: initial_value
-    # 2024-01-01 minus the default 7-day lookback = 2023-12-25.
+    # A virgin run must go out WITHOUT date filters: CB911's server 503s on
+    # wide date_column windows, so the bootstrap is the unfiltered sweep
+    # (no initial_value is declared — start_value() is None on run 1).
     data_path = scenario.captured[1].path
-    assert "date_column=date_updated" in data_path
-    assert "start_date=2023-12-25" in data_path
-    assert "end_date=" in data_path
+    assert "date_column" not in data_path
+    assert "start_date" not in data_path
 
 
 def test_end_to_end_chargebacks(
@@ -594,10 +594,11 @@ def test_end_to_end_chargebacks(
         {"status": "Responded", "date": "2026-01-03"},
     ]
 
-    # The chargebacks endpoint got the same date_column filter mechanism.
+    # Chargebacks bootstrap likewise goes out unfiltered (CB911 503s on
+    # wide date windows).
     data_path = scenario.captured[1].path
     assert "/clients/my/chargebacks" in data_path
-    assert "date_column=date_updated" in data_path
+    assert "date_column" not in data_path
 
 
 def test_incremental_cursor_advances_between_runs(
@@ -644,8 +645,9 @@ def test_incremental_cursor_advances_between_runs(
         r.path for r in scenario.captured if r.path.startswith("/clients/")
     ]
     assert len(data_paths) == 2
-    # Run 1 started from initial_value (lookback 0 → 2024-01-01 exactly).
-    assert "start_date=2024-01-01" in data_paths[0]
+    # Run 1 is the unfiltered bootstrap (no persisted state, no
+    # initial_value declared — CB911 503s on wide date windows).
+    assert "start_date" not in data_paths[0]
     # Run 2 resumed from the max dateUpdated's date part.
     assert "start_date=2026-01-06" in data_paths[1]
 

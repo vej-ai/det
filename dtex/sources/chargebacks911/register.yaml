@@ -85,7 +85,12 @@ streams:
     incremental:
       cursor_field: dateUpdated
       cursor_type: string
-      initial_value: "2024-01-01"
+      # No initial_value ON PURPOSE: a virgin run gets start_value=None and
+      # pulls WITHOUT date filters. CB911's server times out (503) computing
+      # wide date_column windows (verified live 2026-08-03: a 2.6-year window
+      # 503s at any page size while the unfiltered sweep returns instantly),
+      # so the bootstrap must be the unfiltered full sweep; incremental runs
+      # then use small windows from persisted state.
     schema:
       - {name: id,               type: INTEGER, mode: REQUIRED}
       - {name: clientId,         type: INTEGER}
@@ -154,7 +159,8 @@ streams:
     incremental:
       cursor_field: date_updated
       cursor_type: string
-      initial_value: "2024-01-01"
+      # No initial_value ON PURPOSE — see the alerts stream note: CB911 503s
+      # on wide date windows; bootstrap is the unfiltered full sweep.
     schema:
       - {name: id,                        type: STRING, mode: REQUIRED}
       - {name: arn,                       type: STRING}
