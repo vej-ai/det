@@ -10,6 +10,8 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-03
+
 ### Added
 
 - **Baked `chargebacks911` source connector** — Chargebacks911's CBAPIv2
@@ -759,7 +761,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/vej-ai/dtex/releases/tag/v0.8.0
 [0.7.0]: https://github.com/vej-ai/dtex/releases/tag/v0.7.0
 [0.6.4]: https://github.com/vej-ai/dtex/releases/tag/v0.6.4
 [0.6.3]: https://github.com/vej-ai/dtex/releases/tag/v0.6.3
