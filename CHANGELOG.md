@@ -10,6 +10,8 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-08-04
+
 ### Fixed
 
 - **chargebacks911 `alerts`: full sweep instead of a fake incremental.**
@@ -802,7 +804,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/vej-ai/dtex/releases/tag/v0.8.2
 [0.8.1]: https://github.com/vej-ai/dtex/releases/tag/v0.8.1
 [0.8.0]: https://github.com/vej-ai/dtex/releases/tag/v0.8.0
 [0.7.0]: https://github.com/vej-ai/dtex/releases/tag/v0.7.0
