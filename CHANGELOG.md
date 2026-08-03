@@ -10,6 +10,35 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Fixed
+
+- **chargebacks911 `alerts`: full sweep instead of a fake incremental.**
+  `GET /clients/{id}/alerts` silently IGNORES
+  `date_column`/`start_date`/`end_date` — verified live, a
+  `2019-01-01`→`2019-01-02` window returns present-day alerts — and always
+  returns full account history in `id` order. The stream had been sending
+  those params anyway, so every run re-extracted the entire history while
+  the run log recorded a confident "incremental" sync: 3341 rows pulled per
+  run when only 9 rows sat past the cursor. It now sends no date params at
+  all. `merge` on `id` already made the repeat pull idempotent, so no data
+  was wrong — but the cost and the reporting were. The cursor is still
+  observed so `_dtex_state` shows real freshness.
+
+- **chargebacks911 `chargebacks`: the date window is walked in chunks.**
+  This endpoint's date filter *does* work, but CB911 503s computing wide
+  windows: three of five early production runs died on a single
+  `start_date=2023-12-25&end_date=2026-08-03` request. The span from
+  `(cursor − lookback_days)` to today is now sliced into
+  `window_chunk_days`-wide requests (default 30), each paginated and
+  retried independently, so a long catch-up after an outage completes
+  instead of failing on one un-servable request.
+
+### Added
+
+- **chargebacks911 param `window_chunk_days`** (default `30`) — max span of
+  one `chargebacks` request. Smaller means more requests but more
+  resilience.
+
 ## [0.8.1] — 2026-08-03
 
 ### Fixed

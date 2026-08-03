@@ -29,9 +29,11 @@ import base64
 import json
 import threading
 from collections.abc import Iterator
+from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import duckdb
 import pytest
@@ -165,6 +167,12 @@ def _client(base_url: str, *, max_retries: int = 3) -> Chargebacks911Client:
 
 def _expected_basic() -> str:
     return "Basic " + base64.b64encode(b"user_test_unit:pw_test_unit").decode()
+
+
+def _window_of(path: str) -> tuple[str, str]:
+    """Extract (start_date, end_date) from a captured request path."""
+    query = parse_qs(urlparse(path).query)
+    return query["start_date"][0], query["end_date"][0]
 
 
 # --------------------------------------------------------------------------
@@ -601,13 +609,22 @@ def test_end_to_end_chargebacks(
     assert "date_column" not in data_path
 
 
-def test_incremental_cursor_advances_between_runs(
+def test_alerts_never_sends_date_params_even_with_a_cursor(
     cb_stub: tuple[_Scenario, str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The second run's start_date comes from the first run's max observed
-    dateUpdated (lookback 0 here so the assertion is exact)."""
+    """alerts is a FULL SWEEP on every run, including runs that have a
+    persisted cursor.
+
+    The endpoint ignores date_column/start_date/end_date (verified live: a
+    2019 window returns present-day alerts). Sending them anyway produced
+    full account history wearing a date label — in production the stream
+    re-extracted all 3341 rows every run while only 9 sat past the cursor,
+    and the state table happily recorded that as an "incremental" run. The
+    cursor is still observed so freshness state is real; it just must not
+    appear in the query string.
+    """
     scenario, base_url = cb_stub
     _setenv_credentials(monkeypatch)
 
@@ -645,11 +662,218 @@ def test_incremental_cursor_advances_between_runs(
         r.path for r in scenario.captured if r.path.startswith("/clients/")
     ]
     assert len(data_paths) == 2
-    # Run 1 is the unfiltered bootstrap (no persisted state, no
-    # initial_value declared — CB911 503s on wide date windows).
+    # Run 2 HAS a persisted cursor (2026-01-06) — and still sends no dates.
+    for path in data_paths:
+        assert "date_column" not in path
+        assert "start_date" not in path
+        assert "end_date" not in path
+
+    # The cursor did advance, so _dtex_state still reports real freshness.
+    conn = duckdb.connect(db_path)
+    cursor_value = conn.execute(
+        "SELECT cursor_value FROM _dtex_state WHERE stream = 'alerts'"
+    ).fetchone()
+    conn.close()
+    assert cursor_value is not None
+    assert "2026-01-06 11:30:00" in str(cursor_value[0])
+
+
+def test_chargebacks_chunks_a_wide_window_into_slices(
+    cb_stub: tuple[_Scenario, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wide catch-up is issued as many bounded windows, never one request.
+
+    Three of five production runs died on a single
+    ``start_date=2023-12-25&end_date=2026-08-03`` request: CB911 503s
+    computing wide date_column windows. The span is now sliced into
+    window_chunk_days-wide requests, each individually paginated and
+    retryable. Windows must tile the span with no gap and no overlap.
+    """
+    scenario, base_url = cb_stub
+    _setenv_credentials(monkeypatch)
+
+    # Run 1 bootstraps unfiltered and sets the cursor well in the past.
+    scenario.add(json_body=_AUTH_OK)
+    scenario.add(json_body=_envelope([_chargeback_row("cb_1", "2026-01-01")]))
+    # Run 2: one mint, then an empty page per chunk. Queue plenty — the
+    # scenario returns a 500 once exhausted, which would fail the run.
+    scenario.add(json_body=_AUTH_OK)
+    for _ in range(200):
+        scenario.add(json_body=_envelope([]))
+
+    _write_project(tmp_path)
+    _write_config(
+        tmp_path,
+        base_url=base_url,
+        streams=(
+            "  chargebacks:\n    params:\n      lookback_days: 0\n"
+            "      window_chunk_days: 30"
+        ),
+    )
+
+    db_path = str(tmp_path / "warehouse.duckdb")
+    for _ in range(2):
+        result = dtex.run(
+            config="cb911_test",
+            project_dir=str(tmp_path),
+            destination_params_override={"path": db_path},
+        )
+        assert result.status.value == "succeeded", result.error
+
+    data_paths = [
+        r.path for r in scenario.captured if r.path.startswith("/clients/")
+    ]
+    # Run 1 = 1 unfiltered request; run 2 = one request per 30-day chunk
+    # from 2026-01-01 to today, which is several months → many windows.
     assert "start_date" not in data_paths[0]
-    # Run 2 resumed from the max dateUpdated's date part.
-    assert "start_date=2026-01-06" in data_paths[1]
+    incremental = data_paths[1:]
+    assert len(incremental) > 1, (
+        f"expected the wide window to be chunked, got one request: {incremental}"
+    )
+
+    windows = [_window_of(p) for p in incremental]
+    # Every request is bounded to the configured chunk width.
+    for start, end in windows:
+        span_days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+        assert 1 <= span_days <= 30, f"window {start}→{end} spans {span_days}d"
+    # Windows tile the span: each starts the day after the previous ended.
+    for (_, prev_end), (next_start, _) in zip(windows, windows[1:], strict=False):
+        assert date.fromisoformat(next_start) == date.fromisoformat(prev_end) + timedelta(
+            days=1
+        ), f"gap/overlap between {prev_end} and {next_start}"
+    # The walk starts at the cursor and ends today.
+    assert windows[0][0] == "2026-01-01"
+    assert windows[-1][1] == datetime.now(tz=UTC).date().isoformat()
+
+
+def test_chargebacks_single_short_window_is_one_request(
+    cb_stub: tuple[_Scenario, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chunking must not multiply requests for the everyday case: a cursor
+    from today plus a small lookback is one window, not many."""
+    scenario, base_url = cb_stub
+    _setenv_credentials(monkeypatch)
+
+    today = datetime.now(tz=UTC).date().isoformat()
+    scenario.add(json_body=_AUTH_OK)
+    scenario.add(json_body=_envelope([_chargeback_row("cb_1", today)]))
+    scenario.add(json_body=_AUTH_OK)
+    for _ in range(10):
+        scenario.add(json_body=_envelope([]))
+
+    _write_project(tmp_path)
+    _write_config(
+        tmp_path,
+        base_url=base_url,
+        streams=(
+            "  chargebacks:\n    params:\n      lookback_days: 0\n"
+            "      window_chunk_days: 30"
+        ),
+    )
+
+    db_path = str(tmp_path / "warehouse.duckdb")
+    for _ in range(2):
+        result = dtex.run(
+            config="cb911_test",
+            project_dir=str(tmp_path),
+            destination_params_override={"path": db_path},
+        )
+        assert result.status.value == "succeeded", result.error
+
+    incremental = [
+        r.path for r in scenario.captured if r.path.startswith("/clients/")
+    ][1:]
+    assert len(incremental) == 1, incremental
+    assert f"start_date={today}" in incremental[0]
+    assert f"end_date={today}" in incremental[0]
+    assert "date_column=date_updated" in incremental[0]
+
+
+# --------------------------------------------------------------------------
+# _iter_windows — the chunking arithmetic, unit-level
+# --------------------------------------------------------------------------
+
+
+class _FakeCursor:
+    """Minimal Cursor stand-in: only start_value() is used by _iter_windows."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def start_value(self) -> Any:
+        return self._value
+
+
+def _windows(value: Any, *, lookback: int = 0, chunk: int = 30) -> list[dict[str, str]]:
+    from dtex.sources.chargebacks911.source import _iter_windows
+
+    return _iter_windows(_FakeCursor(value), lookback, chunk)
+
+
+def test_iter_windows_no_cursor_is_one_unfiltered_request() -> None:
+    """Bootstrap / --full-refresh: CB911 503s on wide windows, so the first
+    run cannot be expressed as a date range at all."""
+    assert _windows(None) == [{}]
+
+
+def test_iter_windows_tiles_without_gap_or_overlap() -> None:
+    today = datetime.now(tz=UTC).date()
+    start = today - timedelta(days=95)
+    windows = _windows(start.isoformat(), chunk=30)
+
+    assert windows[0]["start_date"] == start.isoformat()
+    assert windows[-1]["end_date"] == today.isoformat()
+    assert all(w["date_column"] == "date_updated" for w in windows)
+    for prev, nxt in zip(windows, windows[1:], strict=False):
+        assert date.fromisoformat(nxt["start_date"]) == date.fromisoformat(
+            prev["end_date"]
+        ) + timedelta(days=1)
+
+
+def test_iter_windows_applies_lookback_before_chunking() -> None:
+    today = datetime.now(tz=UTC).date()
+    windows = _windows(today.isoformat(), lookback=7, chunk=30)
+
+    assert len(windows) == 1
+    assert windows[0]["start_date"] == (today - timedelta(days=7)).isoformat()
+    assert windows[0]["end_date"] == today.isoformat()
+
+
+def test_iter_windows_accepts_cursor_with_time_component() -> None:
+    """Cursor values may carry a time ("2026-01-06 11:30:00") — only the
+    ISO date part is meaningful for the filter."""
+    today = datetime.now(tz=UTC).date()
+    windows = _windows(f"{today.isoformat()} 11:30:00", chunk=30)
+
+    assert windows[0]["start_date"] == today.isoformat()
+
+
+def test_iter_windows_future_cursor_still_yields_one_window() -> None:
+    """A cursor ahead of today (clock skew) must not produce an EMPTY window
+    list — that would silently sync nothing instead of erroring or syncing."""
+    future = (datetime.now(tz=UTC).date() + timedelta(days=30)).isoformat()
+    windows = _windows(future, chunk=30)
+
+    assert len(windows) == 1
+    assert windows[0]["end_date"] == datetime.now(tz=UTC).date().isoformat()
+
+
+def test_iter_windows_chunk_days_floor_is_one_day() -> None:
+    """A nonsensical chunk width (0 or negative) must not spin forever —
+    it clamps to 1-day windows."""
+    today = datetime.now(tz=UTC).date()
+    windows = _windows((today - timedelta(days=2)).isoformat(), chunk=0)
+
+    assert len(windows) == 3
+    assert [w["start_date"] for w in windows] == [
+        (today - timedelta(days=2)).isoformat(),
+        (today - timedelta(days=1)).isoformat(),
+        today.isoformat(),
+    ]
 
 
 def test_credentials_never_appear_in_logs(

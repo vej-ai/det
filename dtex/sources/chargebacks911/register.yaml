@@ -2,21 +2,24 @@
 # (https://api.cbresponseservices.com/v2). Two streams:
 #
 # * `alerts` — prevention alerts (Ethoca/Verifi/RDR etc.) from
-#   /clients/{client_id}/alerts. Incremental on `dateUpdated` (the API's
-#   `date_column=date_updated` server-side filter), merge on `id`.
+#   /clients/{client_id}/alerts. FULL SWEEP every run, merge on `id`.
+#   This endpoint IGNORES `date_column`/`start_date`/`end_date` — verified
+#   live 2026-08-03: a 2019-01-01→2019-01-02 window returned present-day
+#   alerts. `dateUpdated` is still observed for freshness state, but it
+#   cannot narrow the request, so no date params are sent at all.
 #   Field names are camelCase — that is what the API returns.
 #
 # * `chargebacks` — chargeback cases from /clients/{client_id}/chargebacks.
 #   Incremental on `date_updated` (snake_case on this endpoint), merge on
-#   `id`. `status_history` is a nested array of objects and lands as a
-#   JSON column (same convention as shiphero / stripe nested fields).
+#   `id`. This endpoint's date filter DOES work, but a wide window 503s,
+#   so the span is walked in `window_chunk_days` slices.
+#   `status_history` is a nested array of objects and lands as a JSON
+#   column (same convention as shiphero / stripe nested fields).
 #
 # Both endpoints paginate with `limit` + `page` (1-based); the walk stops
-# when a page returns fewer than `limit` rows. Both accept
-# `date_column` + `start_date` + `end_date` server-side filters, which is
-# what makes the incremental cursor real: every run pulls from
-# (cursor date − lookback_days) up to today, and merge-on-id makes the
-# overlap idempotent.
+# when a page returns fewer than `limit` rows. Do NOT assume the two
+# endpoints filter alike — they do not, and that asymmetry is the reason
+# this connector looks lopsided.
 #
 # Auth: CB911's two-step scheme. Basic auth (username + password) on
 # GET /auth mints a bearer token (~60-minute TTL); all other requests use
@@ -61,7 +64,18 @@ params:
     description: >-
       Days of overlap on every incremental run — start_date is the cursor
       date minus this many days, so late updates inside the window re-pull
-      and merge idempotently.
+      and merge idempotently. Applies to `chargebacks` only; `alerts` has
+      no working date filter and always sweeps in full.
+  window_chunk_days:
+    type: int
+    default: 30
+    description: >-
+      Max span of ONE `chargebacks` request. The window from
+      (cursor − lookback_days) to today is sliced into chunks this wide and
+      each is paginated separately, because CB911 503s computing wide
+      `date_column` windows — a 2.5-year catch-up cannot succeed as one
+      request. Smaller = more requests but more resilient; each chunk
+      retries independently.
 
 secrets:
   # Both halves of the Basic-auth credential pair used to mint the bearer
@@ -85,12 +99,13 @@ streams:
     incremental:
       cursor_field: dateUpdated
       cursor_type: string
-      # No initial_value ON PURPOSE: a virgin run gets start_value=None and
-      # pulls WITHOUT date filters. CB911's server times out (503) computing
-      # wide date_column windows (verified live 2026-08-03: a 2.6-year window
-      # 503s at any page size while the unfiltered sweep returns instantly),
-      # so the bootstrap must be the unfiltered full sweep; incremental runs
-      # then use small windows from persisted state.
+      # The cursor is observed for FRESHNESS VISIBILITY only — this endpoint
+      # ignores date filters, so nothing can narrow the request and every
+      # run is a full sweep (see the stream docstring in source.py). It had
+      # been sending date params and silently re-pulling all 3341 rows every
+      # run while only 9 sat past the cursor; the params are now gone rather
+      # than pretending. merge-on-id keeps the repeat pull idempotent.
+      # No initial_value ON PURPOSE (it would be meaningless here).
     schema:
       - {name: id,               type: INTEGER, mode: REQUIRED}
       - {name: clientId,         type: INTEGER}
@@ -159,8 +174,12 @@ streams:
     incremental:
       cursor_field: date_updated
       cursor_type: string
-      # No initial_value ON PURPOSE — see the alerts stream note: CB911 503s
-      # on wide date windows; bootstrap is the unfiltered full sweep.
+      # No initial_value ON PURPOSE: a virgin run gets start_value=None and
+      # bootstraps UNFILTERED. CB911 503s computing wide date_column windows,
+      # so the first run cannot be expressed as a date range at all.
+      # Incremental runs then walk (cursor − lookback_days) → today in
+      # window_chunk_days slices, which is what keeps a long catch-up after
+      # an outage from dying on one un-servable request.
     schema:
       - {name: id,                        type: STRING, mode: REQUIRED}
       - {name: arn,                       type: STRING}

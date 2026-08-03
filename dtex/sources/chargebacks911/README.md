@@ -6,14 +6,39 @@ at `https://api.cbresponseservices.com/v2` (sandbox:
 Two streams:
 
 * **`alerts`** — prevention alerts (Ethoca / Verifi / RDR etc.) from
-  `/clients/{client_id}/alerts`. Incremental on `dateUpdated`.
+  `/clients/{client_id}/alerts`. **Full sweep every run.**
 * **`chargebacks`** — chargeback cases from
-  `/clients/{client_id}/chargebacks`. Incremental on `date_updated`.
+  `/clients/{client_id}/chargebacks`. Incremental on `date_updated`,
+  requested in bounded date chunks.
 
-Both endpoints take a real server-side date filter
-(`date_column` + `start_date` + `end_date`), so the incremental cursor is
-real: every run pulls `(cursor date − lookback_days)` → today, and
-`write_disposition: merge` on `id` makes the overlap upsert idempotently.
+## The two endpoints do NOT filter alike
+
+This asymmetry is the single most important thing to know here, and it is
+why the connector looks lopsided:
+
+| Endpoint | `date_column`/`start_date`/`end_date` |
+| --- | --- |
+| `/chargebacks` | **Honoured** — but a wide window returns HTTP 503. |
+| `/alerts` | **Silently ignored.** |
+
+`/alerts` returns full account history in `id` order no matter what dates
+you pass. Verified live 2026-08-03: a `2019-01-01`→`2019-01-02` window came
+back with present-day alerts, while `limit`/`page` demonstrably worked.
+
+So `alerts` sends **no date params at all**. It previously sent them and
+the run bookkeeping recorded confident "incremental" runs that re-extracted
+the entire history every time — 3341 rows pulled per run when only 9 sat
+past the cursor. The cursor is still observed so `_dtex_state` reports real
+freshness; it just cannot narrow the request. `write_disposition: merge` on
+`id` keeps the repeat pull idempotent, and cost is bounded by account size
+rather than run frequency.
+
+`chargebacks` does filter, so it stays incremental — but the window from
+`(cursor date − lookback_days)` → today is sliced into
+`window_chunk_days`-wide requests, each paginated and retried
+independently. One wide request cannot succeed: three of five early
+production runs died with 503 on a single
+`start_date=2023-12-25&end_date=2026-08-03`.
 
 ## Authentication
 
@@ -65,11 +90,13 @@ carry only URLs, status codes, and the server's own `message` string.
 | `base_url` | `https://api.cbresponseservices.com/v2` | Production API; set the sandbox URL for testing. |
 | `client_id` | `"my"` | The API accepts the literal alias `my` for the caller's own account; set a numeric id for a sub-client. |
 | `page_size` | `500` | Rows per page (`limit`). The chargebacks endpoint caps at 2500. |
-| `lookback_days` | `7` | Overlap window on every incremental run — catches late updates; merge makes the re-pull idempotent. |
+| `lookback_days` | `7` | `chargebacks` only — overlap window on every incremental run; catches late updates, merge makes the re-pull idempotent. |
+| `window_chunk_days` | `30` | `chargebacks` only — max span of ONE request. The full window is sliced into chunks this wide. Smaller = more requests, more resilient. |
 
-The FIRST run (and `--full-refresh`) pulls **without date filters**: CB911's
-server 503s computing wide `date_column` windows, so the bootstrap is the
-unfiltered full sweep and incremental windows only start once state exists.
+The FIRST `chargebacks` run (and `--full-refresh`) pulls **without date
+filters**: CB911's server 503s computing wide `date_column` windows, so the
+bootstrap cannot be expressed as a date range and chunked incremental
+windows only start once state exists. `alerts` is always unfiltered.
 
 ## The two streams
 
@@ -87,12 +114,18 @@ key), `clientId`, `level`, `outcomeId`, `currencyId`, `cc_id` INTEGER;
 fields plus every date field (`dateUpdated` is the cursor; the API
 serves dates as strings and the connector stores them as-is).
 
+Note the rows DO carry usable dates (`dateUpdated`, `dateCreated`,
+`transDate`, …) — it is only the *server-side filter* that is broken. So
+date-bounded alert analysis is perfectly possible **in the warehouse**,
+just not at the API.
+
 ### `chargebacks`
 
 `GET /clients/{client_id}/chargebacks`, same pagination (API max
-2500/page), same date-filter mechanism (`date_column` accepts
-`date_trans|date_created|date_post|date_updated`; the connector filters on
-`date_updated`, its cursor). Field names are **snake_case** on this
+2500/page). Unlike `alerts`, the date filter here works (`date_column`
+accepts `date_trans|date_created|date_post|date_updated`; the connector
+filters on `date_updated`, its cursor) — but only for narrow windows, hence
+`window_chunk_days`. Field names are **snake_case** on this
 endpoint.
 
 Schema highlights (full list in `register.yaml`): `id` STRING (primary
@@ -120,6 +153,17 @@ streams: all            # or list specific streams
 
 ## Known limitations
 
+* **`alerts` cannot be incremental.** The endpoint ignores date filters
+  (see above), so every run re-pulls the whole alert history. `merge` on
+  `id` makes that correct, and the cost scales with account size rather
+  than run frequency — but a very large alert history will make this
+  stream slow, and no date parameter will fix it. The escape hatch would
+  be a descending walk that stops at the cursor, which the API's fixed
+  `id`-order response does not currently support.
+* **A wide `chargebacks` catch-up costs many requests.** After a long
+  outage the window is sliced into `window_chunk_days` chunks, so a
+  two-year gap is ~25 requests per page-walk at the default 30 days. That
+  is deliberate: one wide request returns 503 and cannot succeed at all.
 * **Token invalidation vs concurrency.** Minting a token invalidates the
   previous one account-wide. Two concurrent runs (or the connector plus
   any other integration minting tokens with the same credentials) will
