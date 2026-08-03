@@ -1,0 +1,205 @@
+# Chargebacks911 — baked source connector for CBAPIv2
+# (https://api.cbresponseservices.com/v2). Two streams:
+#
+# * `alerts` — prevention alerts (Ethoca/Verifi/RDR etc.) from
+#   /clients/{client_id}/alerts. Incremental on `dateUpdated` (the API's
+#   `date_column=date_updated` server-side filter), merge on `id`.
+#   Field names are camelCase — that is what the API returns.
+#
+# * `chargebacks` — chargeback cases from /clients/{client_id}/chargebacks.
+#   Incremental on `date_updated` (snake_case on this endpoint), merge on
+#   `id`. `status_history` is a nested array of objects and lands as a
+#   JSON column (same convention as shiphero / stripe nested fields).
+#
+# Both endpoints paginate with `limit` + `page` (1-based); the walk stops
+# when a page returns fewer than `limit` rows. Both accept
+# `date_column` + `start_date` + `end_date` server-side filters, which is
+# what makes the incremental cursor real: every run pulls from
+# (cursor date − lookback_days) up to today, and merge-on-id makes the
+# overlap idempotent.
+#
+# Auth: CB911's two-step scheme. Basic auth (username + password) on
+# GET /auth mints a bearer token (~60-minute TTL); all other requests use
+# `Authorization: Bearer <token>`. Minting a NEW token INVALIDATES the
+# previous one, so two concurrent runs against the same account fight
+# over the token — schedule accordingly. The client re-mints once on a
+# mid-run 401 and proactively re-mints after ~50 minutes so long
+# extractions survive the TTL. Credentials are issued by the CB911
+# setup team (they are not self-service).
+
+name: chargebacks911
+kind: source
+version: "0.1.0"
+summary: Chargebacks911 CBAPIv2 — prevention alerts and chargeback cases.
+tags: [chargebacks911, chargebacks, alerts, payments, disputes, fraud]
+
+requires:
+  - "requests>=2.31"
+
+params:
+  base_url:
+    type: string
+    default: "https://api.cbresponseservices.com/v2"
+    description: >-
+      CBAPIv2 base URL — production default; set
+      https://sandbox.cbresponseservices.com/v2 for the sandbox, or a stub
+      server in tests.
+  client_id:
+    type: string
+    default: "my"
+    description: >-
+      CB911 client id. The API accepts the literal alias "my" for the
+      authenticated caller's own account; set an explicit numeric id only
+      when pulling a sub-client.
+  page_size:
+    type: int
+    default: 500
+    description: Rows per page (`limit`). The chargebacks endpoint caps at 2500.
+  lookback_days:
+    type: int
+    default: 7
+    description: >-
+      Days of overlap on every incremental run — start_date is the cursor
+      date minus this many days, so late updates inside the window re-pull
+      and merge idempotently.
+
+secrets:
+  # Both halves of the Basic-auth credential pair used to mint the bearer
+  # token on GET /auth. Issued by the CB911 setup team. The env-var refs
+  # work with a plain `pip install dtex`; profile-level `secret://`
+  # overrides (GCP Secret Manager / AWS / Vault) work for production.
+  - name: username
+    ref: ${env.CHARGEBACKS911_USERNAME}
+  - name: password
+    ref: ${env.CHARGEBACKS911_PASSWORD}
+
+streams:
+  # alerts — camelCase fields, exactly as the API returns them. Amounts
+  # arrive as strings ("104.97"); the engine's NORMALIZE step coerces them
+  # to the declared FLOAT. The cursor field `dateUpdated` is a STRING date
+  # — ISO-shaped, so string ordering is chronological ordering.
+  - name: alerts
+    table: alerts
+    primary_key: [id]
+    write_disposition: merge
+    incremental:
+      cursor_field: dateUpdated
+      cursor_type: string
+      initial_value: "2024-01-01"
+    schema:
+      - {name: id,               type: INTEGER, mode: REQUIRED}
+      - {name: clientId,         type: INTEGER}
+      - {name: completed,        type: BOOLEAN}
+      - {name: isDisputed,       type: BOOLEAN}
+      - {name: isRefund,         type: BOOLEAN}
+      - {name: isValid,          type: BOOLEAN}
+      - {name: level,            type: INTEGER}
+      - {name: outcomeId,        type: INTEGER}
+      - {name: currencyId,       type: INTEGER}
+      - {name: cc_id,            type: INTEGER}
+      - {name: amount,           type: FLOAT}
+      - {name: refundAmount,     type: FLOAT}
+      - {name: mid,              type: STRING}
+      - {name: descriptor,       type: STRING}
+      - {name: type,             type: STRING}
+      - {name: caseId,           type: STRING}
+      - {name: cbCaseId,         type: STRING}
+      - {name: transId,          type: STRING}
+      - {name: currency_name,    type: STRING}
+      - {name: outcome_name,     type: STRING}
+      - {name: ccType,           type: STRING}
+      - {name: ccNum,            type: STRING}
+      - {name: cc_name,          type: STRING}
+      - {name: cc_prettyName,    type: STRING}
+      - {name: cc_firstDigit,    type: STRING}
+      - {name: cc_firstDigitInt, type: STRING}
+      - {name: caid,             type: STRING}
+      - {name: refundId,         type: STRING}
+      - {name: orderId,          type: STRING}
+      - {name: customerName,     type: STRING}
+      - {name: customerEmail,    type: STRING}
+      - {name: firstName,        type: STRING}
+      - {name: lastName,         type: STRING}
+      - {name: issuerName,       type: STRING}
+      - {name: arn,              type: STRING}
+      - {name: authCode,         type: STRING}
+      - {name: authDate,         type: STRING}
+      - {name: reasonCode,       type: STRING}
+      - {name: transactionType,  type: STRING}
+      - {name: fileName,         type: STRING}
+      - {name: alertAge,         type: STRING}
+      - {name: analytics,        type: STRING}
+      - {name: received,         type: STRING}
+      - {name: expirationDate,   type: STRING}
+      - {name: dateBilled,       type: STRING}
+      - {name: dateCreated,      type: STRING}
+      - {name: dateDisputed,     type: STRING}
+      - {name: dateUpdated,      type: STRING}
+      - {name: transDate,        type: STRING}
+      - {name: completedDate,    type: STRING}
+      - {name: confirmedDate,    type: STRING}
+      - {name: outcomeDate,      type: STRING}
+      - {name: processedDate,    type: STRING}
+      - {name: refundDate,       type: STRING}
+
+  # chargebacks — snake_case fields. `id` is declared STRING deliberately:
+  # the endpoint's id shape is not pinned down (numeric vs string across
+  # accounts), and STRING is the safe primary key for merge semantics
+  # either way. `status_history` is a nested array of objects → JSON
+  # column, per the house convention for nested values.
+  - name: chargebacks
+    table: chargebacks
+    primary_key: [id]
+    write_disposition: merge
+    incremental:
+      cursor_field: date_updated
+      cursor_type: string
+      initial_value: "2024-01-01"
+    schema:
+      - {name: id,                        type: STRING, mode: REQUIRED}
+      - {name: arn,                       type: STRING}
+      - {name: auth_no,                   type: STRING}
+      - {name: b_address,                 type: STRING}
+      - {name: b_city,                    type: STRING}
+      - {name: b_state,                   type: STRING}
+      - {name: b_zip,                     type: STRING}
+      - {name: bin,                       type: STRING}
+      - {name: card_bin,                  type: STRING}
+      - {name: card_last_four,            type: STRING}
+      - {name: last_four,                 type: STRING}
+      - {name: case_no,                   type: STRING}
+      - {name: case_type,                 type: STRING}
+      - {name: cc_type,                   type: STRING}
+      - {name: currency,                  type: STRING}
+      - {name: chargeback_currency_code,  type: STRING}
+      - {name: date_due,                  type: STRING}
+      - {name: date_post,                 type: STRING}
+      - {name: date_trans,                type: STRING}
+      - {name: date_updated,              type: STRING}
+      - {name: descriptor,                type: STRING}
+      - {name: fname,                     type: STRING}
+      - {name: lname,                     type: STRING}
+      - {name: ip_address,                type: STRING}
+      - {name: mid,                       type: STRING}
+      - {name: mid_alias,                 type: STRING}
+      - {name: order_id,                  type: STRING}
+      - {name: platform_name,             type: STRING}
+      - {name: reason_category,           type: STRING}
+      - {name: reason_code,               type: STRING}
+      - {name: reference_number,          type: STRING}
+      - {name: status,                    type: STRING}
+      - {name: uid,                       type: STRING}
+      - {name: chargeback_amount,         type: FLOAT}
+      - {name: dispute_amount,            type: FLOAT}
+      - {name: disputed_amount,           type: FLOAT}
+      - {name: crm_gateway_id,            type: INTEGER}
+      - {name: platform_id,               type: INTEGER}
+      - {name: order_api_generated,       type: BOOLEAN}
+      - {name: partial_chargeback,        type: BOOLEAN}
+      - {name: status_history,            type: JSON}
+
+# Hourly: alerts are time-sensitive (RDR / Ethoca refund windows are
+# measured in hours), and an incremental run inside a 7-day lookback is
+# cheap. Note the token-invalidation caveat above before scheduling two
+# configs against the same account.
+schedule: "0 * * * *"

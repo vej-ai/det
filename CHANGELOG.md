@@ -10,6 +10,25 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Added
+
+- **Baked `chargebacks911` source connector** — Chargebacks911's CBAPIv2
+  (`api.cbresponseservices.com/v2`; sandbox overridable via `base_url`). Two
+  incremental streams, both merge-on-`id` with a server-side
+  `date_column=date_updated` filter and a configurable `lookback_days`
+  overlap: `alerts` (prevention alerts — Ethoca/Verifi/RDR; camelCase
+  fields, cursor on `dateUpdated`) and `chargebacks` (chargeback cases;
+  snake_case fields, cursor on `date_updated`, nested `status_history`
+  landing as a JSON column). The client handles CB911's two-step auth —
+  Basic-auth `GET /auth` mints a ~60-minute bearer token that a NEW mint
+  invalidates — by minting lazily, proactively re-minting after ~50
+  minutes, and re-minting once on a mid-run 401. Bounded retries for 429
+  (honoring `Retry-After`), 5xx, and network errors; defensive unwrapping
+  of both the `{success, code, message, data}` envelope and the bare-list
+  responses live production sometimes returns. Credentials come from
+  `${env.CHARGEBACKS911_USERNAME}` / `${env.CHARGEBACKS911_PASSWORD}` and
+  never appear in logs or error messages.
+
 ## [0.7.0] — 2026-07-25
 
 Graceful schema-drift handling: an upstream schema change (a new column, a
