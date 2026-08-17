@@ -10,6 +10,8 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-17
+
 ### Added
 
 - **New baked source: `singular`** — Singular.net Reporting API (mobile
@@ -835,7 +837,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/vej-ai/dtex/releases/tag/v0.9.0
 [0.8.2]: https://github.com/vej-ai/dtex/releases/tag/v0.8.2
 [0.8.1]: https://github.com/vej-ai/dtex/releases/tag/v0.8.1
 [0.8.0]: https://github.com/vej-ai/dtex/releases/tag/v0.8.0
