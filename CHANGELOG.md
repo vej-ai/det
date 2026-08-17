@@ -10,6 +10,37 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Added
+
+- **New baked source: `singular`** — Singular.net Reporting API (mobile
+  attribution). Two streams, both daily-grain, incremental on `date`,
+  `merge` on the dimensional key, fetched through the async
+  create → poll → download report flow with capped 429/5xx/network retry:
+  - `network_reports` — one row per
+    (date × app × source × os × platform × country × campaign) with
+    `adn_cost` / `adn_impressions` / `custom_clicks` / `custom_installs`
+    and Singular's attributed cohort `revenue` (period `actual`). No
+    filters — every source including organic.
+  - `agency_reports` — the same report fetched once per configured agency
+    (`agencies` param) and tagged with the agency value, because the
+    Reporting API accepts `agency_name` as a *filter* but not as a
+    *group-by* — agency membership is otherwise unrecoverable.
+
+  Windows cover (cursor − `lookback_days`, floored at
+  `initial_since_date`) → **yesterday** (today is a partial day and is
+  never fetched), sliced into `window_chunk_days` chunks — one async
+  report each, so a long backfill never rides on a single giant request.
+  The generous default lookback (30 d) exists because Singular numbers
+  restate: networks report late and cohort revenue matures after the
+  install day; `merge` upserts the corrected values in place. The cursor
+  advances once, only after every window fetched cleanly. Dimension
+  values are coerced to strings (`''` for missing) — they are merge-key
+  columns, and NULLs never match in a MERGE. Auth: `SINGULAR_API_KEY`
+  (env by default; override with a `secret://` ref per deployment). The
+  signed report `download_url` is fetched WITHOUT the auth header — some
+  object stores reject requests presenting both a query signature and an
+  `Authorization` header.
+
 ## [0.8.2] — 2026-08-04
 
 ### Fixed

@@ -1,0 +1,109 @@
+name: singular
+kind: source
+version: "0.1.0"
+summary: Singular Reporting API — daily ad-network campaign stats with attributed cohort revenue, plus agency-tagged pulls.
+tags: [singular, attribution, mobile, marketing, spend, ua]
+
+requires:
+  - "requests>=2.31"
+
+params:
+  base_url:
+    type: string
+    default: "https://api.singular.net/api"
+  initial_since_date:
+    type: string
+    default: "2024-01-01"
+    description: >-
+      First date ever fetched (YYYY-MM-DD). Used on the first run and as the
+      floor for lookback re-fetches. Override per deployment to the org's
+      actual data start so the bootstrap doesn't walk empty months.
+  lookback_days:
+    type: int
+    default: 30
+    description: >-
+      Days re-fetched behind the cursor on every run. Singular numbers
+      RESTATE: networks report late and the cohort `revenue` metric keeps
+      maturing after the install day, so a generous window keeps recent
+      rows converging on their final values (merge upserts them in place).
+      NOTE the engine applies no lookback itself — this connector owns the
+      subtraction.
+  window_chunk_days:
+    type: int
+    default: 31
+    description: >-
+      Max span of ONE async report request. The (cursor − lookback) → yesterday
+      range is sliced into chunks this wide; each chunk is one
+      create → poll → download cycle that retries independently, so a long
+      backfill cannot ride on a single giant report.
+  agencies:
+    type: string
+    default: ""
+    description: >-
+      Comma-separated agency filter values (Singular's internal `agency_name`
+      values, e.g. "agency-a") for the agency_reports stream. Singular's report API
+      can FILTER by agency but cannot GROUP BY it, so each listed agency is
+      fetched separately and its rows tagged with the value. Empty = the
+      agency_reports stream yields nothing.
+  poll_timeout_sec:
+    type: int
+    default: 600
+  poll_interval_sec:
+    type: float
+    default: 5.0
+
+secrets:
+  - name: api_key
+    ref: ${env.SINGULAR_API_KEY}
+
+streams:
+  - name: network_reports
+    table: network_reports
+    primary_key:
+      [date, app, source, os, platform, country_field,
+       adn_campaign_id, adn_campaign_name]
+    write_disposition: merge
+    incremental:
+      cursor_field: date
+      cursor_type: date
+    schema:
+      - {name: date,              type: DATE,    mode: REQUIRED}
+      - {name: app,               type: STRING,  mode: REQUIRED}
+      - {name: source,            type: STRING,  mode: REQUIRED}
+      - {name: os,                type: STRING,  mode: REQUIRED}
+      - {name: platform,          type: STRING,  mode: REQUIRED}
+      - {name: country_field,     type: STRING,  mode: REQUIRED}
+      - {name: adn_campaign_id,   type: STRING,  mode: REQUIRED}
+      - {name: adn_campaign_name, type: STRING,  mode: REQUIRED}
+      - {name: adn_impressions,   type: INTEGER}
+      - {name: custom_clicks,     type: INTEGER}
+      - {name: custom_installs,   type: INTEGER}
+      - {name: adn_cost,          type: FLOAT}
+      - {name: revenue,           type: FLOAT}
+
+  - name: agency_reports
+    table: agency_reports
+    primary_key:
+      [date, agency, app, source, os, platform, country_field,
+       adn_campaign_id, adn_campaign_name]
+    write_disposition: merge
+    incremental:
+      cursor_field: date
+      cursor_type: date
+    schema:
+      - {name: date,              type: DATE,    mode: REQUIRED}
+      - {name: agency,            type: STRING,  mode: REQUIRED}
+      - {name: app,               type: STRING,  mode: REQUIRED}
+      - {name: source,            type: STRING,  mode: REQUIRED}
+      - {name: os,                type: STRING,  mode: REQUIRED}
+      - {name: platform,          type: STRING,  mode: REQUIRED}
+      - {name: country_field,     type: STRING,  mode: REQUIRED}
+      - {name: adn_campaign_id,   type: STRING,  mode: REQUIRED}
+      - {name: adn_campaign_name, type: STRING,  mode: REQUIRED}
+      - {name: adn_impressions,   type: INTEGER}
+      - {name: custom_clicks,     type: INTEGER}
+      - {name: custom_installs,   type: INTEGER}
+      - {name: adn_cost,          type: FLOAT}
+      - {name: revenue,           type: FLOAT}
+
+schedule: "0 6 * * *"
