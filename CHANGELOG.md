@@ -10,6 +10,57 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-04
+
+### Added
+
+- **New baked source: `meta`** — Meta (Facebook / Instagram) Marketing API
+  Insights, created by
+  [Auste Luksaite](https://www.linkedin.com/in/austeluksaite/). Two
+  streams, both incremental on `date_start` (DATE), `merge` on the natural
+  grain, partitioned by `date_start`, fetched through Meta's **asynchronous
+  report jobs** (`POST /act_<id>/insights` → poll `async_status` → page the
+  result with `after` cursors) because a synchronous ad-level GET over a
+  week of a large account fails with Meta's `code 1 / subcode 99`:
+  - `ads_insights` — one row per (day × ad account × ad), `level=ad`,
+    `time_increment=1`: ids + names down to the ad, `objective`,
+    `optimization_goal`, `impressions` / `reach` / `frequency` / `clicks` /
+    `unique_clicks` / `spend` / `social_spend` / `full_view_impressions`,
+    and the `actions` / `action_values` / `unique_actions` /
+    `conversions` / `conversion_values` / `video_p*_watched_actions` /
+    `video_time_watched_actions` breakdowns landed as JSON arrays of
+    `{action_type, value}`. The requested field list is the `fields`
+    param, so a field Meta retires is dropped in config.
+  - `insights_hourly` — one row per (day × hour-of-day × ad account ×
+    campaign), `level=campaign` with the
+    `hourly_stats_aggregated_by_advertiser_time_zone` breakdown. The
+    `"HH:00:00 - HH:59:59"` value is parsed into the INTEGER `hour` key
+    (raw kept as `hour_range`); the hour is in the AD ACCOUNT's timezone,
+    so each account's `timezone_name` / `timezone_offset_hours_utc` is
+    fetched once per run and stamped on every row for downstream
+    conversion.
+
+  Every run walks `max(cursor − lookback_days, start_date)` → today in
+  `window_days` windows × configured `account_ids` (comma-separated, with
+  or without `act_`); the default 28-day lookback is Meta's longest
+  attribution restatement window and `merge` upserts corrections in place.
+  The cursor is observed only after every account of a window has been
+  yielded. A window whose job keeps ending `Job Failed` / `Job Skipped` is
+  **bisected** (the job fails before any page is fetched, so nothing is
+  double-landed); a 1-day window that still fails raises. Transport:
+  paced requests (`page_delay_seconds`), hard `(10, 120)` s timeouts,
+  jittered bounded retry on 429 / Meta's rate-limit codes (4, 17, 32,
+  613, 80000–80014) / 5xx / transient codes 1–2, a proactive 60 s pause
+  when the `x-business-use-case-usage` / `x-ad-account-usage` headers
+  exceed 80 %, and immediate loud failure on deterministic errors (190
+  bad token, 200/10 missing permission, 100 bad field) with the token
+  redacted from every URL and message. Per-stream `params:` (e.g. a wider
+  `window_days` and later `start_date` for the ~100× smaller hourly
+  stream) size each backfill independently. Auth: `META_ACCESS_TOKEN`
+  (an `ads_read` token; a never-expiring Business Manager system-user
+  token is recommended). 19 new tests: stubbed Graph API transport, pure
+  helpers, walk / bisection, and end-to-end via `dtex.run` into DuckDB.
+
 ## [0.9.0] — 2026-08-17
 
 ### Added
@@ -837,7 +888,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/vej-ai/dtex/releases/tag/v0.10.0
 [0.9.0]: https://github.com/vej-ai/dtex/releases/tag/v0.9.0
 [0.8.2]: https://github.com/vej-ai/dtex/releases/tag/v0.8.2
 [0.8.1]: https://github.com/vej-ai/dtex/releases/tag/v0.8.1
