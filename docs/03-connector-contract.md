@@ -481,6 +481,19 @@ engine persists the observed max to the state table (§3.5). The connector never
 writes cursor state itself — that is the engine's job, which is what makes
 "resume after crash" correct by construction.
 
+The persisted cursor is a **monotonic high-water mark**: what the engine
+commits (at every mid-stream flush and at the end) is
+`max(observed, prior cursor)`. A connector that re-walks a lookback window
+behind its cursor observes values *below* the prior cursor first; if the run
+is killed partway, the partial walk's maximum would otherwise be committed and
+the cursor would move *backwards* — no data is lost (the re-walk is
+idempotent), but freshness monitoring on `_dtex_state.cursor_value` would
+page for a pipeline that is fine. A one-shot `since:` re-pull is clamped the
+same way (it re-pulls rows; it does not rewind state — `dtex state reset`
+does). Values the engine cannot compare against the prior (a connector
+observing a type its `cursor_type` did not promise) fall back to the observed
+value with a warning.
+
 ### 3.3 `@resource` — alias
 
 `@resource` is a registered **alias** of `@stream`, provided so authors arriving

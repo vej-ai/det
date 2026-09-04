@@ -221,7 +221,11 @@ def transaction(conn: DuckConn, stream: StreamMeta) -> Iterator[None]:
     conn.conn.execute("BEGIN TRANSACTION")
     try:
         yield
-    except Exception:
+    except BaseException:
+        # BaseException, not Exception: a Ctrl-C / SIGTERM (KeyboardInterrupt /
+        # RunInterrupted) unwinding the stream must ROLLBACK too — otherwise
+        # the transaction stays open on this connection and the engine's
+        # lease release (its own BEGIN) fails, leaving the lease live.
         conn.conn.execute("ROLLBACK")
         # A rolled-back ``replace`` truncation never happened — clear the
         # per-run guard so a retry within the same run truncates again.
@@ -881,7 +885,7 @@ def acquire_leases(conn: DuckConn, leases: Sequence[LeaseRecord]) -> set[str]:
             won.add(lease.stream)
         conn.conn.execute("COMMIT")
         return won
-    except Exception:
+    except BaseException:
         conn.conn.execute("ROLLBACK")
         raise
 
@@ -926,7 +930,7 @@ def _update_leases(conn: DuckConn, leases: Sequence[LeaseRecord]) -> None:
                 ],
             )
         conn.conn.execute("COMMIT")
-    except Exception:
+    except BaseException:
         conn.conn.execute("ROLLBACK")
         raise
 

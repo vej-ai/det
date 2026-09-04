@@ -324,3 +324,180 @@ def test_no_prior_leases_means_every_stream_acquirable(
     conn = _conn(duckdb_destination, str(tmp_path / "w.duckdb"))
     coord = _coordinator(h, conn, "r1", None)
     assert coord.acquire_all(["a", "b", "c", "d"]) == {"a", "b", "c", "d"}
+
+
+# ===========================================================================
+# Interrupted runs release their leases (vej-ai/dtex#1)
+# ===========================================================================
+#
+# A run killed by the platform used to leave its ``_dtex_leases`` rows
+# ``running`` — the next scheduled run skipped every stream as "leased (live)"
+# for LEASE_STALE_SECONDS and moved no data. Ctrl-C (KeyboardInterrupt) and
+# SIGTERM (RunInterrupted, raised by the handler ``run()`` installs) now
+# unwind through the same finally: rollback, release, run record, close.
+
+
+def _write_interrupt_project(root: Path) -> None:
+    """A project with one project-local source whose stream interrupts itself.
+
+    ``DTEX_TEST_INTERRUPT`` picks the behaviour per run: ``kbi`` raises
+    KeyboardInterrupt after the first batch, ``sigterm`` sends the process
+    SIGTERM after the first batch, anything else runs clean.
+    """
+    import textwrap
+
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "dtex_project.yml").write_text(
+        "name: t\nversion: '1.0.0'\nsource_paths: [sources]\n"
+        "destination_paths: []\nconfig_paths: [configs]\n"
+    )
+    (root / "profiles.yml").write_text(
+        "duckdb:\n  default_target: dev\n  targets:\n    dev: {}\n"
+    )
+    (root / "configs").mkdir()
+    (root / "configs" / "p.yml").write_text(
+        "name: p\nsource: sigsrc\ndestination: duckdb\ntarget: dev\nstreams: all\n"
+    )
+    src = root / "sources" / "sigsrc"
+    src.mkdir(parents=True)
+    (src / "register.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: sigsrc
+            kind: source
+            version: "1.0.0"
+            summary: interrupts itself
+            streams:
+              - name: rows
+                table: rows_table
+                write_disposition: append
+                incremental:
+                  cursor_field: id
+                  cursor_type: int
+                schema:
+                  - {name: id, type: INTEGER}
+            """
+        )
+    )
+    (src / "source.py").write_text(
+        textwrap.dedent(
+            """\
+            import os
+            import signal
+            from collections.abc import Iterator
+
+            from dtex import Batch, Cursor, stream
+
+
+            @stream(name="rows")
+            def rows(cursor: Cursor) -> Iterator[Batch]:
+                cursor.observe(1)
+                yield [{"id": 1}]
+                mode = os.environ.get("DTEX_TEST_INTERRUPT", "")
+                if mode == "kbi":
+                    raise KeyboardInterrupt
+                if mode == "sigterm":
+                    os.kill(os.getpid(), signal.SIGTERM)
+                cursor.observe(2)
+                yield [{"id": 2}]
+            """
+        )
+    )
+
+
+def _interrupt_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, expected: type[BaseException]
+) -> str:
+    import duckdb
+
+    import dtex
+
+    _write_interrupt_project(tmp_path)
+    db = str(tmp_path / "w.duckdb")
+    monkeypatch.setenv("DTEX_TEST_INTERRUPT", mode)
+    with pytest.raises(expected):
+        dtex.run(config="p", project_dir=str(tmp_path), destination_params_override={"path": db})
+
+    conn = duckdb.connect(db)
+    leases = conn.execute(
+        "SELECT stream, status FROM _dtex_leases WHERE connector = 'sigsrc'"
+    ).fetchall()
+    runs = conn.execute("SELECT status, error_type FROM _dtex_runs").fetchall()
+    tables = {
+        r[0] for r in conn.execute("SELECT table_name FROM information_schema.tables").fetchall()
+    }
+    landed = (
+        conn.execute("SELECT count(*) FROM rows_table").fetchone()
+        if "rows_table" in tables
+        else (0,)
+    )
+    conn.close()
+
+    # The lease is released (not left ``running`` to block the next run)...
+    assert leases == [("rows", "failed")], leases
+    # ...the run record names the interruption...
+    assert runs == [("failed", expected.__name__)], runs
+    # ...and the per-stream transaction rolled back the partial load.
+    assert landed is not None and landed[0] == 0
+
+    # The very next run is NOT a no-op: the stream runs instead of being
+    # skipped as "leased (live)" for LEASE_STALE_SECONDS.
+    monkeypatch.setenv("DTEX_TEST_INTERRUPT", "")
+    result = dtex.run(
+        config="p", project_dir=str(tmp_path), destination_params_override={"path": db}
+    )
+    assert result.status.value == "succeeded", result.error
+    assert [(s.name, s.status.value, s.rows_loaded) for s in result.streams] == [
+        ("rows", "succeeded", 2)
+    ]
+    return db
+
+
+def test_keyboard_interrupt_releases_leases_and_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _interrupt_run(tmp_path, monkeypatch, "kbi", KeyboardInterrupt)
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGTERM"), reason="no SIGTERM")
+def test_sigterm_releases_leases_and_restores_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+
+    from dtex import RunInterrupted
+
+    before = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)  # the disposition run() installs over
+    try:
+        _interrupt_run(tmp_path, monkeypatch, "sigterm", RunInterrupted)
+        # run() restored the default disposition after each run.
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+def test_run_keeps_a_foreign_sigterm_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An embedding application's own SIGTERM handler is never replaced."""
+    import signal
+
+    import dtex
+
+    def mine(signum: int, frame: Any) -> None:  # pragma: no cover — never fires here
+        pass
+
+    _write_interrupt_project(tmp_path)
+    monkeypatch.setenv("DTEX_TEST_INTERRUPT", "")
+    before = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, mine)
+    try:
+        result = dtex.run(
+            config="p", project_dir=str(tmp_path),
+            destination_params_override={"path": str(tmp_path / "w.duckdb")},
+        )
+        assert result.status.value == "succeeded"
+        assert signal.getsignal(signal.SIGTERM) is mine
+    finally:
+        signal.signal(signal.SIGTERM, before)

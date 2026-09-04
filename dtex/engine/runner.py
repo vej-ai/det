@@ -42,6 +42,7 @@ Locked decisions honored here:
 from __future__ import annotations
 
 import logging
+import signal
 import sys
 import threading
 import traceback as _tb
@@ -83,6 +84,7 @@ from dtex.types import (
     PartitionType,
     PipelineConfig,
     RunConfig,
+    RunInterrupted,
     RunRecord,
     RunResult,
     RunStatus,
@@ -156,6 +158,78 @@ def _seed_value(
     if cursor_type is CursorType.TIMESTAMP:
         return datetime.fromisoformat(initial_value)
     return initial_value  # CursorType.STRING — verbatim.
+
+
+def _typed_cursor(value: Any, cursor_type: CursorType | None) -> Any:
+    """Coerce a cursor value to its declared Python type for comparison.
+
+    A persisted ``cursor_value`` comes back from ``_dtex_state`` as the JSON
+    scalar it was stored as (a DATE cursor reads back as ``"2026-08-28"``),
+    while a connector observes native values (``date(2026, 8, 28)``). Both
+    sides go through here before :func:`_floor_cursor` compares them.
+    Anything unparsable is returned verbatim — the caller falls back
+    gracefully on a failed comparison.
+    """
+    if value is None or cursor_type is None:
+        return value
+    try:
+        if cursor_type is CursorType.INT and not isinstance(value, bool):
+            return int(value)
+        if cursor_type is CursorType.DATE:
+            if isinstance(value, datetime):
+                return value.date()
+            if isinstance(value, date):
+                return value
+            return date.fromisoformat(str(value)[:10])
+        if cursor_type is CursorType.TIMESTAMP:
+            if isinstance(value, datetime):
+                return value
+            return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return value
+    return value
+
+
+def _floor_cursor(observed: Any, floor: Any, cursor_type: CursorType | None, log: Any) -> Any:
+    """Never move a persisted cursor backwards — ``max(observed, floor)``.
+
+    Every incremental cursor type dtex supports (timestamp / date / int /
+    string) is compared with ``>`` by :meth:`Cursor.observe`, so the cursor is
+    a monotonic high-water mark by contract. A run that re-walks a lookback
+    window behind its cursor observes values in ascending order; if it dies
+    partway (platform kill, timeout) the mid-stream flushes have recorded the
+    max of a PARTIAL walk — *earlier* than the cursor the run started from.
+    That decrease is never information (the source did not produce older
+    data; the run simply did not get far enough) and it makes freshness
+    monitoring on ``_dtex_state.cursor_value`` page for a pipeline that is
+    fine. So the committed value is clamped to the prior persisted cursor.
+
+    ``floor`` is the prior ``_dtex_state`` row's cursor (``None`` on a virgin
+    stream, or under ``--full-refresh``, which never writes state anyway). An
+    explicit one-shot ``since:`` re-pull is clamped too — it exists to re-pull
+    rows, not to rewind state (``dtex state reset`` does that). Values that
+    cannot be compared (a connector observing a type the declaration did not
+    promise) fall back to the observed value with a warning, i.e. the
+    pre-clamp behaviour.
+    """
+    if floor is None:
+        return observed
+    if observed is None:
+        return floor
+    lhs = _typed_cursor(observed, cursor_type)
+    rhs = _typed_cursor(floor, cursor_type)
+    try:
+        return lhs if lhs >= rhs else rhs
+    except TypeError:
+        log.warning(
+            "cursor value %r (%s) is not comparable with the persisted cursor %r "
+            "(%s); committing the observed value as-is",
+            observed,
+            type(observed).__name__,
+            floor,
+            type(floor).__name__,
+        )
+        return observed
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +925,8 @@ def _run_one_stream(
 
     cursor: Cursor | None = None
     cursor_before: Any = None
+    cursor_floor: Any = None
+    cursor_type = stream_def.incremental.cursor_type if stream_def.incremental else None
     if stream_def.is_incremental:
         inc = stream_def.incremental
         assert inc is not None
@@ -873,6 +949,11 @@ def _run_one_stream(
         else:
             seed = _seed_value(prior, inc.cursor_type, inc.initial_value)
         cursor_before = None if is_full_refresh_stream else seed
+        # The prior persisted cursor is the floor every commit this run is
+        # clamped to (_floor_cursor): a partial re-walk of the lookback
+        # window must never move the high-water mark backwards.
+        if not is_full_refresh_stream and prior is not None:
+            cursor_floor = prior.cursor_value
         cursor = Cursor(
             cursor_field=inc.cursor_field,
             cursor_type=inc.cursor_type,
@@ -1013,6 +1094,7 @@ def _run_one_stream(
         cursor_now = cursor.observed_max if cursor is not None else None
         if cursor_now is None:
             cursor_now = cursor_before
+        cursor_now = _floor_cursor(cursor_now, cursor_floor, cursor_type, log)
         hooks["commit_state"](conn, run_config.run_id, [_build_state_record(cursor_now)])
 
     # -- 5c/5d: LOAD + COMMIT — inside the per-stream transaction -----------
@@ -1096,6 +1178,10 @@ def _run_one_stream(
         cursor_after = cursor_before
         if cursor is not None and cursor.observed_max is not None:
             cursor_after = cursor.observed_max
+        # Monotonic high-water mark: a re-walk that observed less than the
+        # prior cursor (fewer rows this time, or a `since:` re-pull) keeps
+        # the prior value — see _floor_cursor.
+        cursor_after = _floor_cursor(cursor_after, cursor_floor, cursor_type, log)
 
         # Final commit carries the terminal cursor + complete rows_total. It
         # always runs (subject to the same skip_state / capability guards as
@@ -1150,6 +1236,7 @@ def _build_run_record(
     streams: list[StreamResult],
     full_refresh: bool,
     final_result: RunResult | None,
+    aborted_by: BaseException | None = None,
 ) -> RunRecord:
     """Build the :class:`RunRecord` from the engine's run state — docs/09 §4.
 
@@ -1164,11 +1251,17 @@ def _build_run_record(
         ended_at = final_result.ended_at
         rows_loaded = final_result.rows_loaded
         error_type, error_message = _split_error(final_result.error)
-    else:  # pragma: no cover — only on BaseException between except/finally.
+    else:
+        # A BaseException (KeyboardInterrupt / RunInterrupted) unwound the run
+        # before a RunResult existed: FAILED, naming the interruption.
         status = RunStatus.FAILED
         ended_at = datetime.now(UTC)
         rows_loaded = sum(s.rows_loaded for s in streams)
-        error_type, error_message = ("BaseException", "run aborted before record")
+        if aborted_by is not None:
+            error_type = type(aborted_by).__name__
+            error_message = str(aborted_by) or f"run interrupted by {error_type}"
+        else:  # pragma: no cover — unknown BaseException between except/finally.
+            error_type, error_message = ("BaseException", "run aborted before record")
 
     return RunRecord(
         run_id=run_id,
@@ -1215,6 +1308,52 @@ def _stream_write_cap(
         return max(1, int(hook(Config(params=dict(dest_config.params)))))
     except Exception:  # noqa: BLE001 — planning-stage fallback, see docstring.
         return _UNLIMITED_CONCURRENCY
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM → RunInterrupted — release leases on a platform kill (docs/07 §3)
+# ---------------------------------------------------------------------------
+
+
+def _raise_run_interrupted(signum: int, _frame: Any) -> None:
+    raise RunInterrupted(f"terminated by signal {signum} (SIGTERM)")
+
+
+def _install_sigterm_handler() -> Any:
+    """Route SIGTERM to :class:`RunInterrupted` for the duration of a run.
+
+    Cloud Build, Kubernetes and a plain ``kill`` all send SIGTERM before the
+    hard kill; Python's default disposition just dies, which is how a killed
+    run used to leave its stream leases ``running`` (blocking the next
+    scheduled run for ``LEASE_STALE_SECONDS``) and its destination
+    transaction open. Raising in the main thread instead lets ``run()``'s
+    normal unwind do the bookkeeping.
+
+    Installed only from the main thread (``signal.signal`` refuses anything
+    else) and only when the current disposition is the default — an
+    embedding application or test harness that set its own handler keeps
+    it. Returns the previous handler for :func:`_restore_sigterm_handler`,
+    or ``None`` when nothing was installed.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    try:
+        previous = signal.getsignal(signal.SIGTERM)
+        if previous is not signal.SIG_DFL:
+            return None
+        signal.signal(signal.SIGTERM, _raise_run_interrupted)
+    except (ValueError, OSError, AttributeError):  # pragma: no cover — platform-specific.
+        return None
+    return previous
+
+
+def _restore_sigterm_handler(previous: Any) -> None:
+    if previous is None:
+        return
+    try:
+        signal.signal(signal.SIGTERM, previous)
+    except (ValueError, OSError):  # pragma: no cover — platform-specific.
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1751,6 +1890,20 @@ def run(
     # data (the in-memory shape is the source; the record is its
     # persistence-layer twin — docs/09 §4).
     final_result: RunResult | None = None
+    # The BaseException (KeyboardInterrupt / RunInterrupted) that unwound the
+    # run, if any — recorded into the run record by the finally block.
+    aborted_by: BaseException | None = None
+    # Stream leases held by this run (docs/05 §5.5) and their terminal
+    # statuses. Declared OUTSIDE the try so the finally block can release
+    # whatever is still held when a BaseException (Ctrl-C, SIGTERM) unwinds
+    # the run past the in-line release below — a killed run must not leave
+    # a live lease that makes the next scheduled run a no-op.
+    leases: _LeaseCoordinator | None = None
+    lease_statuses: dict[str, LeaseStatus] = {}
+    # SIGTERM → RunInterrupted, for the duration of this run only, main thread
+    # only, and only when nobody else installed a handler (a host application
+    # or ``run_tag``'s parallel workers keep whatever they have).
+    previous_sigterm = _install_sigterm_handler()
     # The shared redactor is created here so the JSONL writer (opened before
     # stage 2 RESOLVE) and the stdlib logger (rebuilt after secrets resolve)
     # both mask through the same mutable bag of secret values (docs/09 §5).
@@ -1917,7 +2070,6 @@ def run(
         # Only when the destination hosts leases. Otherwise ``leases`` stays
         # None and the whole path below is inert — the pre-leasing behavior,
         # so a destination without Capability.LEASE runs exactly as before.
-        leases: _LeaseCoordinator | None = None
         if Capability.LEASE in capabilities:
             leases = _LeaseCoordinator(
                 hooks,
@@ -1991,9 +2143,9 @@ def run(
         # fails the run (unchanged semantics). Leases are NOT touched here.
         stream_error: Exception | None = None
         error_lock = threading.Lock()
-        # Terminal lease status per stream, filled as streams finish and
-        # applied in one batched release after the dispatcher drains.
-        lease_statuses: dict[str, LeaseStatus] = {}
+        # ``lease_statuses`` (declared before the try): terminal lease status
+        # per stream, filled as streams finish and applied in one batched
+        # release after the dispatcher drains.
 
         def _execute_stream(stream_def: StreamDef) -> StreamResult:
             log.info("running stream %r", stream_def.name)
@@ -2161,6 +2313,15 @@ def run(
         )
         return final_result
 
+    except (KeyboardInterrupt, RunInterrupted) as exc:
+        # An interruption is NOT folded into a FAILED RunResult — it is
+        # re-raised after the finally block below has rolled back, released
+        # every held lease, written the run record and closed the
+        # destination. That is the difference between a kill and a crash:
+        # the caller (CLI: exit 130 / 143) decides, not the run loop.
+        aborted_by = exc
+        log.error("run interrupted: %s", type(exc).__name__)
+        raise
     except Exception as exc:  # noqa: BLE001 — run() never raises; see docstring.
         log.error("run failed: %s: %s", type(exc).__name__, exc)
         final_result = RunResult(
@@ -2180,12 +2341,18 @@ def run(
         )
         return final_result
     finally:
+        _restore_sigterm_handler(previous_sigterm)
+        # Release every lease this run still holds — a no-op after the
+        # in-line release on the normal path (release_all clears its held
+        # set), the ONLY release on an interrupted path. Runs before the
+        # run record and before close, while the connection is still open.
+        if leases is not None:
+            _safe_release_all(leases, lease_statuses, log)
         # The RunResult is built; rebind it into a RunRecord (the
         # persistence-layer twin — docs/09 §4) and persist it before
-        # close. ``final_result`` is None ONLY if a BaseException escaped
-        # both branches (e.g. KeyboardInterrupt during except-block
-        # assignment) — in that case we still want a record on disk if
-        # possible, so build one from the loose locals.
+        # close. ``final_result`` is None when a BaseException (Ctrl-C,
+        # SIGTERM) unwound the run — we still want a record on disk, so one
+        # is built from the loose locals with the interruption as its error.
         record = _build_run_record(
             run_id=run_id,
             config_name=config_name,
@@ -2196,6 +2363,7 @@ def run(
             streams=streams,
             full_refresh=full_refresh,
             final_result=final_result,
+            aborted_by=aborted_by,
         )
         # Run-record write goes BEFORE close, INSIDE the finally so it
         # runs on success and failure paths (docs/09 §4: "A run record is

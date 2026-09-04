@@ -83,11 +83,14 @@ def _hooks_with_log(
     *,
     include_commit_state: bool = True,
     write_batch_raises_on: int | None = None,
+    cursor_values: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Build a fake destination hook set that appends to ``events``.
 
     ``write_batch_raises_on`` — if set, the Nth (1-based) write_batch call
     raises, simulating a mid-stream crash *after* prior batches landed.
+    ``cursor_values`` — if given, every committed ``cursor_value`` (mid-stream
+    flushes and the final commit) is appended to it, in order.
     """
     state = {"writes": 0}
 
@@ -125,6 +128,8 @@ def _hooks_with_log(
             # assert what mid-stream state was captured.
             blob = dict(records[0].state_blob)
             events.append(("commit_state", blob.get("pk")))
+            if cursor_values is not None:
+                cursor_values.append(records[0].cursor_value)
 
         hooks["commit_state"] = commit_state
     return hooks
@@ -392,3 +397,163 @@ def test_full_refresh_incremental_stream_does_not_flush_state(
     assert not any(k == "commit_state" for k, _ in events), (
         "a FULL_REFRESH incremental stream must not write _dtex_state"
     )
+
+
+# ---------------------------------------------------------------------------
+# (f) the persisted cursor never moves backwards (vej-ai/dtex#1)
+# ---------------------------------------------------------------------------
+
+
+def _prior(cursor_value: Any, cursor_type: CursorType = CursorType.INT) -> StateRecord:
+    return StateRecord(
+        connector="src", stream="rows", cursor_value=cursor_value, cursor_type=cursor_type
+    )
+
+
+def _stream_def(cursor_type: CursorType = CursorType.INT) -> StreamDef:
+    base = _incremental_stream_def()
+    return StreamDef(
+        name=base.name,
+        table=base.table,
+        primary_key=base.primary_key,
+        write_disposition=base.write_disposition,
+        incremental=Incremental(cursor_field="updated_at", cursor_type=cursor_type),
+        schema=base.schema,
+    )
+
+
+def test_partial_lookback_rewalk_never_moves_cursor_backwards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stream at cursor 100 re-walks its lookback from 70 and dies at 90.
+
+    Every mid-stream flush before the crash used to persist the max of the
+    PARTIAL walk (70, 80, 90) — earlier than the 100 the run started from —
+    so a platform kill moved the cursor backwards and paged a freshness
+    monitor for a pipeline that was fine. The floor is the prior cursor.
+    """
+    monkeypatch.setattr(runner, "STATE_COMMIT_INTERVAL_SECONDS", 0)
+
+    def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
+        assert cursor.start_value() == 100  # the engine applies no lookback itself
+        for value in (70, 80, 90, 110, 120):  # connector-owned lookback re-walk
+            cursor.observe(value)
+            yield [{"id": value, "updated_at": value}]
+
+    events: list[tuple[str, Any]] = []
+    committed: list[Any] = []
+    hooks = _hooks_with_log(events, write_batch_raises_on=4, cursor_values=committed)
+
+    with pytest.raises(RuntimeError, match="simulated mid-stream crash"):
+        _run_one_stream(
+            _stream_def(),
+            _make_source(gen),  # type: ignore[arg-type]
+            hooks,
+            conn=object(),
+            run_config=_run_config(),
+            pipeline=_pipeline(),
+            prior=_prior(100),
+            log=LOG,
+        )
+
+    assert committed, "expected mid-stream flushes before the crash"
+    assert committed == [100, 100, 100], committed
+
+
+def test_cursor_floor_is_prior_when_rewalk_observes_less_and_advances_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "STATE_COMMIT_INTERVAL_SECONDS", 0)
+
+    def run_with(observed: list[int], prior: StateRecord | None) -> tuple[Any, list[Any]]:
+        def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
+            for value in observed:
+                cursor.observe(value)
+                yield [{"id": value, "updated_at": value}]
+
+        events: list[tuple[str, Any]] = []
+        committed: list[Any] = []
+        result = _run_one_stream(
+            _stream_def(),
+            _make_source(gen),  # type: ignore[arg-type]
+            _hooks_with_log(events, cursor_values=committed),
+            conn=object(),
+            run_config=_run_config(),
+            pipeline=_pipeline(),
+            prior=prior,
+            log=LOG,
+        )
+        return result.cursor_after, committed
+
+    # A full re-walk that tops out BELOW the prior (rows deleted at the
+    # source, or a shorter window) keeps the prior high-water mark.
+    after, committed = run_with([70, 80, 90], _prior(100))
+    assert after == 100 and committed[-1] == 100
+    # A walk that passes the prior advances normally.
+    after, committed = run_with([70, 120], _prior(100))
+    assert after == 120 and committed[-1] == 120
+    # A virgin stream (no prior row) is unaffected.
+    after, committed = run_with([70, 80], None)
+    assert after == 80 and committed[-1] == 80
+    # A stream that observed nothing keeps the prior (as before).
+    after, committed = run_with([], _prior(100))
+    assert after == 100 and committed[-1] == 100
+
+
+def test_cursor_floor_compares_typed_values_across_the_json_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DATE cursor reads back from ``_dtex_state`` as an ISO string while
+    the connector observes ``date`` objects — the clamp compares them typed
+    rather than crashing on ``date >= str`` or committing the partial value.
+    """
+    from datetime import date
+
+    monkeypatch.setattr(runner, "STATE_COMMIT_INTERVAL_SECONDS", 0)
+
+    def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
+        for day in (date(2026, 8, 19), date(2026, 8, 22)):
+            cursor.observe(day)
+            yield [{"id": day.day, "updated_at": day.day}]
+
+    events: list[tuple[str, Any]] = []
+    committed: list[Any] = []
+    result = _run_one_stream(
+        _stream_def(CursorType.DATE),
+        _make_source(gen),  # type: ignore[arg-type]
+        _hooks_with_log(events, cursor_values=committed),
+        conn=object(),
+        run_config=_run_config(),
+        pipeline=_pipeline(),
+        prior=_prior("2026-08-28", CursorType.DATE),
+        log=LOG,
+    )
+    assert result.cursor_after == date(2026, 8, 28)
+    assert all(v == date(2026, 8, 28) for v in committed), committed
+
+
+def test_cursor_floor_falls_back_to_observed_when_incomparable(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A STRING cursor observing ints against a str prior: no crash, the
+    observed value lands (the pre-clamp behaviour) and a warning says why."""
+    monkeypatch.setattr(runner, "STATE_COMMIT_INTERVAL_SECONDS", 0)
+
+    def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
+        cursor.observe(5)
+        yield [{"id": 5, "updated_at": 5}]
+
+    committed: list[Any] = []
+    with caplog.at_level(logging.WARNING, logger=LOG.name):
+        result = _run_one_stream(
+            _stream_def(CursorType.STRING),
+            _make_source(gen),  # type: ignore[arg-type]
+            _hooks_with_log([], cursor_values=committed),
+            conn=object(),
+            run_config=_run_config(),
+            pipeline=_pipeline(),
+            prior=_prior("abc", CursorType.STRING),
+            log=LOG,
+        )
+    assert result.cursor_after == 5 and committed[-1] == 5
+    assert any("not comparable" in r.getMessage() for r in caplog.records)

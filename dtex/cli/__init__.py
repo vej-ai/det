@@ -71,7 +71,7 @@ from dtex.cli._state import StateError, list_state, reset_state
 from dtex.engine import ConfigError, DiscoveryError, EngineError
 from dtex.engine import config as cfg
 from dtex.engine import discovery as disc
-from dtex.types import RunStatus
+from dtex.types import RunInterrupted, RunStatus
 
 # Exceptions the engine raises for "cannot start / cannot discover" problems.
 # The CLI catches these at the command boundary and prints a clean one-line
@@ -1413,6 +1413,11 @@ def main() -> None:
     except KeyboardInterrupt:  # pragma: no cover — interactive only.
         click.echo(click.style("interrupted", fg="yellow"), err=True)
         sys.exit(130)
+    except RunInterrupted as exc:  # pragma: no cover — SIGTERM from the platform.
+        # dtex.run already rolled back, released its leases and wrote the
+        # FAILED run record before re-raising (docs/07 §3).
+        click.echo(click.style(f"terminated: {exc}", fg="yellow"), err=True)
+        sys.exit(143)
 
 
 if __name__ == "__main__":

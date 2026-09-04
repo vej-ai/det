@@ -381,6 +381,20 @@ class RunStatus(_StrEnum):
     FAILED = "failed"
 
 
+class RunInterrupted(BaseException):
+    """The run was terminated by ``SIGTERM`` — docs/07 §3.
+
+    Raised in the main thread by the handler :func:`dtex.run` installs for the
+    duration of a run, so a platform kill (Cloud Build timeout, Kubernetes pod
+    eviction, ``kill <pid>``) unwinds the engine the same way Ctrl-C does:
+    the destination transaction rolls back, every lease this run holds is
+    released, the run record is written FAILED, and the destination closes.
+    Derives from :class:`BaseException` (like :class:`KeyboardInterrupt`) so
+    ``except Exception`` handlers in connectors and the engine never swallow
+    it. ``dtex.run`` re-raises it; the CLI exits 143.
+    """
+
+
 class StreamStatus(_StrEnum):
     """Terminal status of one stream within a run — docs/07 §4.1, docs/09 §2."""
 

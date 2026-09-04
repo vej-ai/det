@@ -323,7 +323,15 @@ the library.
 | `0` | Run succeeded. |
 | `1` | Run failed — extract / load error, or config / discovery / validation problem stopped the run. |
 | `2` | CLI usage error (missing flag, bad value). |
-| `130` | Interrupted (Ctrl-C / SIGTERM). |
+| `130` | Interrupted by Ctrl-C (`KeyboardInterrupt`). |
+| `143` | Terminated by `SIGTERM` (`dtex.RunInterrupted`) — a platform kill (Cloud Build timeout, Kubernetes eviction, `kill <pid>`). |
+
+On either interruption the engine has already rolled back the open per-stream
+transaction, released every stream lease the run held, written the FAILED run
+record (its `error_type` names the interruption) and closed the destination
+before the process exits — a killed run never blocks the next scheduled one.
+`dtex.run()` re-raises `KeyboardInterrupt` / `RunInterrupted` to a library
+caller after that same cleanup (it is the one case where `run()` raises).
 
 > # NOTE: docs/07 §3 originally specified a finer 0/1/2/3/130 table that split
 > config errors from load errors. The engine's `dtex.run()` returns a uniform

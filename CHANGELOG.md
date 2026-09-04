@@ -10,6 +10,38 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A killed run no longer leaves a live stream lease** (vej-ai/dtex#1).
+  A run that died to `SIGTERM` (Cloud Build timeout / `INTERNAL_ERROR`,
+  Kubernetes eviction, `kill <pid>`) or Ctrl-C left its `_dtex_leases` rows
+  `running`, so every scheduled run for the next `LEASE_STALE_SECONDS`
+  (15 min) skipped the streams as "leased (live)" and moved no data —
+  while reporting success. `dtex.run` now installs a `SIGTERM` handler
+  for the duration of the run (main thread only, and only when no other
+  handler is set) that raises the new `dtex.RunInterrupted`; both it and
+  `KeyboardInterrupt` unwind through one `finally` that rolls back the
+  open per-stream transaction, **releases every lease the run holds**
+  (`failed`), writes the FAILED run record naming the interruption, and
+  closes the destination — then re-raises. The CLI exits `130` on Ctrl-C
+  and `143` on SIGTERM. The DuckDB destination's `transaction` /
+  lease hooks now roll back on `BaseException` as well, so the release
+  can run on the same connection.
+- **An interrupted lookback re-walk no longer moves the cursor
+  backwards** (vej-ai/dtex#1). The engine commits the observed cursor at
+  every mid-stream flush; a connector that re-walks `lookback_days`
+  behind its cursor observes ascending values *below* the prior cursor
+  first, so a run killed partway persisted the maximum of the partial
+  walk — days *behind* where it started — and freshness monitoring on
+  `_dtex_state.cursor_value` paged for a pipeline that was fine. The
+  committed value is now `max(observed, prior cursor)` at every flush and
+  at the final commit (compared typed across the JSON boundary, e.g. a
+  DATE cursor read back as `"2026-08-28"` against an observed `date`);
+  a virgin stream, `--full-refresh`, and `dtex state reset` are
+  unaffected, and a one-shot `since:` re-pull is clamped too (it re-pulls
+  rows, it does not rewind state). Incomparable values fall back to the
+  observed value with a warning.
+
 ## [0.10.0] — 2026-09-04
 
 ### Added
