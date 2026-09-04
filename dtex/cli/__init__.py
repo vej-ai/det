@@ -1132,7 +1132,7 @@ def runs_show_cmd(
     if not events:
         click.echo("(log file is empty)")
         return
-    use_color = click.get_text_stream("stdout").isatty()
+    use_color = sys.stdout.isatty()
     for event in events:
         event_name = str(event.get("event", "?"))
         rendered = json.dumps(event, default=str)
