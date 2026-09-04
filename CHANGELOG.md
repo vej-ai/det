@@ -10,6 +10,8 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-09-04
+
 ### Fixed
 
 - **A killed run no longer leaves a live stream lease** (vej-ai/dtex#1).
@@ -920,7 +922,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/vej-ai/dtex/releases/tag/v0.10.1
 [0.10.0]: https://github.com/vej-ai/dtex/releases/tag/v0.10.0
 [0.9.0]: https://github.com/vej-ai/dtex/releases/tag/v0.9.0
 [0.8.2]: https://github.com/vej-ai/dtex/releases/tag/v0.8.2
