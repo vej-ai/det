@@ -13,6 +13,9 @@ available at:
 Portions of the ShipHero source connector (dtex/sources/shiphero/) were
 ported from a hand-written internal extract-load script.
 
+The Meta Marketing API source connector (dtex/sources/meta/) was created by
+Auste Luksaite (https://www.linkedin.com/in/austeluksaite/).
+
 This product depends on third-party Python packages declared in
 pyproject.toml. Each dependency is distributed under its own license; their
 notices accompany their respective distributions.

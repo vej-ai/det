@@ -66,6 +66,8 @@ auth checklist, scope requirements, schema, and known limitations.
 | [`revenuecat`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/revenuecat/README.md) | v2 API — customers + subscriptions + daily chart metrics |
 | [`chargebacks911`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/chargebacks911/README.md) | CBAPIv2 — prevention alerts + chargeback cases, incremental |
 | [`gads`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/gads/README.md) | Google Ads — GAQL query-as-stream + MCC account auto-discovery |
+| [`singular`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/singular/README.md) | Singular.net Reporting API — daily network + agency-tagged attribution reports |
+| [`meta`](https://github.com/vej-ai/dtex/blob/main/dtex/sources/meta/README.md) | Meta (Facebook / Instagram) Ads — ad-level daily + campaign-level hourly insights via async report jobs. Created by [Auste Luksaite](https://www.linkedin.com/in/austeluksaite/) |
 
 **Destinations:**
 

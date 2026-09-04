@@ -1,0 +1,269 @@
+# Meta (Facebook / Instagram) Ads — source connector for the Marketing API
+# Insights edge (GET /v<ver>/act_<id>/insights). Two streams:
+#
+# * `ads_insights` — ad-level daily performance (level=ad, time_increment=1)
+#   for every configured ad account: spend, impressions, reach, clicks and
+#   the action/conversion/video breakdown arrays, merge on
+#   (date_start, account_id, ad_id).
+# * `insights_hourly` — campaign-level hour-of-day performance
+#   (level=campaign, time_increment=1,
+#   breakdowns=hourly_stats_aggregated_by_advertiser_time_zone): spend,
+#   impressions, clicks, actions, action_values per (day, hour, account,
+#   campaign), merge on (date_start, hour, account_id, campaign_id). The
+#   hour is in the AD ACCOUNT's timezone; the account's timezone_name is
+#   landed on every row (fetched once per run via
+#   GET /act_<id>?fields=timezone_name,timezone_offset_hours_utc) so
+#   downstream SQL can convert it.
+#
+# API constraints baked in (developers.facebook.com/docs/marketing-api/insights):
+#   - ASYNC report jobs (POST /act_<id>/insights -> report_run_id, poll
+#     GET /<id> until "Job Completed", page GET /<id>/insights via
+#     paging.cursors.after). A synchronous GET at ad level over a week of
+#     a large account (~10k ads) fails with code 1 / subcode 99; async is
+#     Meta's documented remedy. time_range {since, until} is inclusive;
+#     the connector walks in window_days windows and BISECTS a window
+#     whose job keeps ending Job Failed / Job Skipped;
+#   - action breakdown fields (actions, action_values, conversions,
+#     video_p*_watched_actions, ...) come back as ARRAYS of
+#     {action_type, value} objects and land as JSON;
+#   - Meta RESTATES recent days (attribution windows up to 28 days, late
+#     conversions, deleted/rejected ads), so every run re-pulls
+#     lookback_days behind the cursor; merge on the natural grain keeps
+#     that idempotent;
+#   - rate limiting is per ad account, advertised in the
+#     x-business-use-case-usage / x-ad-account-usage headers and surfaced
+#     as HTTP 400 with error codes 4 / 17 / 32 / 613 / 80000-80014 —
+#     the client backs off on all of them (see client.py).
+#
+# Auth: an access token with the `ads_read` permission on every configured
+# account. A NEVER-EXPIRING Business Manager SYSTEM USER token is the
+# recommended kind for a scheduled pipeline (a user token expires in ~60
+# days). Sent as the access_token query param on every request; never
+# logged. See README.md.
+
+name: meta
+kind: source
+version: "0.1.0"
+summary: Meta Marketing API — ad-level daily + campaign-level hourly insights per ad account, via async report jobs.
+tags: [meta, facebook, instagram, ads, marketing, insights, spend]
+
+requires:
+  - "requests>=2.31"
+
+params:
+  base_url:
+    type: string
+    default: "https://graph.facebook.com"
+    description: Graph API root. Point at an http://localhost stub in unit tests.
+  api_version:
+    type: string
+    default: "v21.0"
+    description: >-
+      Graph API version segment. Meta retires versions ~2 years after
+      release; bump here when the deprecation warning appears in the logs.
+  account_ids:
+    type: string
+    required: true
+    description: >-
+      Comma-separated ad account ids, with or without the `act_` prefix
+      (e.g. "1234567890,act_9876543210"). Each stream loops every
+      (window, account) pair; every record carries its account_id.
+  start_date:
+    type: string
+    required: true
+    description: >-
+      First insights date (YYYY-MM-DD) pulled when there is no cursor yet
+      (virgin state or after `dtex state reset`). Deliberately a required
+      config param, NOT an incremental.initial_value: Insights history is
+      reachable for 37 months at most, so the honest floor is
+      per-deployment.
+  window_days:
+    type: int
+    default: 7
+    description: >-
+      Width of each async report job's time_range in days. One job per
+      (window, account); a week of a ~10k-ad account completes quickly.
+      Widen only if a run is dominated by job count; narrow if jobs end
+      Job Failed / Job Skipped (the connector bisects those automatically,
+      but a right-sized window avoids the wasted submits). The campaign-
+      level insights_hourly stream is ~100x smaller per day and can
+      override this per stream in the config (e.g. 30).
+  lookback_days:
+    type: int
+    default: 28
+    description: >-
+      Days re-pulled behind the persisted cursor on every run. 28 = the
+      longest attribution window Meta restates. Overlap is idempotent
+      (merge on the natural grain).
+  fields:
+    type: string
+    default: "account_id,account_name,account_currency,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,objective,optimization_goal,date_start,date_stop,impressions,reach,frequency,clicks,unique_clicks,spend,social_spend,full_view_impressions,actions,action_values,unique_actions,conversions,conversion_values,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p95_watched_actions,video_p100_watched_actions,video_time_watched_actions"
+    description: >-
+      Comma-separated Insights `fields` requested per call by the
+      ads_insights stream. (insights_hourly requests its own fixed campaign-
+      level field list, see source.py HOURLY_FIELDS.) A field Meta
+      rejects (removed in a newer api_version) fails the run with the
+      API's own message; drop it here, no code change needed. Fields not
+      declared in the stream schema still land via schema evolution
+      (scalars as STRING, arrays as JSON).
+  action_attribution_windows:
+    type: string
+    default: ""
+    description: >-
+      Optional comma-separated attribution windows (e.g. "7d_click,1d_view").
+      Empty = the ad account's own attribution setting. Set only if a
+      deliberate cross-account normalisation is wanted.
+  page_size:
+    type: int
+    default: 500
+    description: Rows per page (`limit`). Meta caps large pages itself; 500 is the documented sweet spot.
+  page_delay_seconds:
+    type: float
+    default: 0.5
+    description: >-
+      Mandatory sleep before EVERY request. Meta's ads_insights budget is
+      per ad account and generous at typical volumes; raise it if the
+      usage headers show >80% (logged) or 613/80000 errors appear.
+  max_retries:
+    type: int
+    default: 5
+    description: >-
+      Bounded retries for rate-limit / 5xx / network errors per request,
+      and bounded resubmits for an async job that ends Job Failed /
+      Job Skipped before the window is bisected.
+  poll_interval_seconds:
+    type: float
+    default: 5.0
+    description: Sleep between async_status polls of a submitted report job.
+  job_timeout_seconds:
+    type: float
+    default: 1800.0
+    description: >-
+      How long one async report job may stay incomplete before the run
+      fails red. A week of a large account completes in well under a
+      minute; 30 min is a stuck-job detector, not a working budget.
+
+secrets:
+  # Access token with ads_read on every configured account. Override the
+  # ref per deployment (`secret://` for a managed secret store).
+  - name: access_token
+    ref: ${env.META_ACCESS_TOKEN}
+
+streams:
+  # ads_insights — one row per (day, ad account, ad) with delivery.
+  # Days on which an ad had no delivery are simply absent (Meta does not
+  # return zero rows).
+  #
+  # Cursor: date_start (DATE). The walk yields every batch of a window
+  # before observing that window's last day, so a state flush at a later
+  # durable write can never mark rows "done" that were still in our
+  # buffer. Each run re-walks lookback_days behind the cursor
+  # (restatements). No initial_value ON PURPOSE: start_date governs the
+  # virgin run.
+  #
+  # Numeric fields arrive as STRINGS ("12.34", "1503") and NORMALIZE
+  # coerces them to the declared types; the *_actions arrays land as JSON.
+  - name: ads_insights
+    table: ads_insights
+    primary_key: [date_start, account_id, ad_id]
+    write_disposition: merge
+    partition_by: date_start
+    incremental:
+      cursor_field: date_start
+      cursor_type: date
+    schema:
+      - {name: date_start,            type: DATE,    mode: REQUIRED,
+         description: The day the row covers (time_increment=1) — cursor + partition column.}
+      - {name: date_stop,             type: DATE,
+         description: Same as date_start at daily grain.}
+      - {name: account_id,            type: STRING,  mode: REQUIRED,
+         description: Ad account id without the act_ prefix.}
+      - {name: ad_id,                 type: STRING,  mode: REQUIRED,
+         description: Ad id — the finest grain requested (level=ad).}
+      - {name: extracted_at,          type: TIMESTAMP, mode: REQUIRED,
+         description: When this run extracted the record.}
+      - {name: account_name,          type: STRING}
+      - {name: account_currency,      type: STRING}
+      - {name: campaign_id,           type: STRING}
+      - {name: campaign_name,         type: STRING}
+      - {name: adset_id,              type: STRING}
+      - {name: adset_name,            type: STRING}
+      - {name: ad_name,               type: STRING}
+      - {name: objective,             type: STRING}
+      - {name: optimization_goal,     type: STRING}
+      - {name: impressions,           type: INTEGER}
+      - {name: reach,                 type: INTEGER}
+      - {name: frequency,             type: FLOAT}
+      - {name: clicks,                type: INTEGER}
+      - {name: unique_clicks,         type: INTEGER}
+      - {name: spend,                 type: FLOAT,
+         description: Spend in account_currency.}
+      - {name: social_spend,          type: FLOAT}
+      - {name: full_view_impressions, type: INTEGER,
+         description: Viewable impressions.}
+      - {name: actions,               type: JSON,
+         description: "Array of {action_type, value}; sum action_type='purchase' for purchases."}
+      - {name: action_values,         type: JSON,
+         description: "Array of {action_type, value}; purchase value source."}
+      - {name: unique_actions,        type: JSON}
+      - {name: conversions,           type: JSON,
+         description: "Array of {action_type, value}."}
+      - {name: conversion_values,     type: JSON}
+      - {name: video_p25_watched_actions,  type: JSON}
+      - {name: video_p50_watched_actions,  type: JSON}
+      - {name: video_p75_watched_actions,  type: JSON}
+      - {name: video_p95_watched_actions,  type: JSON}
+      - {name: video_p100_watched_actions, type: JSON}
+      - {name: video_time_watched_actions, type: JSON}
+
+  # insights_hourly — one row per (day, hour-of-day, ad account, campaign)
+  # with delivery, hour in the ADVERTISER (ad account) timezone. Same
+  # async-job walk and cursor rule as ads_insights, own cursor; the
+  # config may override window_days / start_date per stream.
+  #
+  # `hour` is parsed from the breakdown value "HH:00:00 - HH:59:59"
+  # (kept raw as hour_range); rows without a parsable hour are unkeyable
+  # and dropped (logged). timezone_name / timezone_offset_hours_utc come
+  # from GET /act_<id> once per run and ride on every row.
+  - name: insights_hourly
+    table: insights_hourly
+    primary_key: [date_start, hour, account_id, campaign_id]
+    write_disposition: merge
+    partition_by: date_start
+    incremental:
+      cursor_field: date_start
+      cursor_type: date
+    schema:
+      - {name: date_start,            type: DATE,    mode: REQUIRED,
+         description: "The day the row covers, in the advertiser timezone — cursor + partition column."}
+      - {name: hour,                  type: INTEGER, mode: REQUIRED,
+         description: "Hour of day 0..23 in the ad account's timezone (timezone_name), parsed from hour_range."}
+      - {name: account_id,            type: STRING,  mode: REQUIRED,
+         description: Ad account id without the act_ prefix.}
+      - {name: campaign_id,           type: STRING,  mode: REQUIRED,
+         description: Campaign id — the grain requested (level=campaign).}
+      - {name: extracted_at,          type: TIMESTAMP, mode: REQUIRED,
+         description: When this run extracted the record.}
+      - {name: hour_range,            type: STRING,
+         description: "Raw breakdown value, e.g. \"13:00:00 - 13:59:59\"."}
+      - {name: timezone_name,         type: STRING,
+         description: "The ad account's IANA timezone (e.g. America/Los_Angeles) — what hour is expressed in."}
+      - {name: timezone_offset_hours_utc, type: FLOAT,
+         description: "The account's UTC offset at extraction time (informational; use timezone_name for DST-correct conversion)."}
+      - {name: date_stop,             type: DATE}
+      - {name: account_name,          type: STRING}
+      - {name: account_currency,      type: STRING}
+      - {name: campaign_name,         type: STRING}
+      - {name: impressions,           type: INTEGER}
+      - {name: clicks,                type: INTEGER}
+      - {name: spend,                 type: FLOAT,
+         description: Spend in account_currency for that hour.}
+      - {name: actions,               type: JSON,
+         description: "Array of {action_type, value}; sum action_type='purchase' for purchases."}
+      - {name: action_values,         type: JSON,
+         description: "Array of {action_type, value}; purchase value source."}
+
+# Advisory only. Daily is the natural cadence: Meta finalises a day's
+# numbers over the following days anyway, and the 28-day lookback absorbs
+# that.
+schedule: daily
