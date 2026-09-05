@@ -49,28 +49,42 @@ Run from `~/dev/simple_e`. Every check must pass.
 ```bash
 cd ~/dev/simple_e
 
-# Abort the block on the FIRST failing check. Without this, a
-# mid-block failure (e.g. ruff) is swallowed and the block exits 0
-# via the final cleanup — exactly how 0.2.0–0.2.4 shipped red lint.
-set -euo pipefail
+# Every check is guarded EXPLICITLY with `|| fail <name>`. Do NOT rely on
+# `set -e`: in the Claude Code shell a failing step inside a
+# `( set -euo pipefail; ... )` block did NOT abort the block (0.10.1 — an
+# AssertionError and a red pytest run were followed by "PRE-FLIGHT PASSED"),
+# and 0.2.0–0.2.4 shipped red lint the same way. Never pipe a check into
+# `tail`/`grep` without capturing its exit code first.
+fail() { echo "PRE-FLIGHT FAILED at: $1"; exit 1; }
+V=X.Y.Z
+# Throwaway venv in the session scratchpad (never /tmp — the user asked).
+S=<scratchpad directory from the system prompt>
 
 # 1. Build the wheel + sdist that will go to PyPI.
-rm -rf dist && .venv/bin/python -m build
+rm -rf dist && .venv/bin/python -m build || fail build
 
 # 2. Twine's structural check — catches malformed README, bad classifier.
-.venv/bin/twine check dist/*
+.venv/bin/twine check dist/* || fail twine
 
-# 3. Install in a throwaway venv.
-python3 -m venv /tmp/dtex_preflight
-/tmp/dtex_preflight/bin/pip install dist/dtex-X.Y.Z-py3-none-any.whl
+# 3. Install in a throwaway venv. Check the console script exists: a pip
+#    failure (e.g. "No space left on device" — 0.10.1) must not slip by.
+rm -rf "$S/dtex_preflight" && python3 -m venv "$S/dtex_preflight" || fail venv
+"$S/dtex_preflight/bin/pip" install "dist/dtex-$V-py3-none-any.whl" || fail install
+[ -x "$S/dtex_preflight/bin/dtex" ] || fail "install (no dtex script)"
 
 # 4. --version matches the tag (drift-detection).
-output=$(/tmp/dtex_preflight/bin/dtex --version)
-[ "$output" = "dtex, version X.Y.Z" ] || { echo "FAIL"; exit 1; }
+output=$(cd "$S" && "$S/dtex_preflight/bin/dtex" --version)
+[ "$output" = "dtex, version $V" ] || fail "version ($output)"
 
-# 5. Import-side __version__ matches.
-/tmp/dtex_preflight/bin/python -c \
-  "import dtex; assert dtex.__version__ == 'X.Y.Z'"
+# 5. Import-side __version__ matches — AND the import really comes from the
+#    wheel. Run from OUTSIDE the repo: `python -c` puts the cwd first on
+#    sys.path, so from ~/dev/simple_e this silently imported the checkout
+#    instead of the wheel (every release before 0.10.1 tested nothing here).
+(cd "$S" && "$S/dtex_preflight/bin/python" -c "
+import dtex
+assert dtex.__version__ == '$V', dtex.__version__
+assert 'dtex_preflight' in dtex.__file__, dtex.__file__
+import dtex.cli") || fail import
 
 # 6. README has no relative links (PyPI doesn't resolve them).
 .venv/bin/python -c "
@@ -80,31 +94,46 @@ html = render(open('README.md').read())
 assert html is not None
 hrefs = re.findall(r'href=\"([^\"]+)\"', html)
 rel = [h for h in hrefs if not h.startswith('http')]
-assert not rel, f'relative links: {rel}'"
+assert not rel, f'relative links: {rel}'" || fail readme
 
-# 7. Entry-points wired (the three secret resolvers).
-/tmp/dtex_preflight/bin/python -c "
+# 7. Entry-points wired (the three secret resolvers) — from outside the
+#    repo for the same reason as check 5.
+(cd "$S" && "$S/dtex_preflight/bin/python" -c "
 from importlib.metadata import entry_points
 schemes = sorted(ep.name for ep in entry_points(group='dtex.secret_resolvers'))
-assert schemes == ['aws-secrets-manager', 'gcp-secret-manager', 'vault']"
+assert schemes == ['aws-secrets-manager', 'gcp-secret-manager', 'vault'], schemes") || fail entrypoints
 
-# 8. Full test suite.
-.venv/bin/pytest -q --tb=no
+# 8. Full test suite. Capture the exit code BEFORE tailing the output.
+.venv/bin/pytest -q --tb=short -p no:cacheprovider > "$S/pytest.log" 2>&1; rc=$?
+tail -1 "$S/pytest.log"; [ "$rc" -eq 0 ] || fail pytest
 
 # 9. Lint — CI's ruff + mypy job runs these EXACT commands; red here
-#    means red CI on main.
-.venv/bin/ruff check .
+#    means red CI on main. NOTE: CI installs deps unpinned, so a new
+#    click/mypy release can turn CI red on untouched code (click 8.5.0 did,
+#    0.10.0); reproduce by upgrading the dep in .venv before blaming the diff.
+.venv/bin/ruff check . || fail ruff
 
 # 10. Types.
-.venv/bin/mypy dtex
+.venv/bin/mypy dtex || fail mypy
 
-rm -rf /tmp/dtex_preflight
+rm -rf "$S/dtex_preflight"
 echo "PRE-FLIGHT PASSED (all 10 checks)"
 ```
 
 Checks 8–10 are individually load-bearing: 0.2.0 through 0.2.4 each
-shipped with a red `ruff + mypy` CI job because these ran in a block
-without `set -e` and their failures were silently swallowed.
+shipped with a red `ruff + mypy` CI job because their failures were
+silently swallowed — hence the explicit `|| fail` on every line.
+
+Two more things the pre-flight does NOT check, learned the hard way:
+
+- **Disk space.** 0.10.1's first pre-flight died with "No space left on
+  device" inside the throwaway venv (the machine was at 100 %). Check
+  `df -h /` first if anything in step 3 or 8 fails oddly.
+- **Author metadata is public.** A contributor credited via
+  `git commit --author` ships their email to GitHub/PyPI forever (tags are
+  not rewritten). Use the contributor's GitHub noreply address
+  (`<id>+<login>@users.noreply.github.com`) unless they want their real
+  email public.
 
 **If anything fails: STOP. Fix the defect. Re-run the full pre-flight.**
 Do NOT proceed to tagging with a known failure.
@@ -148,7 +177,7 @@ git -c user.name="Albinas Plesnys" -c user.email="albus@vej.ai" \
 
 <one-paragraph summary, no agent commentary>
 
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+<the Co-Authored-By / Claude-Session attribution lines the session prompt specifies>"
 git push origin main
 
 # Wait for CI on main to go GREEN before tagging — tagging a red
@@ -236,9 +265,11 @@ If a release ships with a defect:
 1. **Tag pushes are irreversible.** Get explicit user confirmation in
    Phase 3 before `git push origin vX.Y.Z`.
 2. **Pre-flight before every release.** No exceptions. Ten checks,
-   ~60-second total runtime; cheaper than yanking. The block must run
-   with `set -euo pipefail` — a swallowed mid-block failure is how
-   0.2.0–0.2.4 shipped with red lint.
+   ~90-second total runtime; cheaper than yanking. Every check carries an
+   explicit `|| fail` — `set -e` alone did not abort a failing step in
+   the Claude Code shell (0.10.1), and a swallowed mid-block failure is
+   how 0.2.0–0.2.4 shipped with red lint. Import checks run from OUTSIDE
+   the repo so they exercise the wheel, not the checkout.
 3. **Never tag while CI on `main` is red.** The release-prep push must
    produce a green CI run before `git push origin vX.Y.Z`.
 4. **Version bumps go in pyproject.toml only.** `dtex/__init__.py` reads
@@ -246,9 +277,9 @@ If a release ships with a defect:
    hardcode the version in any other file.
 5. **CHANGELOG entries describe what shipped, not how we built it.** No
    stage citations, no agent commentary, no "we" voice.
-6. **Co-Authored-By line on every commit** — `Co-Authored-By: Claude
-   Opus 4.7 (1M context) <noreply@anthropic.com>` — for honest
-   attribution.
+6. **Attribution trailer on every commit** — the `Co-Authored-By` (and
+   `Claude-Session`) lines the current session prompt specifies, for
+   honest attribution. Do not hardcode a model name here; it changes.
 
 ## Pointers
 
