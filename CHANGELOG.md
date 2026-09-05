@@ -10,6 +10,14 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-09-05
+
+### Changed
+
+- Test fixtures, docstring examples and the `singular` connector's example
+  agency value now use neutral placeholder names. No functional change.
+  Earlier releases are being removed from PyPI; pin `>=0.10.2`.
+
 ## [0.10.1] — 2026-09-04
 
 ### Fixed
@@ -922,7 +930,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/vej-ai/dtex/releases/tag/v0.10.2
 [0.10.1]: https://github.com/vej-ai/dtex/releases/tag/v0.10.1
 [0.10.0]: https://github.com/vej-ai/dtex/releases/tag/v0.10.0
 [0.9.0]: https://github.com/vej-ai/dtex/releases/tag/v0.9.0
