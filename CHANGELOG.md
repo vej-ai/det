@@ -10,6 +10,8 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-07
+
 ### Changed
 
 - **`incremental.lookback` is now applied by the engine.** The handbook and
@@ -965,7 +967,8 @@ The first public release.
 - **Vulnerability reporting.** [`SECURITY.md`](./SECURITY.md) documents
   the private-disclosure channel and response timelines.
 
-[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/vej-ai/dtex/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/vej-ai/dtex/releases/tag/v0.11.0
 [0.10.2]: https://github.com/vej-ai/dtex/releases/tag/v0.10.2
 [0.10.1]: https://github.com/vej-ai/dtex/releases/tag/v0.10.1
 [0.10.0]: https://github.com/vej-ai/dtex/releases/tag/v0.10.0
