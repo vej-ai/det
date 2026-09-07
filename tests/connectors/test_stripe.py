@@ -467,8 +467,11 @@ def test_second_run_sends_created_gte_from_committed_cursor(
     charges_requests = [r for r in scenario.captured if r.path == "/charges"]
     assert len(charges_requests) >= 2
     second_charges = charges_requests[-1]
-    # Cursor advanced to the max `created` from run 1 == 1710000100.
-    assert second_charges.query_dict.get("created[gte]") == "1710000100"
+    # Cursor advanced to the max `created` from run 1 == 1710000100; the
+    # engine hands the stream that cursor MINUS the stream's declared
+    # ``lookback: 6h`` (21600 s on an int cursor), so late-arriving charges
+    # inside the window are re-pulled and MERGEd idempotently.
+    assert second_charges.query_dict.get("created[gte]") == str(1710000100 - 21600)
 
 
 def test_extra_query_params_propagate(

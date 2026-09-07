@@ -116,6 +116,7 @@ streams:
     write_disposition: merge
     incremental:
       cursor_field: updated_at
+      ordered: true   # keyset walk yields rows in cursor order; a mid-stream flush may persist the observed cursor
       cursor_type: timestamp
       lookback: 1h
       initial_value: "1970-01-01T00:00:00"
@@ -132,6 +133,7 @@ streams:
     write_disposition: merge
     incremental:
       cursor_field: occurred_at
+      ordered: true   # keyset walk yields rows in cursor order; a mid-stream flush may persist the observed cursor
       cursor_type: timestamp
       initial_value: "1970-01-01T00:00:00"
     schema:

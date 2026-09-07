@@ -20,9 +20,10 @@ tagged with ``# NOTE:`` comments.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum, StrEnum
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
@@ -939,23 +940,81 @@ class SecretRef:
         return ref.startswith(cls.ENV_PREFIX) or ref.startswith(cls.PROFILE_PREFIX)
 
 
+_LOOKBACK_UNITS: dict[str, int] = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+_LOOKBACK_RE = re.compile(r"^\s*(\d+)\s*([smhdw])?\s*$")
+
+
+def parse_lookback(text: str, cursor_type: CursorType) -> timedelta | int:
+    """Parse an ``incremental.lookback`` duration for a cursor type — docs/03 §2.2.
+
+    Grammar: ``<int><unit>`` with unit ``s`` / ``m`` / ``h`` / ``d`` / ``w``
+    (``"2d"``, ``"6h"``, ``"30m"``). The result the engine subtracts from the
+    persisted cursor before handing it to the stream:
+
+    * ``timestamp`` / ``date`` cursors — a :class:`~datetime.timedelta` (a
+      ``date`` cursor rounds a sub-day duration up to one day);
+    * ``int`` cursors — an integer: a bare number (``"100"``) is subtracted
+      as-is, a unit suffix is converted to SECONDS (``"6h"`` → 21600) because
+      an int cursor is almost always a Unix timestamp (Stripe's ``created``);
+    * ``string`` cursors have no arithmetic — declaring a lookback is an
+      error at discovery time.
+    """
+    match = _LOOKBACK_RE.match(str(text))
+    if match is None:
+        raise ValueError(
+            f"invalid lookback {text!r}: expected <int><unit> with unit s/m/h/d/w (e.g. '2d', '6h')"
+        )
+    amount, unit = int(match.group(1)), match.group(2)
+    if cursor_type is CursorType.STRING:
+        raise ValueError("lookback is not supported on a string cursor (no arithmetic)")
+    if cursor_type is CursorType.INT:
+        return amount * _LOOKBACK_UNITS[unit] if unit else amount
+    if unit is None:
+        raise ValueError(
+            f"invalid lookback {text!r}: a {cursor_type.value} cursor needs a unit "
+            "(e.g. '2d', '6h')"
+        )
+    seconds = amount * _LOOKBACK_UNITS[unit]
+    if cursor_type is CursorType.DATE:
+        return timedelta(days=max(1, -(-seconds // 86400)))
+    return timedelta(seconds=seconds)
+
+
 @dataclass(frozen=True)
 class Incremental:
     """A stream's cursor-based incremental config — mirrors ``register.yaml``.
 
     docs/03 §2.2 "The ``incremental`` block". Absence of this block on a stream
     means a full table is fetched every run.
+
+    ``lookback`` is applied BY THE ENGINE: ``cursor.start_value()`` on a
+    resumed run is the persisted cursor minus the lookback (see
+    :func:`parse_lookback`), never on the first run's ``initial_value`` or an
+    explicit ``since:`` override. ``ordered`` declares that the stream yields
+    records in non-decreasing cursor order; only then may the engine persist
+    the observed cursor at a mid-stream flush (a crash resumes from the last
+    durable batch). An unordered stream (the default — a per-object walk, a
+    fan-out over posts, anything that revisits older values late) keeps the
+    PRIOR cursor at every mid-stream flush and advances it only when the
+    stream completes, so a failed run cannot skip the rows it never reached.
     """
 
     cursor_field: str
     cursor_type: CursorType = CursorType.TIMESTAMP
     lookback: str | None = None
     initial_value: str | None = None
+    ordered: bool = False
+
+    def lookback_delta(self) -> timedelta | int | None:
+        """The parsed lookback (``None`` when not declared) — see :func:`parse_lookback`."""
+        if self.lookback is None:
+            return None
+        return parse_lookback(self.lookback, self.cursor_type)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Incremental:
         """Build an :class:`Incremental` from a parsed YAML mapping — docs/03 §2.2."""
-        known = {"cursor_field", "cursor_type", "lookback", "initial_value"}
+        known = {"cursor_field", "cursor_type", "lookback", "initial_value", "ordered"}
         unknown = set(data) - known
         if unknown:
             raise ValueError(f"unknown incremental key(s): {', '.join(sorted(unknown))}")
@@ -963,12 +1022,18 @@ class Incremental:
             raise ValueError("incremental block requires a 'cursor_field'")
         lookback = data.get("lookback")
         initial = data.get("initial_value")
-        return cls(
+        ordered = data.get("ordered", False)
+        if not isinstance(ordered, bool):
+            raise ValueError(f"incremental 'ordered' must be a boolean, got {ordered!r}")
+        inc = cls(
             cursor_field=str(data["cursor_field"]),
             cursor_type=CursorType.parse(data.get("cursor_type", CursorType.TIMESTAMP)),
             lookback=None if lookback is None else str(lookback),
             initial_value=None if initial is None else str(initial),
+            ordered=ordered,
         )
+        inc.lookback_delta()  # validate at discovery time, not at run time
+        return inc
 
 
 @dataclass(frozen=True)

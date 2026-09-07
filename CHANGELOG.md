@@ -10,6 +10,41 @@ For what is *planned* — versus what has shipped — see
 
 ## [Unreleased]
 
+### Changed
+
+- **`incremental.lookback` is now applied by the engine.** The handbook and
+  the `Cursor` docstring always said `cursor.start_value()` is "the persisted
+  cursor minus `lookback`", but the engine handed the stream the prior cursor
+  verbatim, so every register-declared window (`stripe` 6h, `cockroachdb` /
+  `postgres` 1h, project sources) was parsed and ignored. A resumed run now
+  starts at cursor minus the window; `initial_value` and a `since:` override
+  are untouched. Grammar: `<int><unit>` with `s`/`m`/`h`/`d`/`w`; an `int`
+  cursor takes a bare number as-is or a unit suffix in seconds (a Unix
+  timestamp cursor); a `date` cursor rounds up to whole days; a `string`
+  cursor rejects the key at discovery. The `shiphero` connector, which
+  subtracts its own `lookback_days`, no longer declares a register-level
+  lookback (it would have been applied twice).
+- **A failed or interrupted stream no longer advances its cursor.** Mid-stream
+  state flushes persisted the maximum cursor observed so far; for a stream
+  that yields older values late (a per-object fan-out that walks post A's
+  September comments before post B's August ones) a crash between the two
+  committed September as done and the next run skipped B. Flushes now keep
+  the **prior** cursor and the cursor advances only when the stream
+  completes. Streams that genuinely yield in cursor order — a keyset walk,
+  a date-window sweep — opt back into resume-from-last-batch with the new
+  `incremental.ordered: true` key; the `state_blob` resume pointer is
+  flushed either way.
+
+### Fixed
+
+- **A `merge` batch carrying the same primary key twice no longer lands the
+  key twice.** BigQuery `MERGE` inserts a key that is new to the target once
+  per staging row (no error), so overlapping API pages produced duplicate
+  rows with identical `_dtex_synced_at`; a duplicate that already existed
+  failed the statement instead. The engine now collapses each merge batch to
+  the last record per key before the write (logged), and the BigQuery
+  destination dedupes the staging table inside the `MERGE` as well.
+
 ## [0.10.2] — 2026-09-05
 
 ### Changed

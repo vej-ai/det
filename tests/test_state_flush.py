@@ -435,8 +435,8 @@ def test_partial_lookback_rewalk_never_moves_cursor_backwards(
     monkeypatch.setattr(runner, "STATE_COMMIT_INTERVAL_SECONDS", 0)
 
     def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
-        assert cursor.start_value() == 100  # the engine applies no lookback itself
-        for value in (70, 80, 90, 110, 120):  # connector-owned lookback re-walk
+        assert cursor.start_value() == 100  # no incremental.lookback declared here
+        for value in (70, 80, 90, 110, 120):  # connector-owned re-walk below the cursor
             cursor.observe(value)
             yield [{"id": value, "updated_at": value}]
 
@@ -557,3 +557,257 @@ def test_cursor_floor_falls_back_to_observed_when_incomparable(
         )
     assert result.cursor_after == 5 and committed[-1] == 5
     assert any("not comparable" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# (g) the engine applies incremental.lookback to the resume point
+# ---------------------------------------------------------------------------
+
+
+def _lookback_stream_def(
+    cursor_type: CursorType, lookback: str | None, ordered: bool = False
+) -> StreamDef:
+    base = _incremental_stream_def()
+    return StreamDef(
+        name=base.name,
+        table=base.table,
+        primary_key=base.primary_key,
+        write_disposition=base.write_disposition,
+        incremental=Incremental(
+            cursor_field="updated_at", cursor_type=cursor_type, lookback=lookback, ordered=ordered
+        ),
+        schema=base.schema,
+    )
+
+
+def _start_value_seen(
+    stream_def: StreamDef, prior: StateRecord | None, observed: list[Any]
+) -> Any:
+    """Run a one-batch stream and return the start value the engine handed it."""
+    seen: list[Any] = []
+
+    def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
+        seen.append(cursor.start_value())
+        for value in observed:
+            cursor.observe(value)
+        yield [{"id": 1, "updated_at": observed[-1]}]
+
+    _run_one_stream(
+        stream_def,
+        _make_source(gen),  # type: ignore[arg-type]
+        _hooks_with_log([]),
+        conn=object(),
+        run_config=_run_config(),
+        pipeline=_pipeline(),
+        prior=prior,
+        log=LOG,
+    )
+    return seen[0]
+
+
+def test_lookback_is_subtracted_from_the_persisted_cursor() -> None:
+    """A resumed run starts at cursor minus lookback, per cursor type."""
+    from datetime import UTC, date, datetime, timedelta
+
+    # int cursor, unit suffix -> seconds (a Unix-timestamp cursor).
+    assert _start_value_seen(
+        _lookback_stream_def(CursorType.INT, "6h"), _prior(1_000_000), [1_000_100]
+    ) == 1_000_000 - 21600
+    # int cursor, bare number -> subtracted as-is.
+    assert _start_value_seen(
+        _lookback_stream_def(CursorType.INT, "100"), _prior(1_000), [1_100]
+    ) == 900
+    # timestamp cursor persisted as the ISO string _dtex_state hands back.
+    ts = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
+    assert _start_value_seen(
+        _lookback_stream_def(CursorType.TIMESTAMP, "2d"),
+        _prior(ts.isoformat(), CursorType.TIMESTAMP),
+        [ts + timedelta(hours=1)],
+    ) == ts - timedelta(days=2)
+    # date cursor: a 6h lookback rounds up to a whole day.
+    assert _start_value_seen(
+        _lookback_stream_def(CursorType.DATE, "6h"),
+        _prior("2026-09-07", CursorType.DATE),
+        [date(2026, 9, 8)],
+    ) == date(2026, 9, 6)
+
+
+def test_lookback_does_not_apply_to_initial_value_or_since() -> None:
+    """The first run starts AT initial_value; a `since:` override is verbatim."""
+    base = _incremental_stream_def()
+    stream_def = StreamDef(
+        name=base.name,
+        table=base.table,
+        primary_key=base.primary_key,
+        write_disposition=base.write_disposition,
+        incremental=Incremental(
+            cursor_field="updated_at", cursor_type=CursorType.INT, lookback="100",
+            initial_value="500",
+        ),
+        schema=base.schema,
+    )
+    assert _start_value_seen(stream_def, None, [600]) == 500
+
+    seen: list[Any] = []
+
+    def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
+        seen.append(cursor.start_value())
+        yield [{"id": 1, "updated_at": 900}]
+
+    pipeline = PipelineConfig(
+        name="p",
+        source="src",
+        destination="dst",
+        streams={"rows": StreamRunConfig(since=800)},
+        all_streams=False,
+    )
+    _run_one_stream(
+        stream_def,
+        _make_source(gen),  # type: ignore[arg-type]
+        _hooks_with_log([]),
+        conn=object(),
+        run_config=_run_config(),
+        pipeline=pipeline,
+        prior=_prior(1_000),
+        log=LOG,
+    )
+    assert seen == [800]
+
+
+# ---------------------------------------------------------------------------
+# (h) mid-stream flushes advance the cursor only for `ordered` streams
+# ---------------------------------------------------------------------------
+
+
+def _run_flushing_stream(
+    stream_def: StreamDef, observed: list[int], crash_on: int | None
+) -> list[Any]:
+    committed: list[Any] = []
+    hooks = _hooks_with_log([], write_batch_raises_on=crash_on, cursor_values=committed)
+
+    def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
+        for value in observed:
+            cursor.observe(value)
+            yield [{"id": value, "updated_at": value}]
+
+    run = lambda: _run_one_stream(  # noqa: E731
+        stream_def,
+        _make_source(gen),  # type: ignore[arg-type]
+        hooks,
+        conn=object(),
+        run_config=_run_config(),
+        pipeline=_pipeline(),
+        prior=_prior(100),
+        log=LOG,
+    )
+    if crash_on is None:
+        run()
+    else:
+        with pytest.raises(RuntimeError, match="simulated mid-stream crash"):
+            run()
+    return committed
+
+
+def test_unordered_stream_keeps_prior_cursor_until_it_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-object walk yields 300 before it gets to 150: a flush that
+    persisted 300 would let a crash skip 150 forever. The default (unordered)
+    stream flushes the PRIOR cursor and advances only in the final commit."""
+    monkeypatch.setattr(runner, "STATE_COMMIT_INTERVAL_SECONDS", 0)
+    stream_def = _lookback_stream_def(CursorType.INT, None, ordered=False)
+    committed = _run_flushing_stream(stream_def, [300, 150, 400], crash_on=None)
+    # two mid-stream flushes at the prior value, then the final commit at the max
+    assert committed == [100, 100, 100, 400], committed
+
+
+def test_unordered_stream_that_crashes_leaves_the_prior_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "STATE_COMMIT_INTERVAL_SECONDS", 0)
+    stream_def = _lookback_stream_def(CursorType.INT, None, ordered=False)
+    committed = _run_flushing_stream(stream_def, [300, 150, 400], crash_on=3)
+    assert committed == [100, 100], committed
+
+
+def test_ordered_stream_flushes_the_observed_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ordered: true` opts back into the resume-from-last-batch behaviour."""
+    monkeypatch.setattr(runner, "STATE_COMMIT_INTERVAL_SECONDS", 0)
+    stream_def = _lookback_stream_def(CursorType.INT, None, ordered=True)
+    committed = _run_flushing_stream(stream_def, [110, 120, 130], crash_on=3)
+    assert committed == [110, 120], committed
+
+
+# ---------------------------------------------------------------------------
+# (i) merge batches are collapsed to one row per primary key
+# ---------------------------------------------------------------------------
+
+
+def test_merge_batch_keeps_last_row_per_primary_key() -> None:
+    base = _incremental_stream_def()
+    stream_def = StreamDef(
+        name=base.name,
+        table=base.table,
+        primary_key=("id",),
+        write_disposition=WriteDisposition.MERGE,
+        incremental=None,
+        schema=base.schema,
+    )
+    written: list[Batch] = []
+    hooks = _hooks_with_log([])
+    real_write = hooks["write_batch"]
+
+    def write_batch(conn: Any, batch: Batch, meta: Any) -> int:
+        written.append(list(batch))
+        return real_write(conn, batch, meta)
+
+    hooks["write_batch"] = write_batch
+
+    def gen(config: Config, state: Any, log: Any) -> Iterator[Batch]:
+        yield [
+            {"id": 1, "updated_at": 10},
+            {"id": 2, "updated_at": 20},
+            {"id": 1, "updated_at": 30},  # same key again — the freshest wins
+        ]
+
+    result = _run_one_stream(
+        stream_def,
+        _make_source(gen),  # type: ignore[arg-type]
+        hooks,
+        conn=object(),
+        run_config=_run_config(),
+        pipeline=_pipeline(),
+        prior=None,
+        log=LOG,
+    )
+    assert written == [[{"id": 2, "updated_at": 20}, {"id": 1, "updated_at": 30}]]
+    assert result.rows_extracted == 3 and result.rows_loaded == 2
+
+
+def test_append_batch_is_not_deduped() -> None:
+    stream_def = _incremental_stream_def()  # append
+    written: list[Batch] = []
+    hooks = _hooks_with_log([])
+    real_write = hooks["write_batch"]
+
+    def write_batch(conn: Any, batch: Batch, meta: Any) -> int:
+        written.append(list(batch))
+        return real_write(conn, batch, meta)
+
+    hooks["write_batch"] = write_batch
+
+    def gen(config: Config, state: Any, cursor: Any, log: Any) -> Iterator[Batch]:
+        cursor.observe(10)
+        yield [{"id": 1, "updated_at": 10}, {"id": 1, "updated_at": 10}]
+
+    _run_one_stream(
+        stream_def,
+        _make_source(gen),  # type: ignore[arg-type]
+        hooks,
+        conn=object(),
+        run_config=_run_config(),
+        pipeline=_pipeline(),
+        prior=None,
+        log=LOG,
+    )
+    assert len(written[0]) == 2

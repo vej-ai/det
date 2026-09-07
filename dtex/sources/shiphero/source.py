@@ -120,7 +120,8 @@ def extract_stream(
 
     1. Construct the client (lazy token acquisition on first ``query``).
     2. Compute the windowed start point from ``cursor.start_value()``, with
-       the connector's lookback subtraction applied (the engine does NOT do
+       the connector's lookback subtraction applied (the register declares no
+       incremental.lookback, so the engine does NOT do
        this — see ``windows.py`` NOTE).
     3. For each ``(date_from, date_to)`` window, paginate the GraphQL query
        with cursor-based pagination.

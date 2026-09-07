@@ -34,6 +34,9 @@ params:
     type: string
     default: "2024-01-01"
     description: Fallback initial cursor for streams that omit incremental.initial_value.
+  # The re-walk window is connector-owned here (compute_start subtracts it
+  # from cursor.start_value()); the streams therefore declare NO
+  # incremental.lookback, which the engine would subtract a second time.
   lookback_days:
     type: int
     default: 2
@@ -83,7 +86,6 @@ streams:
     incremental:
       cursor_field: created_date
       cursor_type: timestamp
-      lookback: 2d
       initial_value: "2024-01-01"
     schema:
       - {name: id,                  type: STRING,    mode: REQUIRED}
@@ -108,7 +110,6 @@ streams:
     incremental:
       cursor_field: order_date
       cursor_type: timestamp
-      lookback: 2d
       initial_value: "2024-01-01"
     schema:
       - {name: id,             type: STRING,    mode: REQUIRED}
@@ -135,7 +136,6 @@ streams:
     incremental:
       cursor_field: updated_at
       cursor_type: timestamp
-      lookback: 2d
       initial_value: "2024-01-01"
     schema:
       - {name: id,           type: STRING,    mode: REQUIRED}

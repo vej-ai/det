@@ -27,8 +27,9 @@ Both streams share the incremental strategy:
      with the last window's end date. A failed window aborts the run
      before the cursor moves, so the next run re-covers the same ground.
 
-The engine applies NO lookback of its own (the ``incremental.lookback``
-config key is parsed but dead) — the subtraction below is load-bearing.
+The streams declare no ``incremental.lookback`` (the engine would subtract it
+before the stream runs) — the connector-owned subtraction below, driven by
+the ``lookback_days`` param, is what re-covers the maturing window.
 """
 
 from __future__ import annotations

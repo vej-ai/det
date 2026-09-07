@@ -78,6 +78,7 @@ from dtex.types import (
     CursorType,
     Field,
     FieldType,
+    Incremental,
     LeaseRecord,
     LeaseStatus,
     PartitionConfig,
@@ -99,6 +100,7 @@ from dtex.types import (
     StreamRunConfig,
     StreamStatus,
     TimeGranularity,
+    WriteDisposition,
 )
 
 # The destination hooks the engine drives in a non-state-aware run. Tier A
@@ -138,16 +140,51 @@ class EngineError(Exception):
 # ---------------------------------------------------------------------------
 
 
+def _apply_lookback(value: Any, inc: Incremental, log: Any) -> Any:
+    """``value - incremental.lookback`` for a persisted cursor — docs/03 §3.2.
+
+    The persisted value comes back from ``_dtex_state`` as the JSON scalar it
+    was stored as (a TIMESTAMP cursor reads back as an ISO string), so it is
+    typed via :func:`_typed_cursor` first. A value the engine cannot do
+    arithmetic on is handed over unchanged with a warning — the stream still
+    resumes, just without the re-walk window.
+    """
+    delta = inc.lookback_delta()
+    if delta is None or value is None:
+        return value
+    typed = _typed_cursor(value, inc.cursor_type)
+    try:
+        if isinstance(delta, int):
+            return int(typed) - delta
+        return typed - delta
+    except (TypeError, ValueError):
+        log.warning(
+            "cursor value %r (%s) cannot take the declared lookback %r; resuming without it",
+            value,
+            type(value).__name__,
+            inc.lookback,
+        )
+        return value
+
+
 def _seed_value(
-    prior: StateRecord | None, cursor_type: CursorType, initial_value: str | None
+    prior: StateRecord | None,
+    cursor_type: CursorType,
+    initial_value: str | None,
+    inc: Incremental | None = None,
+    log: Any = None,
 ) -> Any:
     """Compute an incremental stream's resume point — docs/03 §3.2.
 
     The engine owns this (the smoke test's ``_resume_value`` was the manual
-    stand-in): the last committed cursor on a resumed run, else the manifest's
-    ``initial_value`` typed per ``cursor_type`` on the first run, else ``None``.
+    stand-in): the last committed cursor MINUS the declared ``lookback`` on a
+    resumed run, else the manifest's ``initial_value`` typed per
+    ``cursor_type`` on the first run (no lookback — there is nothing before
+    the beginning), else ``None``.
     """
     if prior is not None and prior.cursor_value is not None:
+        if inc is not None and inc.lookback is not None:
+            return _apply_lookback(prior.cursor_value, inc, log or logging.getLogger("dtex"))
         return prior.cursor_value
     if initial_value is None:
         return None
@@ -881,6 +918,39 @@ def _stream_transaction(
     return tx(conn, stream_meta)
 
 
+def _dedupe_merge_batch(batch: Batch, stream_def: StreamDef, log: Any) -> Batch:
+    """Keep the LAST record per primary key within one ``merge`` batch.
+
+    A destination's upsert is only well-defined for one source row per key:
+    BigQuery ``MERGE`` inserts a brand-new key once per staging row (two
+    identical comments landed twice this way) and rejects a batch whose
+    duplicate key already exists in the target ("UPDATE/MERGE must match at
+    most one source row"); DuckDB ``ON CONFLICT`` applies them in order. The
+    engine therefore collapses duplicates before the write, keeping the last
+    occurrence — the freshest snapshot the connector yielded. ``append`` and
+    ``replace`` batches are passed through untouched (duplicates there are
+    the connector's stated intent).
+    """
+    if stream_def.write_disposition is not WriteDisposition.MERGE or not stream_def.primary_key:
+        return batch
+    keys = tuple(stream_def.primary_key)
+    last: dict[tuple[Any, ...], int] = {}
+    for idx, record in enumerate(batch):
+        try:
+            last[tuple(record.get(k) for k in keys)] = idx
+        except TypeError:  # an unhashable key value — leave the batch alone
+            return batch
+    if len(last) == len(batch):
+        return batch
+    keep = sorted(last.values())
+    log.warning(
+        "stream %r: %d duplicate primary-key row(s) in one batch collapsed to the last occurrence",
+        stream_def.name,
+        len(batch) - len(keep),
+    )
+    return [batch[i] for i in keep]
+
+
 def _run_one_stream(
     stream_def: StreamDef,
     source: disc.LoadedConnector,
@@ -927,6 +997,7 @@ def _run_one_stream(
     cursor_before: Any = None
     cursor_floor: Any = None
     cursor_type = stream_def.incremental.cursor_type if stream_def.incremental else None
+    cursor_ordered = bool(stream_def.incremental.ordered) if stream_def.incremental else False
     if stream_def.is_incremental:
         inc = stream_def.incremental
         assert inc is not None
@@ -947,7 +1018,7 @@ def _run_one_stream(
             # just this once" without mutating _dtex_state.
             seed = stream_run.since
         else:
-            seed = _seed_value(prior, inc.cursor_type, inc.initial_value)
+            seed = _seed_value(prior, inc.cursor_type, inc.initial_value, inc, log)
         cursor_before = None if is_full_refresh_stream else seed
         # The prior persisted cursor is the floor every commit this run is
         # clamped to (_floor_cursor): a partial re-walk of the lookback
@@ -1087,13 +1158,17 @@ def _run_one_stream(
         if prev is not None and (now - prev).total_seconds() < STATE_COMMIT_INTERVAL_SECONDS:
             return
         last_state_flush[0] = now
-        # Persist the cursor observed so far (falling back to the run's seed
-        # when nothing has been observed yet) alongside the connector's
-        # in-progress state_blob — the resume pointer that makes an
-        # interrupted stream restart correctly.
-        cursor_now = cursor.observed_max if cursor is not None else None
-        if cursor_now is None:
-            cursor_now = cursor_before
+        # Persist the connector's in-progress state_blob — the resume pointer
+        # that makes an interrupted stream restart correctly — and, ONLY for a
+        # stream that declared ``incremental.ordered: true``, the cursor
+        # observed so far. An unordered stream (the default) yields older
+        # cursor values late (a per-object walk), so its partial maximum is
+        # not a safe resume point: persisting it would let a crashed run skip
+        # every row it never reached. Such a stream keeps the prior cursor at
+        # every flush and advances it only in the final commit.
+        cursor_now: Any = cursor_before
+        if cursor is not None and cursor.observed_max is not None and cursor_ordered:
+            cursor_now = cursor.observed_max
         cursor_now = _floor_cursor(cursor_now, cursor_floor, cursor_type, log)
         hooks["commit_state"](conn, run_config.run_id, [_build_state_record(cursor_now)])
 
@@ -1149,6 +1224,7 @@ def _run_one_stream(
         """
         nonlocal rows_extracted, rows_loaded
         rows_extracted += len(batch)
+        batch = _dedupe_merge_batch(batch, stream_def, log)
         _evolve_for_new_columns(batch)
         normalized = normalize_batch(
             batch, schema_cell[0], policy=drift_policy, on_drift=drift_reporter

@@ -271,6 +271,8 @@ This also fires when the existing table is **unpartitioned** and the config requ
 
 ## 4. Write dispositions
 
+For `merge` streams the engine collapses each batch to one record per primary key before `write_batch` (the last occurrence wins — the freshest snapshot the connector yielded). A destination upsert is only well-defined for one source row per key: BigQuery `MERGE` inserts a key that is new to the target once per staging row, and rejects a duplicate key that already exists; the BigQuery destination additionally dedupes the staging table inside the `MERGE` (`QUALIFY ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _dtex_synced_at DESC) = 1`) so the statement is correct on its own.
+
 Every stream declares a `write_disposition`. The engine passes it to `write_batch`; the destination implements it natively.
 
 | Disposition | Meaning | Requires |
@@ -312,6 +314,10 @@ One row per `(connector, stream)`. The cursor value is stored as JSON so it can 
 `cursor_field` is **not** a column — it is recoverable from the stream's manifest. `last_run_at` is **not** a column — it is recoverable by joining `_dtex_runs` on `last_run_id`.
 
 Primary key: `(connector, stream)`. The table is created lazily by `ensure_schema` on first run, in the same dataset/schema as the loaded tables, prefixed `_det_` so it sorts away from user tables.
+
+#### Mid-stream flushes
+
+While a stream runs, the engine re-commits its `_dtex_state` row at most every `STATE_COMMIT_INTERVAL_SECONDS`, strictly *after* a batch's rows are durable. The flush always carries the connector's in-progress `state_blob` (a bootstrap's resume pointer) and `rows_total` so far. What it carries as `cursor_value` depends on the stream's declaration: an `incremental.ordered: true` stream persists the maximum observed so far (its records arrive in cursor order, so everything below it has landed); any other stream persists the **prior** cursor and advances it only in the final end-of-stream commit — a per-object walk that yields a September comment before an August one must not let a crash between the two record September as done. A stream that fails therefore leaves its cursor exactly where the previous successful run left it.
 
 ### 5.2 The `StateRecord`
 

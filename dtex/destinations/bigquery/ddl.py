@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Albinas Plesnys
-
 """DDL + identifier helpers for the BigQuery destination — docs/05 §3.
 
 Keeps ``destination.py`` focused on the lifecycle hooks. This module owns:
@@ -31,6 +30,9 @@ from dtex.types import (
     Schema,
     TimeGranularity,
 )
+
+# The engine-stamped load timestamp; orders duplicate keys within a MERGE batch.
+SYNCED_AT_COLUMN = Schema.SYNCED_AT_COLUMN
 
 # --------------------------------------------------------------------------
 # Type mapping — docs/05 §3.1
@@ -293,9 +295,24 @@ def merge_sql(
     insert_cols = ", ".join(qcols)
     insert_vals = ", ".join(f"S.{c}" for c in qcols)
 
+    # One source row per key, or MERGE misbehaves: a duplicate key that is
+    # NEW to the target is inserted once per staging row (no error), and a
+    # duplicate key that already exists fails the statement ("UPDATE/MERGE
+    # must match at most one source row"). The engine already collapses
+    # duplicates per batch; this keeps the statement correct on its own.
+    pk_cols = ", ".join(quote_identifier(k, kind="column") for k in primary_key)
+    order_by = (
+        f" ORDER BY {quote_identifier(SYNCED_AT_COLUMN, kind='column')} DESC"
+        if SYNCED_AT_COLUMN in columns
+        else ""
+    )
+    source = (
+        f"(SELECT * FROM {staging} "
+        f"QUALIFY ROW_NUMBER() OVER (PARTITION BY {pk_cols}{order_by}) = 1)"
+    )
     parts = [
         f"MERGE INTO {target} T",
-        f"USING {staging} S",
+        f"USING {source} S",
         f"ON {on_clause}",
     ]
     if matched_branch:

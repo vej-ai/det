@@ -123,8 +123,9 @@ cursor into an API request is Python logic in the body.
 |---|---|---|---|---|
 | `cursor_field` | string | **Yes** | — | Record field whose max value is the incremental cursor (e.g. `created_date`). |
 | `cursor_type` | enum: `timestamp` \| `date` \| `int` \| `string` | No | `timestamp` | How the cursor value is compared and stored. |
-| `lookback` | duration string | No | `null` | Re-fetch window to catch late-arriving rows (e.g. `2d`, `6h`). |
+| `lookback` | duration string | No | `null` | Re-fetch window to catch late-arriving rows (e.g. `2d`, `6h`, `30m`). **Applied by the engine**: on a resumed run `cursor.start_value()` is the persisted cursor minus this window. Not applied to `initial_value` or a `since:` override. `int` cursors take a bare number (`"100"`, subtracted as-is) or a unit suffix converted to seconds (`"6h"` → 21600, a Unix-timestamp cursor); `date` cursors round up to whole days; `string` cursors cannot declare one. |
 | `initial_value` | string | No | `null` | Where to start on the first run (e.g. `"2025-01-01"`). |
+| `ordered` | bool | No | `false` | Declare that the stream yields records in non-decreasing cursor order (a keyset walk, a date-window sweep). Only then may a mid-stream state flush persist the cursor observed so far, so a crashed run resumes from its last durable batch. Leave it `false` for any walk that revisits older values late (per-object fan-outs): the engine then keeps the prior cursor at every flush and advances it only when the stream completes, so a crash can never skip rows the run did not reach. |
 
 #### 2.2.1 The `schema` field list
 
@@ -482,8 +483,10 @@ writes cursor state itself — that is the engine's job, which is what makes
 "resume after crash" correct by construction.
 
 The persisted cursor is a **monotonic high-water mark**: what the engine
-commits (at every mid-stream flush and at the end) is
-`max(observed, prior cursor)`. A connector that re-walks a lookback window
+commits at the end of a stream is `max(observed, prior cursor)`, and what a
+*mid-stream* flush commits is the prior cursor unless the stream declared
+`incremental.ordered: true` (then the observed maximum, which is a safe
+resume point only because the stream promised cursor order). A connector that re-walks a lookback window
 behind its cursor observes values *below* the prior cursor first; if the run
 is killed partway, the partial walk's maximum would otherwise be committed and
 the cursor would move *backwards* — no data is lost (the re-walk is

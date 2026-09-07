@@ -674,9 +674,15 @@ def test_merge_sql_two_key_three_column_update() -> None:
         primary_key=("id", "tenant"),
         columns=("id", "tenant", "name", "amount", "ts"),
     )
-    # Header — target + staging + ON clause.
+    # Header — target + a per-key deduped staging subquery + ON clause. The
+    # subquery keeps one staging row per primary key (the freshest by
+    # _dtex_synced_at when the column is present), so a batch that carries a
+    # key twice can neither insert it twice nor fail the MERGE.
     assert "MERGE INTO `my-proj`.`d`.`items` T" in sql
-    assert "USING `my-proj`.`d`.`items__staging_x` S" in sql
+    assert (
+        "USING (SELECT * FROM `my-proj`.`d`.`items__staging_x` "
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY `id`, `tenant`) = 1) S"
+    ) in sql
     assert "ON T.`id` = S.`id` AND T.`tenant` = S.`tenant`" in sql
     # WHEN MATCHED updates the three non-key columns only.
     assert "WHEN MATCHED THEN UPDATE SET" in sql
@@ -1315,7 +1321,11 @@ def test_write_batch_merge_loads_to_staging_runs_merge_drops_staging(
     assert len(bq.queries) == 1
     merge_sql_text = bq.queries[0]["sql"]
     assert "MERGE INTO `fake-project-id`.`fake_ds`.`events` T" in merge_sql_text
-    assert f"USING `fake-project-id`.`fake_ds`.`{staging_table}` S" in merge_sql_text
+    # The stamped _dtex_synced_at orders the per-key dedupe of the staging rows.
+    assert (
+        f"USING (SELECT * FROM `fake-project-id`.`fake_ds`.`{staging_table}` "
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY `id` ORDER BY `_dtex_synced_at` DESC) = 1) S"
+    ) in merge_sql_text
     # Staging table dropped.
     assert staging_table in bq.deleted_tables
 

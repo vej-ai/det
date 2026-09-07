@@ -994,3 +994,27 @@ def test_stream_def_partition_by_rejects_bad_shape() -> None:
     """A non-string, non-mapping partition_by (e.g. a list) fails at parse time."""
     with pytest.raises(ValueError, match="partition_by must be"):
         StreamDef.from_dict({"name": "rows", "partition_by": [1, 2, 3]})
+
+
+def test_incremental_ordered_and_lookback_parse() -> None:
+    from datetime import timedelta
+
+    from dtex.types import parse_lookback
+
+    inc = Incremental.from_dict({"cursor_field": "ts", "lookback": "2d", "ordered": True})
+    assert inc.ordered is True
+    assert inc.lookback_delta() == timedelta(days=2)
+    assert Incremental.from_dict({"cursor_field": "ts"}).ordered is False
+    assert parse_lookback("6h", CursorType.INT) == 21600
+    assert parse_lookback("100", CursorType.INT) == 100
+    assert parse_lookback("30m", CursorType.TIMESTAMP) == timedelta(minutes=30)
+    assert parse_lookback("6h", CursorType.DATE) == timedelta(days=1)
+    assert parse_lookback("2w", CursorType.DATE) == timedelta(days=14)
+    with pytest.raises(ValueError, match="needs a unit"):
+        parse_lookback("2", CursorType.TIMESTAMP)
+    with pytest.raises(ValueError, match="invalid lookback"):
+        parse_lookback("two days", CursorType.TIMESTAMP)
+    with pytest.raises(ValueError, match="string cursor"):
+        Incremental.from_dict({"cursor_field": "k", "cursor_type": "string", "lookback": "1d"})
+    with pytest.raises(ValueError, match="'ordered' must be a boolean"):
+        Incremental.from_dict({"cursor_field": "ts", "ordered": "yes"})
